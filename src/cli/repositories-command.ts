@@ -180,6 +180,7 @@ import {
   pushAttentionItems,
   type AttentionNotifier,
 } from '../notify/attention-notification.js';
+import type { PathProvider } from '../config/internal/path-provider.js';
 import { RUN_THREW, type RunCondition } from '../core/run-attention.js';
 import { settleAttention } from '../notify/attention-outbox.js';
 import { renderAttention, type AttentionReport } from './render-attention.js';
@@ -356,6 +357,16 @@ export interface RepositoriesCommandSeams {
    * and a test that wants to pin one must not have to reimplement the other.
    */
   readonly settleAttention?: typeof settleAttention;
+  /**
+   * Where the attention store lives. Production passes nothing.
+   *
+   * One seam for **both** halves of the outbox — the settle that reads and
+   * writes records, and the push that writes delivery receipts — because they
+   * are one store and a test that could point them at two different directories
+   * would be able to make the retry look like it worked when it had not. In
+   * production both are the OS provider, which is what passing nothing means.
+   */
+  readonly pathProvider?: PathProvider;
   /** Forwarded to the scheduler, and only reached under `--attended`. */
   readonly authPreflight?: () => Promise<AuthPreflightEvidence | null>;
   readonly agent?: AgentRunner;
@@ -519,6 +530,7 @@ export async function reportRepositories(
       else open.push(condition);
     }
 
+    const attentionStore = seams.pathProvider === undefined ? {} : { pathProvider: seams.pathProvider };
     const settlement = (seams.settleAttention ?? settleAttention)(
       driven.map((entry) => ({
         repositoryId: entry.repository.id,
@@ -526,6 +538,7 @@ export async function reportRepositories(
         conditions: conditions.get(entry.repository.root) ?? [],
       })),
       new Date().toISOString(),
+      attentionStore,
     );
     // What is announced is every open item **nobody has acknowledged**, which is
     // not the same as every item this pass newly wrote down (`U2`, M4).
@@ -540,7 +553,7 @@ export async function reportRepositories(
     // A delivered item carries a receipt and is not in this set, so the
     // repeated-pass silence the original sentence was protecting is intact: an
     // item that arrived is never sent twice.
-    const push = await pushAttentionItems(notifier, settlement.undelivered);
+    const push = await pushAttentionItems(notifier, settlement.undelivered, attentionStore);
     attentionReports.push({ settlement, push });
   };
 

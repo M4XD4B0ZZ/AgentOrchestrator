@@ -46,11 +46,23 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+import { Command } from 'commander';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
-import { leaseFor } from './helpers/lease.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
+import { passingReview } from './fixtures.js';
+import {
+  recordedAgent,
+  recordedVerify,
+  reload,
+  reviewResult,
+  seedDeliveredState,
+  startTask,
+  writerSuccess,
+  type StartedTask,
+} from './helpers/e2e-fixtures.js';
 
 import { fixedPathProvider } from '../src/config/internal/path-provider.js';
 import { ALL_STATES } from '../src/core/states.js';
@@ -82,8 +94,16 @@ import {
 } from '../src/cli/render-attention.js';
 import { resolveRepository } from '../src/repo/resolve-repository.js';
 import type { RegisteredRepository } from '../src/registry/repository-registry.js';
-import { LIFECYCLE_OUTCOMES } from '../src/run/lifecycle-driver.js';
-import { driveRepositories } from '../src/run/repository-coordinator.js';
+import { LIFECYCLE_OUTCOMES, type LifecycleResult } from '../src/run/lifecycle-driver.js';
+import {
+  driveRepositories,
+  type CrossRepositoryRunResult,
+} from '../src/run/repository-coordinator.js';
+import { registerRepositoriesCommand } from '../src/cli/repositories-command.js';
+import {
+  loadRepositoryRegistry,
+  repositoryRegistryPath,
+} from '../src/registry/repository-registry.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 
 /* ─────────────────────────────── fixtures ───────────────────────────────── */
@@ -743,5 +763,452 @@ describe('M4 / U2 — the outbox can be read without a notification endpoint', (
       'READ',
       'UNREADABLE_ROOT',
     ]);
+  });
+});
+
+/* ══ 4. U4 — an interrupted task is reconciled and driven on the next cycle ══ */
+
+/**
+ * A repository whose task was **interrupted mid-work**.
+ *
+ * Not a simulation of a crash's *cause* — no signal is sent and no process is
+ * killed — but a faithful reproduction of what a crash **leaves**: a real
+ * worktree on a real branch, a real commit the writing agent made, and a durable
+ * state parked in a work-loop phase with no ending recorded. That is exactly the
+ * disk an orchestrator killed inside `IMPLEMENTING` leaves behind, and it is the
+ * disk the next cycle has to deal with.
+ *
+ * The fixture lease is given back afterwards, because a crashed orchestrator
+ * does not keep holding one — and if it did, `U1` is the blocker that covers it
+ * and section 1 is where that is measured.
+ */
+async function interruptedTask(taskId: string): Promise<StartedTask> {
+  const started = await startTask({ taskId });
+  seedDeliveredState(started, { state: 'IMPLEMENTING', stateEnteredAt: NOW });
+  releaseTestLeases();
+  return started;
+}
+
+describe('M4 / U4 — the next cycle continues what the last one left', () => {
+  it('drives an interrupted task instead of refusing it, with nobody present', async () => {
+    // The claim `U4` makes about unattended running, measured end to end through
+    // the recurring loop's own entry point: "there is no retry an automation
+    // could perform."
+    //
+    // Every layer here is production code. The coordinator plans, admits, takes
+    // the real lease, and runs the real `driveLifecycle`; the only seams are the
+    // two subprocess boundaries, which is where a test must stop — a real
+    // `claude` invocation is not something a suite may make.
+    const started = await interruptedTask('T1');
+    const entry = Object.freeze({
+      declaredPath: started.root,
+      repository: started.repository,
+    });
+
+    const agent = recordedAgent({
+      claude: () => writerSuccess(),
+      codex: () => reviewResult(passingReview()),
+    });
+    const verify = recordedVerify();
+
+    const result = await driveRepositories(
+      { repositories: [entry], maxConcurrentRepositories: 1, maxSteps: 8, maxInvocations: 1 },
+      { ...DEPS, agent: agent.runner, verify: verify.runner },
+    );
+
+    // Admitted at all, which is the first thing a refusal would have prevented.
+    expect(result.admissions.map((admission) => admission.taskId)).toEqual(['T1']);
+    const lifecycle = result.admissions[0]?.lifecycle;
+
+    // The task was *driven*, not merely accepted. `TASK_NOT_STARTED` and
+    // `TASK_START_REFUSED` are the two refusals this case would have produced if
+    // an existing durable state were treated as an obstacle, and
+    // `CONTINUATION_NOT_AUTHORISED` is the one it would produce if the grant did
+    // not reach a reconciled in-flight task.
+    expect(lifecycle?.outcome).not.toBe('TASK_NOT_STARTED');
+    expect(lifecycle?.outcome).not.toBe('TASK_START_REFUSED');
+    expect(lifecycle?.outcome).not.toBe('CONTINUATION_NOT_AUTHORISED');
+    expect(lifecycle?.invocations).toBeGreaterThan(0);
+
+    // And the strongest evidence available, which is not an outcome code: the
+    // writing agent really ran, inside the task's own worktree. A run that
+    // classified the task as continuable and drove nothing would satisfy every
+    // assertion above and none of this one.
+    expect(agent.countFor('claude')).toBeGreaterThan(0);
+    // Separators normalised on both sides, and only the separators. The runner
+    // is handed a `cwd` in the spelling the boundary uses, and this assertion is
+    // about *which directory* the writer ran in — not about which of Windows's
+    // two spellings of it a seam happened to receive. Comparing the raw strings
+    // failed on that difference alone, which would have been a fixture detail
+    // masquerading as a finding.
+    const sameDirectory = (path: string): string => path.replace(/\\/g, '/');
+    expect(sameDirectory(agent.calls[0]?.cwd ?? '')).toBe(
+      sameDirectory(started.workspace.worktreePath),
+    );
+
+    // The record moved. `IMPLEMENTING` is where the interruption left it, so a
+    // state still reading `IMPLEMENTING` afterwards would mean the cycle
+    // reported progress it had not made.
+    expect(reload(started.root, 'T1').state.state).not.toBe('IMPLEMENTING');
+  });
+
+  it('keeps the interrupted attempt’s work rather than starting over', async () => {
+    // The half that distinguishes "reconcile and re-offer" from "settle and
+    // release". A mechanism that freed the task — removing the worktree, the
+    // branch and the id, and starting clean — would also satisfy "the next cycle
+    // does something", and it would silently throw away every commit the
+    // interrupted writer made.
+    //
+    // Measured on the commit itself: the base pin, the work branch and the
+    // commit the seeded work produced all survive the continuation.
+    const started = await interruptedTask('T2');
+    const before = reload(started.root, 'T2').state;
+    const entry = Object.freeze({
+      declaredPath: started.root,
+      repository: started.repository,
+    });
+
+    await driveRepositories(
+      { repositories: [entry], maxConcurrentRepositories: 1, maxSteps: 8, maxInvocations: 1 },
+      {
+        ...DEPS,
+        agent: recordedAgent({
+          claude: () => writerSuccess(),
+          codex: () => reviewResult(passingReview()),
+        }).runner,
+        verify: recordedVerify().runner,
+      },
+    );
+
+    const after = reload(started.root, 'T2').state;
+    expect(after.workBranch).toBe(before.workBranch);
+    expect(after.basePinnedCommit).toBe(before.basePinnedCommit);
+    expect(after.worktreePath).toBe(before.worktreePath);
+    // The interrupted attempt's commit is still reachable from the task's own
+    // branch — the work was continued from, not discarded and redone.
+    const reachable = execFileSync(
+      'git',
+      ['merge-base', '--is-ancestor', before.currentCommit ?? '', 'HEAD'],
+      { cwd: before.worktreePath, stdio: 'pipe' },
+    );
+    expect(reachable.toString()).toBe('');
+  });
+
+  it('needs no attendance flag and no operator input to do it', () => {
+    // What actually makes this unattended, held structurally rather than
+    // promised. The path from a scheduler cycle to a continued task passes
+    // through the coordinator, and the coordinator offers exactly one grant with
+    // every decision that departs from a durable record refused.
+    //
+    // A future change that continued an interrupted task by turning one of these
+    // on would be buying the same behaviour with an authority a selector may not
+    // have, and this turns red rather than the behaviour quietly changing
+    // meaning. The positive half — `recoverStaleLease: true` — is asserted in
+    // `tests/m2-05-cross-repository-concurrency.test.ts` beside the three that
+    // must stay false, so it cannot be flipped here without that failing too.
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'run', 'repository-coordinator.ts'),
+      'utf8',
+    )
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    expect(source).toContain('remediateVerifyFailure: false');
+    expect(source).toContain('continueHumanDecision: false');
+    expect(source).toContain('continueUsageLimit: false');
+    // And no interactive input of any kind reaches this path.
+    expect(source).not.toContain('process.stdin');
+    expect(source).not.toContain('readline');
+  });
+});
+
+describe('M4 / U4 — the crash shape that cannot be continued says so out loud', () => {
+  it('refuses a record the world no longer matches, and raises it for a person', async () => {
+    // The harder crash, and the one an argument would skip. An orchestrator
+    // killed mid-writer usually leaves the worktree *dirty* — the agent had
+    // edited files and nothing had committed them — so the durable state's
+    // `worktreeCleanAtCheckpoint: true` is no longer true of the disk.
+    //
+    // Continuing that automatically is precisely what this build must not do:
+    // the record and the repository disagree, and guessing which is right is how
+    // an unattended loop destroys work. So the closure of `U4` is not "every
+    // interruption is resumed"; it is "every interruption is either resumed or
+    // reported", and this is the second half.
+    const started = await interruptedTask('T3');
+    writeFileSync(
+      join(started.workspace.worktreePath, 'src', 'uncommitted.ts'),
+      'export const halfWritten = true;\n',
+      'utf8',
+    );
+    const entry = Object.freeze({
+      declaredPath: started.root,
+      repository: started.repository,
+    });
+
+    const agent = recordedAgent({});
+    const result = await driveRepositories(
+      { repositories: [entry], maxConcurrentRepositories: 1, maxSteps: 8, maxInvocations: 1 },
+      { ...DEPS, agent: agent.runner, verify: recordedVerify().runner },
+    );
+
+    const lifecycle = result.admissions[0]?.lifecycle;
+    // Nothing ran. Asserted on the seam rather than on the outcome, because the
+    // failure that matters here is a writer that started on a worktree whose
+    // contents nobody has accounted for.
+    expect(agent.calls).toEqual([]);
+    expect(lifecycle?.outcome).toBe('RECONCILIATION_DIVERGED');
+
+    // `RECONCILIATION_DIVERGED`, and it was written here from a measurement
+    // rather than from a prediction — the first draft of this case expected
+    // `RESUME_STATE_DIVERGED`, which is the *state* a task is parked in when a
+    // resume finds divergence, and not what a reconciliation under a held lease
+    // produces. The difference is the whole point of the case:
+    //
+    //   `RESUME_STATE_DIVERGED` is a durable task state, and the task scan
+    //   raises it. `RECONCILIATION_DIVERGED` is **not a state at all**. The
+    //   task stays where the interruption left it — `IMPLEMENTING`, which the
+    //   state table calls silent, correctly, because a running task needs
+    //   nobody.
+    //
+    // So before this slice this exact repository — the most ordinary crash there
+    // is, an orchestrator killed while its writer had files open — produced a
+    // condition that stopped all work and raised **nothing** in any channel. It
+    // is the plainest instance of `U3` in the whole product, and it is reached
+    // through `U4`'s own path.
+    expect(ALL_STATES as readonly string[]).not.toContain(lifecycle?.outcome ?? '');
+    expect(reload(started.root, 'T3').state.state).toBe('IMPLEMENTING');
+
+    const provider = fixedPathProvider(store());
+    const settlement = settleAttention(
+      [
+        {
+          repositoryId: started.repository.id,
+          repositoryRoot: started.root,
+          conditions: [lifecycle?.outcome ?? 'COMPLETED'],
+        },
+      ],
+      NOW,
+      { pathProvider: provider },
+    );
+
+    // One item, and it is a repository item, because no task record could carry
+    // this. That is `U3`'s closure doing the work `U4` needs: an interruption
+    // this build will not continue is one it reports instead.
+    expect(settlement.raised).toHaveLength(1);
+    expect(settlement.raised[0]?.subject).toBe('REPOSITORY');
+    expect(settlement.raised[0]?.reason).toBe('REPOSITORY_RECORD_UNUSABLE');
+  });
+});
+
+/* ════ 5. the wiring, driven through the command that actually does it ═════ */
+
+/**
+ * A coordinator result with one admission, ended however the case says.
+ *
+ * Only the fields the outbox path reads are real; the rest is filler. That is
+ * deliberate and is the one seam these cases use — what is on trial here is the
+ * **command's** wiring between a finished pass and the store, and a real
+ * coordinator would make the case about lease timing instead.
+ */
+function passWith(
+  repositoryId: string,
+  repositoryRoot: string,
+  ending: { readonly outcome?: RunCondition; readonly threw?: boolean },
+): CrossRepositoryRunResult {
+  return Object.freeze({
+    outcome: 'RUN_COMPLETE' as const,
+    planCode: 'TASK_SELECTED',
+    passes: 1,
+    maxObservedConcurrency: 1,
+    capacity: 1,
+    reasonCodes: Object.freeze([]),
+    admissions: Object.freeze([
+      Object.freeze({
+        repositoryId,
+        repositoryRoot,
+        taskId: 'T1',
+        sequence: 1,
+        concurrencyAtAdmission: 1,
+        threw: ending.threw === true,
+        lifecycle:
+          ending.outcome === undefined
+            ? null
+            : (Object.freeze({
+                outcome: ending.outcome,
+                taskId: 'T1',
+                acquire: null,
+                recovery: null,
+                release: null,
+                start: null,
+                runs: Object.freeze([]),
+                invocations: 0,
+                steps: 0,
+                reasonCodes: Object.freeze([]),
+                permissionDenials: Object.freeze({
+                  observed: false,
+                  denials: Object.freeze([]),
+                }),
+              }) as unknown as LifecycleResult),
+      }),
+    ]),
+  }) as unknown as CrossRepositoryRunResult;
+}
+
+/**
+ * Runs the real `repositories --attended --wait-for-reset` for one cycle.
+ *
+ * The store is real and the settle is real — only its *location* is redirected,
+ * through the one seam the command threads into both halves of the outbox. A
+ * test that could point the settle and the push at two directories would be able
+ * to make a retry look like it worked when it had not, which is why there is one
+ * seam and not two.
+ */
+async function oneCycle(options: {
+  readonly home: string;
+  readonly repositoryRoot: string;
+  readonly notifier: AttentionNotifier;
+  readonly run: CrossRepositoryRunResult;
+}): Promise<void> {
+  const provider = fixedPathProvider(options.home);
+  mkdirSync(join(options.home, '.agent-orchestrator'), { recursive: true });
+  writeFileSync(
+    join(options.home, '.agent-orchestrator', 'repositories.yaml'),
+    `schemaVersion: 1\nrepositories:\n  - path: ${JSON.stringify(options.repositoryRoot)}\n`,
+    'utf8',
+  );
+
+  const program = new Command();
+  program.exitOverride();
+  registerRepositoriesCommand(program, {
+    write: () => {},
+    loadRepositoryRegistry: () => loadRepositoryRegistry(provider),
+    repositoryRegistryPath: () => repositoryRegistryPath(provider),
+    pathProvider: provider,
+    attentionNotifier: options.notifier,
+    driveRepositories: async () => options.run,
+  });
+
+  const previous = process.exitCode;
+  try {
+    await program.parseAsync([
+      'node',
+      'agent-loop',
+      'repositories',
+      '--attended',
+      '--wait-for-reset',
+      // Required, and deliberately so: `--wait-for-reset` refuses to invent how
+      // long it may sleep. One cycle never reaches a sleep, and the bound is
+      // still supplied rather than the flag being dropped, because dropping it
+      // would test a different invocation than an operator runs.
+      '--max-wait-ms',
+      '1000',
+      // Two, because that is the floor the command enforces: "the first cycle is
+      // the pass that meets the block, so a wait needs at least two". Only one
+      // pass actually runs here — nothing records a reset to wait for, so the
+      // loop ends after the first — and the bound is written as the command
+      // demands rather than as the test would prefer.
+      '--max-cycles',
+      '2',
+    ]);
+  } finally {
+    process.exitCode = previous;
+  }
+}
+
+describe('M4 — the command really announces what the store says is unannounced', () => {
+  it('sends the same item again on a second invocation after a refusal', async () => {
+    // The counter-proof that reaches the effect. Every other `U2` case in this
+    // file measures `settleAttention` and `pushAttentionItems` directly, and a
+    // mutation campaign found what that leaves uncovered: changing the one line
+    // in `repositories-command.ts` back to `settlement.raised` — which is the
+    // whole of the defect `U2` names — survived the entire suite.
+    //
+    // So this drives the command. Two separate invocations, because "a later
+    // pass tries again" is a claim about a *new process reading the store*, and
+    // calling one function twice would not have been one.
+    const scratch = store();
+    const root = makeRepository('u2-wired', ['T1']);
+    const refusing = notifier([false, false]);
+    const run = passWith('u2-wired', root, { outcome: 'RECOVERY_UNSAFE' });
+
+    await oneCycle({ home: scratch, repositoryRoot: root, notifier: refusing.notifier, run });
+    expect(refusing.sent).toHaveLength(1);
+
+    await oneCycle({ home: scratch, repositoryRoot: root, notifier: refusing.notifier, run });
+
+    // Two attempts, and both about the same item. Under the old wiring the
+    // second invocation raised nothing — the name was already taken — and
+    // therefore sent nothing, for ever.
+    expect(refusing.sent).toHaveLength(2);
+    expect(refusing.sent[0]).toBe(refusing.sent[1]);
+  });
+
+  it('stops once the endpoint takes it, measured across two invocations', async () => {
+    // The bound on the retry, measured the same way. A retry that never stopped
+    // would send one message per cycle for as long as the condition stood.
+    const scratch = store();
+    const root = makeRepository('u2-wired-ok', ['T1']);
+    const accepting = notifier([true]);
+    const run = passWith('u2-wired-ok', root, { outcome: 'RECOVERY_UNSAFE' });
+
+    await oneCycle({ home: scratch, repositoryRoot: root, notifier: accepting.notifier, run });
+    await oneCycle({ home: scratch, repositoryRoot: root, notifier: accepting.notifier, run });
+
+    expect(accepting.sent).toHaveLength(1);
+  });
+
+  it('announces a pass that threw, which has no outcome to read at all', async () => {
+    // The other half of `U3`, end to end. The coordinator turns a rejected
+    // driver into `threw: true` with a null lifecycle — correctly, because a
+    // rejection escaping that loop would abandon its siblings — and until this
+    // slice that null was the end of it: no outcome, so nothing judged, so
+    // nothing said, and a repository could fail this way on every cycle in
+    // complete silence.
+    //
+    // Driven through the command because the translation from `threw` to a
+    // condition lives there, and a test of `attentionForRunCondition('RUN_THREW')`
+    // would measure the table while leaving that translation unmeasured.
+    const scratch = store();
+    const root = makeRepository('u3-threw', ['T1']);
+    const listening = notifier([true]);
+
+    await oneCycle({
+      home: scratch,
+      repositoryRoot: root,
+      notifier: listening.notifier,
+      run: passWith('u3-threw', root, { threw: true }),
+    });
+
+    const provider = fixedPathProvider(scratch);
+    const records = listAttentionRecords(provider).records;
+    expect(records).toHaveLength(1);
+    expect(records[0]?.subject).toBe('REPOSITORY');
+    expect(records[0] !== undefined && records[0].subject === 'REPOSITORY' ? records[0].condition : null).toBe(
+      'RUN_THREW',
+    );
+    expect(records[0]?.reason).toBe('REPOSITORY_RUN_THREW');
+    // And it left the machine, so an absent operator hears about it.
+    expect(listening.sent).toEqual([records[0]?.attentionId]);
+  });
+
+  it('reads the ending before the outcome, so a throw is never lost to a null', () => {
+    // `threw` is checked first in the command, and the order is load-bearing
+    // rather than stylistic: an admission that threw carries `lifecycle: null`,
+    // so a translation that read the outcome first would find nothing, skip the
+    // admission, and reproduce exactly the silence this case exists to close.
+    //
+    // Structural, because the alternative ordering is not observably different
+    // in any *other* way — both spellings compile, both pass every type check,
+    // and only this pins which one is there.
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'cli', 'repositories-command.ts'),
+      'utf8',
+    )
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    const threwAt = source.indexOf('admission.threw');
+    const outcomeAt = source.indexOf('admission.lifecycle?.outcome');
+    expect(threwAt).toBeGreaterThan(-1);
+    expect(outcomeAt).toBeGreaterThan(-1);
+    expect(threwAt).toBeLessThan(outcomeAt);
   });
 });
