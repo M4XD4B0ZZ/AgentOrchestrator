@@ -63,7 +63,7 @@
  */
 
 import type { AgentBlockEvidence, AgentDisposition } from './agent-outcome.js';
-import { AGENT_PHASES, phaseMutatesRepository, withdrawnCheckpointFor } from '../core/agent-phases.js';
+import { AGENT_PHASES, withdrawnCheckpointFor } from '../core/agent-phases.js';
 import {
   interruptionCheckpointCommitOf,
   type InterruptionCheckpoint,
@@ -178,13 +178,9 @@ export interface AgentInterruptionRecord {
 /**
  * The commit a settled checkpoint permits this write to record, or `null`.
  *
- * Three conditions, all required, and each closes a different way the claim
+ * Two conditions, both required, and each closes a different way the claim
  * could become false:
  *
- *  - **the phase must mutate the repository.** For `REVIEWING` nothing is
- *    withdrawn in the first place, so a checkpoint there could only *overwrite*
- *    a true checkpoint the reviewer could not have invalidated. The reviewer is
- *    contractually read-only and AO makes no commit for it (V3-10 §20).
  *  - **the block must be a usage limit.** `BLOCKED_AUTH` and
  *    `HUMAN_DECISION_REQUIRED` are not automatically resumable, so a checkpoint
  *    on them buys nothing and would only put an unattended-authority claim on a
@@ -199,13 +195,45 @@ export interface AgentInterruptionRecord {
  *    system, and a forged or captured value must withdraw the checkpoint exactly
  *    as an absent one does rather than throw. See
  *    `core/internal/interruption-checkpoint.ts`.
+ *
+ * ── A third condition used to be here, and it was wrong (M2-06) ────────────
+ *
+ * The phase also had to mutate the repository, on the argument that for
+ * `REVIEWING` nothing is withdrawn in the first place, so a checkpoint there
+ * could only *overwrite* a true checkpoint the reviewer could not have
+ * invalidated.
+ *
+ * There was no such true checkpoint to overwrite. `REVIEWING` had exactly one
+ * producer — `VERIFYING`, which the writing phase entered with `currentCommit:
+ * null` and `worktreeCleanAtCheckpoint: false`, withdrawn correctly — and the
+ * hop puts nothing back: `loop-step.ts` writes `REVIEWING` by spreading the
+ * state it already had. So the values a review-phase checkpoint replaced were
+ * exactly the two withdrawals, and refusing it left every codex quota block
+ * denied by `evaluateAutomaticResume` with `CURRENT_COMMIT_MISMATCH` and
+ * `WORKTREE_NOT_CLEAN` — permanently non-resumable, which is the state F-10 was
+ * raised about for the writer.
+ *
+ * This slice creates the **second** producer, and that is why the withdrawal
+ * had to widen with it. `BLOCKED_USAGE_LIMIT → REVIEWING` now resumes a pause
+ * that carries a real checkpoint, so `withdrawnCheckpointFor` withdraws for
+ * every agent phase rather than only the writing ones — see its header. Without
+ * that, an interruption here which measured nothing would re-assert a clean
+ * tree at an exact commit, and `reconcile.ts` would answer `DIVERGED` on the
+ * next run, before the operator's continuation gate is even computed.
+ *
+ * The condition was never load-bearing for safety either. What keeps a
+ * checkpoint honest is that a caller cannot write one down: it has to be minted
+ * from an observation, and `loop-step.ts:settledReviewCheckpoint` mints one only
+ * when a *pair* of observations taken either side of the reviewer agree on a
+ * clean tree at one HEAD. That is a stronger statement about a read-only phase
+ * than the phase flag ever was — it measures the contract instead of assuming
+ * the sandbox enforced it.
  */
 function settledCheckpointFor(
-  phase: TaskStateName,
   usageLimit: boolean,
   checkpoint: InterruptionCheckpoint | null | undefined,
 ): string | null {
-  if (!usageLimit || !phaseMutatesRepository(phase)) return null;
+  if (!usageLimit) return null;
   return interruptionCheckpointCommitOf(checkpoint);
 }
 
@@ -280,7 +308,7 @@ export function recordAgentInterruption(
     });
   }
 
-  const settled = settledCheckpointFor(current.state.state, usageLimit, checkpoint);
+  const settled = settledCheckpointFor(usageLimit, checkpoint);
 
   const next = {
     ...current.state,

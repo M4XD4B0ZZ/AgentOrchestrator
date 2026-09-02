@@ -51,6 +51,12 @@ import {
   type AgentProcessEvidence,
 } from './agent-outcome.js';
 import { readCodexTranscript, type ReviewFinding } from './internal/codex-review-transcript.js';
+import {
+  deriveResetInstant,
+  readCodexQuotaRefusal,
+  systemLocalOffsetMinutes,
+  type LocalOffsetMinutes,
+} from './internal/codex-quota-signal.js';
 
 export type { ReviewFinding } from './internal/codex-review-transcript.js';
 
@@ -81,6 +87,17 @@ export interface CodexReviewRequest {
   readonly round: number;
   /** The review instructions, delivered on stdin. */
   readonly payload: string;
+  /**
+   * The instant this run is being judged at, ISO-8601. Injected, never read
+   * from a clock here.
+   *
+   * Required, and the requirement is the point. Codex names its quota reset as
+   * a bare time of day (`try again at 5:35 PM`), so turning it into the
+   * absolute instant `reportedResetAt` must hold needs to know which day it is.
+   * A boundary that read the clock itself would make its own result untestable
+   * and would be the one module in this repository deciding what "now" is.
+   */
+  readonly now: string;
 }
 
 export interface CodexReviewOptions {
@@ -94,6 +111,15 @@ export interface CodexReviewOptions {
    * mistake into a compile error instead of a silent one.
    */
   readonly agent: AgentRunner;
+  /**
+   * The zone the provider's quota message was rendered in. Defaults to the
+   * process's own, which is what the CLI used.
+   *
+   * A seam only so that the daylight-saving rules
+   * `internal/codex-quota-signal.ts` states can be tested against a stated
+   * zone rather than against whichever one the test host sits in.
+   */
+  readonly localOffsetMinutes?: LocalOffsetMinutes;
 }
 
 interface CodexReviewOutcomeBase {
@@ -124,14 +150,25 @@ export type CodexReviewResult = CodexReviewCompleted | CodexReviewFailed;
 /**
  * Runs the reviewer once.
  *
- * The classification order matches the writer's, for the same reasons, with
- * one difference worth stating: no usage-limit signal has been observed from
- * this CLI, so there is no recognised quota verdict to check for. A Codex run
- * that fails because its allowance is exhausted therefore lands in
- * `AGENT_NEEDS_ATTENTION` — a human decision — rather than in a pause. That is
- * a deliberate consequence of having no evidence, not an oversight: guessing a
- * usage limit from an unrecognised failure would be the exact fabrication this
- * slice refuses everywhere else.
+ * The classification order matches the writer's, for the same reasons.
+ *
+ * ── The quota verdict, and why it took until M2 slice 6 ────────────────────
+ *
+ * This comment used to say that no usage-limit signal had been observed from
+ * this CLI, and that a Codex run whose allowance was exhausted therefore landed
+ * in `AGENT_NEEDS_ATTENTION` — a human decision — rather than in a pause. The
+ * first half stopped being true on 2026-08-28, when a real run produced one;
+ * the second half was the defect that followed. `transitions.ts` has always
+ * declared `REVIEWING → BLOCKED_USAGE_LIMIT`, and `resume-policy.ts` has always
+ * allowed `blockedAgent: 'codex'` on it, so the edge existed and nothing could
+ * reach it. A declared edge with no producer is not a contract, it is a claim.
+ *
+ * The signal is now recognised, positively and narrowly, from the message of a
+ * `turn.failed` event — the only channel that carries it, as
+ * `internal/codex-quota-signal.ts` measures at length. Everything this reader
+ * does not recognise still lands exactly where it did: unrecognised output is
+ * not evidence of a quota limit, and `AGENT_NEEDS_ATTENTION` remains the
+ * fail-closed default.
  */
 export async function runCodexReviewer(
   request: CodexReviewRequest,
@@ -189,6 +226,36 @@ export async function runCodexReviewer(
   // bytes it managed to print, and is never labelled a "non-zero exit" when its
   // exit status was zero or absent.
   if (!endedUnderOwnControl(result)) return reviewFailure(evidence, 'AGENT_PROCESS_UNAVAILABLE');
+
+  // Asked before the exit code is looked at, and that placement is the writer's
+  // too. A quota refusal legitimately exits non-zero — `agent-outcome.ts` says
+  // so where it explains why `endedUnderOwnControl` is a separate, weaker
+  // predicate than `ranCleanly` — so a boundary that classified from the status
+  // first would report every one of them as `AGENT_NONZERO_EXIT`. That is
+  // precisely what this build did.
+  //
+  // The reset is `null` whenever the message named no time this reader could
+  // resolve. `PREFERRED, not required` is the shape `resume-policy.ts` already
+  // describes: a recognised pause with no instant to wait for is still a pause,
+  // and `evaluateAutomaticResume` denies it with `RESET_TIME_MISSING` rather
+  // than acting on a fabricated one.
+  const refusal = readCodexQuotaRefusal(result.stdout);
+  if (refusal.verdict === 'USAGE_LIMIT') {
+    const nowMs = Date.parse(request.now);
+    const resetAt =
+      refusal.resetTimeOfDay === null
+        ? null
+        : deriveResetInstant(
+            refusal.resetTimeOfDay,
+            nowMs,
+            options.localOffsetMinutes ?? systemLocalOffsetMinutes,
+          );
+    return reviewFailure(evidence, 'AGENT_USAGE_LIMIT', {
+      blockedAgent: 'codex' as const,
+      resumeFrom: interruptedResumePoint('REVIEW', request.round),
+      reportedResetAt: resetAt,
+    });
+  }
 
   if (!ranCleanly(result)) {
     return reviewFailure(

@@ -138,8 +138,11 @@ describe('agent-loop run — CLI seam', () => {
     // `--remediate-verify-failure` is conjoined with `ATTENDED`, with the state,
     // with the resume phase and with a once-per-invocation bound before it moves
     // anything, and `--continue-human-decision` is conjoined with `ATTENDED`,
-    // with its own state and with its own bound. The two are separate flags for
-    // separate decisions: neither can move the other's block.
+    // with its own state and with its own bound, and `--continue-usage-limit`
+    // adds a third with one conjunct neither sibling has: it applies only where
+    // the record names NO reset instant, so it can never start an agent before
+    // a window the machine already knows the end of. The three are separate
+    // flags for separate decisions: none can move another's block.
     //
     // This comment previously said there was "deliberately no flag that lets a
     // run wait out a quota reset". V3-08 added the authority that made one
@@ -154,6 +157,7 @@ describe('agent-loop run — CLI seam', () => {
       '--recover-stale-lease',
       '--remediate-verify-failure',
       '--continue-human-decision',
+      '--continue-usage-limit',
       '--automatic-resume-only',
       '--wait-for-reset',
       '--max-wait-ms',
@@ -354,6 +358,15 @@ describe('the unattended automatic-resume mode refuses unusable combinations fir
       args: ['--automatic-resume-only', '--continue-human-decision'],
       code: 'HUMAN_DECISION_CONTINUATION_WITHOUT_OPERATOR',
     },
+    // The third, and the second row is the sharp one: `--automatic-resume-only`
+    // is the grant that exists to wait out a reset, and this flag is for the
+    // block that records none to wait for. An invocation stating nobody is
+    // present may not say "try anyway".
+    { args: ['--continue-usage-limit'], code: 'USAGE_LIMIT_CONTINUATION_WITHOUT_OPERATOR' },
+    {
+      args: ['--automatic-resume-only', '--continue-usage-limit'],
+      code: 'USAGE_LIMIT_CONTINUATION_WITHOUT_OPERATOR',
+    },
   ];
 
   for (const refusal of REFUSALS) {
@@ -380,6 +393,7 @@ describe('the unattended automatic-resume mode refuses unusable combinations fir
   for (const decision of [
     { flag: '--remediate-verify-failure', code: 'VERIFY_REMEDIATION_WITHOUT_TASK' },
     { flag: '--continue-human-decision', code: 'HUMAN_DECISION_CONTINUATION_WITHOUT_TASK' },
+    { flag: '--continue-usage-limit', code: 'USAGE_LIMIT_CONTINUATION_WITHOUT_TASK' },
   ] as const) {
     it(`refuses ${decision.flag} without a named task`, async () => {
       await invoke(['--repository', ABSENT, '--attended', decision.flag]);

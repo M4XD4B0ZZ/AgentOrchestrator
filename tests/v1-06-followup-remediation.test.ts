@@ -84,7 +84,7 @@ describe('NEW-2: an agent is never started against a relative worktree path', ()
     const agent = spyAgent();
 
     const outcome = await runCodexReviewer(
-      { worktreePath, round: 1, payload: 'review it' },
+      { worktreePath, round: 1, payload: 'review it', now: '2026-08-29T11:29:57.000Z' },
       { agent: agent.runner },
     );
 

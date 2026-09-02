@@ -509,8 +509,9 @@ export function endedUnderOwnControl(result: AgentCommandResult): boolean {
  * meaningful attached to that CLI's positively recognised refusal. A
  * general-purpose recogniser exported from this module would be callable
  * against any string by any caller, which is the shortcut both readers exist
- * to prevent. The Codex boundary still recognises no quota signal at all, so
- * `codex-reviewer.ts` still reports `reportedResetAt: null` unconditionally.
+ * to prevent. Since M2 slice 6 the Codex boundary recognises one too, from a
+ * different channel: `internal/codex-quota-signal.ts` reads a `turn.failed`
+ * message, because `codex exec --json` carries no structured error category.
  */
 
 /**

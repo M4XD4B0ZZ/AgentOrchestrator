@@ -478,6 +478,10 @@ describe('a quota pause stops the run rather than being waited out', () => {
       maxInvocations: null,
       remediateVerifyFailure: null,
       continueHumanDecision: null,
+      // Added by M2 slice 6. It is an operator *decision*, not a wait: the
+      // driver forwards it and `run-driver.ts` refuses it for any block that
+      // records a reset instant, so nothing here schedules or sleeps.
+      continueUsageLimit: null,
     } satisfies Record<keyof LifecycleRequest, null>);
     expect(keys).not.toContain('waitForReset');
     expect(keys).not.toContain('maxWaitMs');

@@ -636,6 +636,7 @@ function admit(
         continuationGrant: 'ATTENDED',
         remediateVerifyFailure: false,
         continueHumanDecision: false,
+        continueUsageLimit: false,
         recoverStaleLease: false,
         maxSteps: request.maxSteps,
         maxInvocations: request.maxInvocations,

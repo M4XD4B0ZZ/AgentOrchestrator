@@ -1535,6 +1535,7 @@ describe('M2 slice 5 — the command surface', () => {
     expect(flags).not.toContain('--recover-stale-lease');
     expect(flags).not.toContain('--remediate-verify-failure');
     expect(flags).not.toContain('--continue-human-decision');
+    expect(flags).not.toContain('--continue-usage-limit');
     expect(flags).not.toContain('--repository');
   });
 });

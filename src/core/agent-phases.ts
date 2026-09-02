@@ -27,29 +27,24 @@ import type { AgentId, ResumePhase, TaskStateName } from './states.js';
 export interface AgentPhase {
   readonly agent: AgentId;
   readonly resumePhase: ResumePhase;
-  /**
-   * Whether the agent this phase runs edits the repository.
-   *
-   * The writer edits the worktree; the reviewer is contractually read-only,
-   * which is why a write attempt by it is a scope violation rather than
-   * ordinary work. What survives as checkpoint evidence differs accordingly —
-   * see {@link withdrawnCheckpointFor}.
-   */
-  readonly mutatesRepository: boolean;
 }
 
 export const AGENT_PHASES: Readonly<Partial<Record<TaskStateName, AgentPhase>>> = Object.freeze({
-  IMPLEMENTING: Object.freeze({ agent: 'claude', resumePhase: 'IMPLEMENT', mutatesRepository: true }),
-  REMEDIATING: Object.freeze({ agent: 'claude', resumePhase: 'REMEDIATE', mutatesRepository: true }),
-  REVIEWING: Object.freeze({ agent: 'codex', resumePhase: 'REVIEW', mutatesRepository: false }),
+  IMPLEMENTING: Object.freeze({ agent: 'claude', resumePhase: 'IMPLEMENT' }),
+  REMEDIATING: Object.freeze({ agent: 'claude', resumePhase: 'REMEDIATE' }),
+  REVIEWING: Object.freeze({ agent: 'codex', resumePhase: 'REVIEW' }),
 });
 
 /**
- * `true` when running `phase` modifies the repository. Total over the state
- * vocabulary: a phase that runs no agent modifies nothing.
+ * `true` when an agent runs in `phase`. Total over the state vocabulary.
+ *
+ * This is the question the checkpoint rule asks, and until M2 slice 6 it asked
+ * a narrower one — *does this phase edit the repository* — with `REVIEWING`
+ * answering no. See {@link withdrawnCheckpointFor} for why that answer was
+ * unsafe and why the field it read no longer exists.
  */
-export function phaseMutatesRepository(phase: TaskStateName): boolean {
-  return AGENT_PHASES[phase]?.mutatesRepository ?? false;
+export function phaseRunsAnAgent(phase: TaskStateName): boolean {
+  return AGENT_PHASES[phase] !== undefined;
 }
 
 /**
@@ -84,12 +79,38 @@ export function phaseMutatesRepository(phase: TaskStateName): boolean {
  * commit. Everything else the state holds, including `basePinnedCommit` and
  * `findingHistory`, is durable evidence and is carried through untouched.
  *
- * Nothing is withdrawn for a non-mutating phase. The reviewer could not have
- * changed the worktree, and discarding true evidence for a run that could not
- * have invalidated it would be its own kind of lie — and a costly one:
- * `evaluateAutomaticResume` requires an exact `currentCommit` and
- * `worktreeCleanAtCheckpoint === true`, so withdrawing them without cause
- * denies a resume the evidence actually supported.
+ * ── The rule is "an agent ran", not "a writer ran" (M2 slice 6) ────────────
+ *
+ * This used to withdraw nothing for `REVIEWING`, on the argument that the
+ * reviewer could not have changed the worktree, so discarding true evidence for
+ * a run that could not have invalidated it would be its own kind of lie.
+ *
+ * The premise is a **request**, not a fact. `--sandbox read-only` is asked of
+ * the CLI, and `transitions.ts` declares `REVIEWING → SCOPE_VIOLATION`
+ * precisely because the request can be refused. The argument also had no
+ * subject while it stood: every producer of `REVIEWING` arrived carrying
+ * `currentCommit: null` and `worktreeCleanAtCheckpoint: false`, so there was no
+ * true evidence to preserve — only the two withdrawals the writing phase had
+ * already made.
+ *
+ * M2 slice 6 gave `REVIEWING` a checkpoint of its own, and that made the gap
+ * reachable: a resumed review could now *carry* `clean: true` at an exact
+ * commit, and a second interruption that measured nothing would have re-asserted
+ * both over a tree the reviewer may have dirtied. `reconcile.ts` reads that as
+ * `WORKTREE_DIRTY` / `CURRENT_COMMIT_MOVED` → `RESUME_STATE_DIVERGED`, which
+ * nothing resumes and no operator command clears — strictly worse than the
+ * `HUMAN_DECISION_REQUIRED` it replaced.
+ *
+ * So the question is now the one that was always meant: **did an agent run
+ * here.** Any agent's run invalidates a claim about the tree, because the claim
+ * that it could not is a claim about a sandbox this process does not enforce.
+ * States that run no agent are unaffected — `VERIFYING` runs the project's own
+ * commands and is absent from the table, so nothing is withdrawn for it.
+ *
+ * The cost this used to buy is bought properly instead, by the same mechanism
+ * the writer uses: `loop/loop-step.ts:settledReviewCheckpoint` *measures* the
+ * tree either side of the reviewer and mints a checkpoint when the two agree.
+ * Withdrawal is what happens when nothing was measured, for every phase alike.
  *
  * ── Withdrawal is the honest answer, and it was the only one ───────────────
  *
@@ -109,5 +130,5 @@ export function phaseMutatesRepository(phase: TaskStateName): boolean {
 export function withdrawnCheckpointFor(
   phase: TaskStateName,
 ): { readonly worktreeCleanAtCheckpoint: false; readonly currentCommit: null } | Record<never, never> {
-  return phaseMutatesRepository(phase) ? { worktreeCleanAtCheckpoint: false, currentCommit: null } : {};
+  return phaseRunsAnAgent(phase) ? { worktreeCleanAtCheckpoint: false, currentCommit: null } : {};
 }
