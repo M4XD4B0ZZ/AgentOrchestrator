@@ -720,7 +720,7 @@ async function driveUnderLease(
   let humanDecisionContinuationSpent = false;
   /**
    * And the same bound for the operator's one departure from a
-   * `BLOCKED_USAGE_LIMIT` that records no reset.
+   * `BLOCKED_USAGE_LIMIT` the machine cannot wait out.
    *
    * A third variable, not a third use of one of the others: a lifecycle given
    * all three flags must be able to spend each exactly once, and sharing would

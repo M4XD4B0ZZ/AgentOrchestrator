@@ -26,6 +26,39 @@
  * handler, and it does so only for an invocation that can sleep. See
  * `shutdownRequest`.
  *
+ * ── What M3-02 added here ──────────────────────────────────────────────────
+ *
+ * Two things, and both only for an invocation that asked to wait:
+ *
+ *  - `--idle-poll-ms`, which makes a pass that leaves nothing recorded to wait
+ *    for sleep that interval and plan again instead of ending. Optional, with no
+ *    default: without it the command behaves exactly as it always has, because a
+ *    default there would turn every existing scheduler invocation into a process
+ *    that no longer exits;
+ *  - the **operator-attention outbox**. The moment each coordinator pass ends,
+ *    this file reads the same durable task states the wake scan reads and writes
+ *    down each one that no machine can move and a person can — one file per
+ *    condition, under the orchestrator home, named after the condition. Where a
+ *    `notify.yaml` is configured, each newly written item is also sent to it
+ *    once.
+ *
+ * "The moment each pass ends" is load-bearing rather than descriptive. The first
+ * spelling settled the outbox when the *cycle* was recorded, which is after that
+ * cycle's sleep — so a scope violation found at minute zero of a day-long quota
+ * wait was written down and announced a day later. The seam is now a pass
+ * observation and is called before anything about waiting is decided.
+ *
+ * The scheduler knows about neither of the outbox's halves. It hands over a
+ * finished pass and the repositories that pass drove; everything about what
+ * needs a person, what was already said, and who to tell is decided here. That
+ * is the layering `tests/m3-01-persistent-scheduler.test.ts` pins structurally,
+ * and it is the right one on its own terms: this file already owns every
+ * question about the operator's own profile.
+ *
+ * An invocation **without** `--wait-for-reset` reads no notification
+ * configuration, enumerates no runtime directory and touches no store — the same
+ * promise the wake scan already keeps, kept the same way.
+ *
  * ── No `--repository`, and that is the point ───────────────────────────────
  *
  * Every other command that names a repository takes `--repository <path>`,
@@ -114,10 +147,20 @@ import type { VerificationRunner } from '../verify/verify-command.js';
 import { runGitCommand } from '../worktree/git-command.js';
 import type { driveRepositories } from '../run/repository-coordinator.js';
 import {
+  createAttentionNotifier,
+  pushAttentionItems,
+  type AttentionNotifier,
+} from '../notify/attention-notification.js';
+import { settleAttention } from '../notify/attention-outbox.js';
+import { renderAttention, type AttentionReport } from './render-attention.js';
+import {
   driveScheduler,
   isUsableCycleBound,
+  isUsableIdlePollBound,
   MAX_SCHEDULER_CYCLES,
+  MIN_IDLE_POLL_MS,
   MAX_WAIT_MS_CEILING,
+  type PassObservation,
   type SchedulerRegistryRead,
   type SchedulerWaitPolicy,
   type ShutdownSeam,
@@ -203,6 +246,19 @@ const DESCRIPTION = [
   'without being told which task or which instant. Nothing else is carried across a sleep either:',
   'the registry is read again, and the auth preflight is proven again.',
   '',
+  'With --idle-poll-ms it also keeps going when a pass leaves NOTHING recorded to wait for,',
+  'sleeping that interval and planning again. Without it such a pass ends the invocation, which',
+  'is what this command has always done. That option exists because the wake horizon is a',
+  'horizon of recorded quota resets and nothing else: work that becomes runnable for any other',
+  'reason — a task somebody writes, a block somebody clears — is invisible to it.',
+  '',
+  'A waiting invocation also keeps an operator-attention outbox. After every pass it reads the',
+  'same durable task states and writes down each one that no machine can move and a person',
+  'can — one file per condition, under your orchestrator home, named after the condition so a',
+  'repeated pass writes nothing new. Where a notify.yaml is configured, each newly written item',
+  'is also sent to it once. An invocation without --wait-for-reset reads no notification',
+  'configuration and touches no store.',
+  '',
   'It waits for one thing only — a reset an agent CLI reported and this build recorded. A quota',
   'block that records NO reset time has no machine-understandable wake, is never waited for here,',
   'and stays the operator’s decision through `agent-loop run --repository <path> --task <id>',
@@ -245,6 +301,24 @@ export interface RepositoriesCommandSeams {
    * not have to reimplement waiting to get at it.
    */
   readonly driveScheduler?: typeof driveScheduler;
+  /**
+   * The operator-attention notifier, built from this OS user's configuration.
+   *
+   * A seam so a test can arm a recording transport without writing a
+   * `notify.yaml`. It grants nothing: production builds it from the file, and an
+   * unconfigured machine produces `NOT_CONFIGURED` whatever is passed here — so
+   * "no egress without the file" is not a property of this seam's callers, and
+   * it is measured against the shipped artefact where no seam exists at all.
+   */
+  readonly attentionNotifier?: AttentionNotifier;
+  /**
+   * Settling the outbox against durable state. Production passes nothing.
+   *
+   * Separate from the notifier for the reason the scheduler and coordinator
+   * seams are separate: one is "what did we find", the other is "who was told",
+   * and a test that wants to pin one must not have to reimplement the other.
+   */
+  readonly settleAttention?: typeof settleAttention;
   /** Forwarded to the scheduler, and only reached under `--attended`. */
   readonly authPreflight?: () => Promise<AuthPreflightEvidence | null>;
   readonly agent?: AgentRunner;
@@ -353,6 +427,47 @@ export async function reportRepositories(
     };
   };
 
+  // ── The operator-attention outbox, and why it is installed here ─────────
+  //
+  // Only for an invocation that asked to wait, which is the unattended mode this
+  // capability exists for. A plain `repositories --attended` opens exactly what
+  // it always opened: no notification configuration is read, no runtime
+  // directory is enumerated and no store is touched. That promise is the same
+  // one the wake scan already keeps, and it is kept the same way — by not being
+  // reached.
+  //
+  // The notifier is built **before** the loop, so an operator with a broken
+  // notify.yaml is told while they are still standing there rather than eight
+  // hours later by the message that never arrives.
+  //
+  // It lives in this file rather than in the scheduler because the scheduler is
+  // pinned against knowing about notification at all, and the pin is right: what
+  // to do with a finished pass is the caller's question. The loop hands over a
+  // pass and the repositories it drove — the moment that pass ends, before any
+  // decision about waiting, so a condition found at minute zero of a day-long
+  // wait is written down and announced now.
+
+  const attentionReports: AttentionReport[] = [];
+  const notifier = grant.wait.wait
+    ? (seams.attentionNotifier ?? createAttentionNotifier())
+    : null;
+
+  const observePass = async ({ repositories: driven }: PassObservation): Promise<void> => {
+    if (notifier === null) return;
+    const settlement = (seams.settleAttention ?? settleAttention)(
+      driven.map((entry) => ({
+        repositoryId: entry.repository.id,
+        repositoryRoot: entry.repository.root,
+      })),
+      new Date().toISOString(),
+    );
+    // Only what this pass newly wrote down is announced. An item already in the
+    // store was already said, by this process or another one, and saying it
+    // again on every cycle is the spam this design exists to avoid.
+    const push = await pushAttentionItems(notifier, settlement.raised);
+    attentionReports.push({ settlement, push });
+  };
+
   const scheduled = await (seams.driveScheduler ?? driveScheduler)(
     {
       repositories: resolved.repositories,
@@ -382,6 +497,7 @@ export async function reportRepositories(
       ...(seams.agent !== undefined ? { agent: seams.agent } : {}),
       ...(seams.verify !== undefined ? { verify: seams.verify } : {}),
       ...(seams.shutdown !== undefined ? { shutdown: seams.shutdown } : {}),
+      ...(notifier === null ? {} : { observePass }),
     },
   );
 
@@ -401,7 +517,12 @@ export async function reportRepositories(
     return exitCodeForScheduler(scheduled);
   }
 
-  write(`${head}\n${renderScheduler(scheduled)}\n`);
+  // The attention section sits after the scheduler's own report: it is the last
+  // thing an operator reads, because it is the only part of the output that asks
+  // them for something. `null` when there is nothing to ask — a run over
+  // repositories that all needed nobody gains no section.
+  const attention = renderAttention(attentionReports);
+  write(`${head}\n${renderScheduler(scheduled)}${attention ?? ''}\n`);
   return exitCodeForScheduler(scheduled);
 }
 
@@ -412,6 +533,7 @@ interface RepositoriesOptions {
   readonly waitForReset?: boolean;
   readonly maxWaitMs?: string;
   readonly maxCycles?: string;
+  readonly idlePollMs?: string;
 }
 
 /**
@@ -554,12 +676,13 @@ function grantFor(
       options.maxSteps !== undefined ||
       options.maxInvocations !== undefined ||
       options.maxWaitMs !== undefined ||
-      options.maxCycles !== undefined
+      options.maxCycles !== undefined ||
+      options.idlePollMs !== undefined
     ) {
       return {
         refusal:
-          'BOUND_WITHOUT_GRANT — --max-steps, --max-invocations, --max-wait-ms and --max-cycles ' +
-          'bound a run, and without --attended there is no run to bound.',
+          'BOUND_WITHOUT_GRANT — --max-steps, --max-invocations, --max-wait-ms, --max-cycles ' +
+          'and --idle-poll-ms bound a run, and without --attended there is no run to bound.',
       };
     }
     // Its own refusal rather than a fifth item in the sentence above, because
@@ -602,11 +725,15 @@ function grantFor(
   // silently would let an operator believe an invocation was bounded when it was
   // never going to wait at all.
   if (!waiting) {
-    if (options.maxWaitMs !== undefined || options.maxCycles !== undefined) {
+    if (
+      options.maxWaitMs !== undefined ||
+      options.maxCycles !== undefined ||
+      options.idlePollMs !== undefined
+    ) {
       return {
         refusal:
-          'WAIT_BOUND_WITHOUT_WAIT — --max-wait-ms and --max-cycles bound a wait, and without ' +
-          '--wait-for-reset this invocation makes one pass and stops.',
+          'WAIT_BOUND_WITHOUT_WAIT — --max-wait-ms, --max-cycles and --idle-poll-ms bound a ' +
+          'wait, and without --wait-for-reset this invocation makes one pass and stops.',
       };
     }
     return { grant: { maxSteps, maxInvocations, wait: { wait: false } } };
@@ -645,7 +772,34 @@ function grantFor(
     };
   }
 
-  return { grant: { maxSteps, maxInvocations, wait: { wait: true, maxWaitMs, maxCycles } } };
+  // ── The idle interval, which is optional where the other two are not ────
+  //
+  // Absent means the invocation ends when nothing is recorded to wait for, which
+  // is what every invocation before M3 slice 2 did. Present means it looks again
+  // on that interval instead, until `--max-cycles` is spent or it is stopped.
+  //
+  // Optional rather than required, and that asymmetry is deliberate. The other
+  // two bound something the operator has already asked for by typing
+  // `--wait-for-reset`; this one asks for a *different* behaviour, so its
+  // absence has to keep meaning what it always meant. A default here would turn
+  // every existing scheduler invocation into a process that no longer exits.
+  let idlePollMs: number | null = null;
+  if (options.idlePollMs !== undefined) {
+    idlePollMs = Number(options.idlePollMs);
+    if (!isUsableIdlePollBound(idlePollMs)) {
+      return {
+        refusal:
+          `IDLE_POLL_MS_INVALID — --idle-poll-ms must be a whole number of milliseconds from ` +
+          `${String(MIN_IDLE_POLL_MS)} to ${String(MAX_WAIT_MS_CEILING)} (24 hours). Below that ` +
+          `floor an idle pass costs more than it can learn: every cycle re-resolves each ` +
+          `enlisted repository through real git children and plans it again.`,
+      };
+    }
+  }
+
+  return {
+    grant: { maxSteps, maxInvocations, wait: { wait: true, maxWaitMs, maxCycles, idlePollMs } },
+  };
 }
 
 export function registerRepositoriesCommand(
@@ -682,8 +836,11 @@ export function registerRepositoriesCommand(
         'no task state while it waits. The wait is read from each task’s own state file before ' +
         'every sleep and is stored nowhere else, so stopping this process loses nothing and ' +
         'invoking it again reconstructs the same wait without being told which task or which ' +
-        'instant. A quota block that records NO reset time is never waited for and stays the ' +
-        'operator’s. Needs --attended, --max-wait-ms and --max-cycles.',
+        'instant. A quota block the machine cannot wait out is never waited for and stays the ' +
+        'operator’s. This is also the mode that keeps an operator-attention outbox: after every ' +
+        'pass it writes down whatever no machine can move and a person can. Needs --attended, ' +
+        '--max-wait-ms and --max-cycles; --idle-poll-ms is optional and makes it keep going when ' +
+        'nothing is recorded to wait for.',
     )
     .option(
       '--max-wait-ms <n>',
@@ -696,6 +853,17 @@ export function registerRepositoriesCommand(
       `How many planning passes this invocation may make in total, counting the first. Required ` +
         `with --wait-for-reset — there is no default — at least 2, and at most ` +
         `${String(MAX_SCHEDULER_CYCLES)}.`,
+    )
+    .option(
+      '--idle-poll-ms <n>',
+      `Keep going when nothing is recorded to wait for: sleep this many milliseconds, then plan ` +
+        `again. Optional, and its absence is the behaviour this command has always had — a pass ` +
+        `that leaves no recorded reset ahead ends the invocation. Needs --wait-for-reset. At ` +
+        `least ${String(MIN_IDLE_POLL_MS)} and at most ${String(MAX_WAIT_MS_CEILING)} (24 ` +
+        `hours). This is a poll interval, not a schedule: it names no task, no time of day and ` +
+        `no recurrence, and --max-cycles still bounds how many passes happen. Use it when work ` +
+        `arrives from outside AgentOrchestrator -- a task somebody writes, a block somebody ` +
+        `clears -- because none of that is visible to the durable wake horizon.`,
     )
     .action(async (options: RepositoriesOptions) => {
       // Installed only for an invocation that can sleep, and removed on every

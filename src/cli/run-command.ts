@@ -260,7 +260,7 @@ function refuseArguments(options: RunOptions): ArgumentRefusal | null {
       code: 'USAGE_LIMIT_CONTINUATION_WITHOUT_OPERATOR',
       sentence:
         '--continue-usage-limit is an operator decision and requires --attended. It asserts ' +
-        'that a subscription window nobody recorded an end for is worth trying again, which ' +
+        'that a subscription window the machine cannot wait out is worth trying again, which ' +
         'is a judgement about the world outside this machine, so a run that claims nobody ' +
         'is present may not make it.',
     };
@@ -639,15 +639,22 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
     .option(
       '--continue-usage-limit',
       'Continue ONE named task out of BLOCKED_USAGE_LIMIT, on your decision, from the ' +
-        'resume point that task recorded -- and ONLY when that task recorded NO reset ' +
-        'time. A pause that names an instant clears itself: wait for that instant, or ' +
-        'run with --automatic-resume-only --wait-for-reset. This flag is for the other ' +
-        'case, where the agent reported an exhausted allowance without saying when it ' +
-        'returns, and nothing could ever move the task again. It waits for nothing, ' +
-        'retries nothing and asserts nothing about the allowance -- only that you decided ' +
-        'to try. If it is still exhausted the run reports a fresh block. Requires ' +
-        '--attended and --task, is refused with --automatic-resume-only, and buys exactly ' +
-        'one departure from the state per invocation.',
+        'resume point that task recorded -- and ONLY when that task\'s own record is what ' +
+        'makes an automatic resume impossible. That covers a block which recorded NO reset ' +
+        'time, so nothing can ever wait for it, and a block whose reset has PASSED but ' +
+        'whose resume record was withdrawn -- no settled commit, or a worktree already ' +
+        'holding uncommitted work -- so no passage of time and no repair to the repository ' +
+        'will ever let the machine take it. A reset still AHEAD is refused: that is the ' +
+        'machine\'s wait, so let the scheduler have it or invoke again after that instant. ' +
+        'A reset that has passed over an intact record is refused too: the automatic path ' +
+        'grants that one by itself unless the repository as it stands right now refuses -- ' +
+        'fix that, not this. It waits for nothing, retries nothing and asserts nothing about ' +
+        'the allowance -- only that you decided to try. If it is still exhausted the run ' +
+        'reports a fresh block. Requires --attended and --task, is refused with ' +
+        '--automatic-resume-only, and buys exactly one departure from the state per ' +
+        'invocation. The run report prints which reading applies, and so does the '
+        + 'operator-attention item `repositories --wait-for-reset` writes for a block this '
+        + 'flag can move.',
     )
     // ── Why this is not called `--unattended-…` ─────────────────────────────
     //

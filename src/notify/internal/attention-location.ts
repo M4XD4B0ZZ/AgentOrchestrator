@@ -1,0 +1,211 @@
+/**
+ * INTERNAL — where the operator-attention outbox is, and what a record is
+ * called (M3-02).
+ *
+ * A module that writes nothing, creates nothing and imports no writer, for the
+ * reason `deliver/internal/head-publication-audit-location.ts` writes down about
+ * its own move: a reader that had to import the store to learn a directory name
+ * would pull the exclusive create and the `link` into its own closure, and "this
+ * cannot create anything" would stop being a fact about the import graph.
+ *
+ * ── Outside every repository, on purpose ───────────────────────────────────
+ *
+ * Task state lives inside the repository it describes; this does not. Three
+ * reasons, and none of them is convenience:
+ *
+ *  - the consumer is **cross-repository**. An operator running one unattended
+ *    process over an enlisted set wants one place to look, and the registry that
+ *    names that set is already `<home>/repositories.yaml`;
+ *  - an in-repository store would be written **without that repository's
+ *    execution lease**. The outbox is settled between coordinator passes,
+ *    holding nothing, which is exactly when a repository-scoped write has no
+ *    authority behind it;
+ *  - a repository AO drives ignores `.agent-orchestrator/runtime/` and nothing
+ *    else, so a new directory beside the profile would show up as untracked work
+ *    in every `git status` and in the scope assessment of the next task.
+ *
+ * The consequence is stated where it costs something: a record has to name its
+ * own repository, because its location no longer does. See
+ * `notify/attention-store.ts`.
+ *
+ * ── The name is the identity ───────────────────────────────────────────────
+ *
+ * A record's file name is a digest of what the notification is *about*, so the
+ * filesystem is the deduplication: the same durable condition derives the same
+ * name, and the `link` that gives a finished record that name either wins or
+ * reports that somebody already said this. There is no read-then-write, no lock
+ * and no counter, which is what makes two schedulers safe against each other
+ * here. See `notify/attention-store.ts` for why it is `link` and not an
+ * exclusive `open`.
+ */
+
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+
+import { orchestratorHome } from '../../config/paths.js';
+import { OS_PATH_PROVIDER, type PathProvider } from '../../config/internal/path-provider.js';
+
+/**
+ * The directory under the orchestrator home that holds the records.
+ *
+ * Its own directory rather than its own name inside a shared one, following the
+ * rule this build already made structural, and named for what it holds: items
+ * awaiting an operator's attention. Deliberately not `notifications`, which
+ * would make the directory's existence a claim that something was *delivered* —
+ * a record here asserts only that a condition was found and written down.
+ */
+export const OPERATOR_ATTENTION_DIR_NAME = 'operator-attention';
+
+/** Extension of a stored record. No alternative spelling. */
+export const OPERATOR_ATTENTION_FILE_EXTENSION = '.json';
+
+/**
+ * How many hex characters of the identity digest become the file name.
+ *
+ * 32, so a name is 37 characters with the extension — inside every plain-file
+ * budget this build applies — and a truncation of SHA-256 to 128 bits. The
+ * collision this has to avoid is not adversarial: two *different* durable
+ * conditions producing one name would silently drop a notification, and 128 bits
+ * over a set an operator could plausibly hold is not a risk anybody can reach.
+ * A longer name would not be wrong; it would just be longer.
+ */
+export const ATTENTION_ID_LENGTH = 32;
+
+/** `<id>.json` where `<id>` is exactly {@link ATTENTION_ID_LENGTH} lowercase hex. */
+const ATTENTION_FILE_NAME = new RegExp(`^[0-9a-f]{${String(ATTENTION_ID_LENGTH)}}\\.json$`);
+
+/** `true` for a name this build would itself have written. */
+export function isAttentionFileName(name: string): boolean {
+  return ATTENTION_FILE_NAME.test(name);
+}
+
+/**
+ * The suffix of a staging file — the complete record, under a name nothing
+ * reads, waiting to be linked to its real one.
+ *
+ * A separate grammar rather than a convention, because the listing has to be
+ * able to tell three things apart: a record, one of this build's own leftovers,
+ * and a file somebody else put in the directory. Reporting a leftover as
+ * "foreign" would tell an operator to go and look at something that is theirs
+ * and harmless.
+ */
+const ATTENTION_STAGING_NAME = new RegExp(
+  `^[0-9a-f]{${String(ATTENTION_ID_LENGTH)}}\\.[0-9a-z]+-[0-9a-f]{12}\\.staging$`,
+);
+
+/** `true` for a staging name this build would itself have written. */
+export function isAttentionStagingName(name: string): boolean {
+  return ATTENTION_STAGING_NAME.test(name);
+}
+
+/**
+ * A staging name for one record, unique per attempt.
+ *
+ * The pid and the random half are both there and both earn it: the pid so two
+ * processes cannot collide, and the random half so one process retrying cannot
+ * collide with its own leftover from a crash. Same construction as
+ * `state/atomic-file.ts`'s temporary name, for the same reason.
+ */
+export function attentionStagingName(attentionId: string, suffix: string): string {
+  return `${attentionId}.${suffix}.staging`;
+}
+
+/** The id inside a name this build wrote, or `null`. */
+export function attentionIdOf(name: string): string | null {
+  if (!isAttentionFileName(name)) return null;
+  return name.slice(0, ATTENTION_ID_LENGTH);
+}
+
+/**
+ * The store root. A pure function of the OS user identity, and it creates
+ * nothing.
+ *
+ * A root that is not there is a machine on which nothing has ever needed an
+ * operator, which is a reading rather than an error.
+ */
+export function operatorAttentionRoot(provider: PathProvider = OS_PATH_PROVIDER): string {
+  return join(orchestratorHome(provider), OPERATOR_ATTENTION_DIR_NAME);
+}
+
+/** The full path of one record. Joins; touches no filesystem. */
+export function operatorAttentionPath(
+  attentionId: string,
+  provider: PathProvider = OS_PATH_PROVIDER,
+): string {
+  return join(
+    operatorAttentionRoot(provider),
+    `${attentionId}${OPERATOR_ATTENTION_FILE_EXTENSION}`,
+  );
+}
+
+/**
+ * Separates the fields of an identity so two of them cannot run together.
+ *
+ * A NUL, written as an escape rather than as the byte itself. The byte works —
+ * it is the one character no field here can contain, which is what a separator
+ * has to be, and unlike a space it does not lean on the field grammars (a
+ * repository root may hold spaces). What the raw byte does not survive is being
+ * *read*: Git classifies a source file containing one as **binary**, so the
+ * whole module stops diffing, stops being reviewable, and stops being covered
+ * by `.gitattributes`' `text=auto eol=lf` normalisation.
+ *
+ * Caught by `git show --stat` on the first commit of this slice, which reported
+ * this file as `Bin 0 -> 8342 bytes` while every sibling reported a line count.
+ * The escape produces the identical string at runtime, which was measured
+ * rather than assumed: the same identity digests to the same value on both
+ * sides of the change.
+ */
+const FIELD_SEPARATOR = '\u0000';
+
+/**
+ * What one notification is *about*, as the values that decide whether two of
+ * them are the same notification.
+ *
+ * Each field earns its place:
+ *
+ *  - `repositoryRoot` rather than the declared id, because two clones of one
+ *    project declare the same id and are two execution domains — the same rule
+ *    the execution lease already applies by keying on the Git common directory;
+ *  - `taskId`, obviously;
+ *  - `reason` and `detail`, so a task that moves from one human-action condition
+ *    to a different one raises a second item rather than reusing the first;
+ *  - `stateEnteredAt`, which is what makes a *re-entry* a new notification. A
+ *    task parked on the same block across a hundred scheduler passes keeps the
+ *    same instant and therefore the same name, so the passes deduplicate. One
+ *    that is continued, runs, and blocks again gets a fresh instant and is said
+ *    again — which is right: it is a new event, and an operator who acted on the
+ *    first is entitled to know the second happened.
+ */
+export interface AttentionIdentity {
+  readonly repositoryRoot: string;
+  readonly taskId: string;
+  readonly reason: string;
+  readonly detail: string | null;
+  readonly stateEnteredAt: string;
+}
+
+/**
+ * The identity digest for one notification.
+ *
+ * `null` is encoded distinctly from an empty string so that a `detail` of `''`
+ * — which no producer writes, and which a widened vocabulary could — cannot
+ * collide with an absent one. The two tags are control characters, written as
+ * escapes rather than as the bytes themselves for the reason
+ * {@link FIELD_SEPARATOR} gives: a source file holding one is classified binary
+ * by Git and stops being reviewable. The escapes produce the identical strings,
+ * so every identity this build has ever derived is unchanged — measured, not
+ * assumed.
+ */
+export function attentionIdFor(identity: AttentionIdentity): string {
+  const fields = [
+    identity.repositoryRoot,
+    identity.taskId,
+    identity.reason,
+    identity.detail === null ? '\u0001none' : `\u0002${identity.detail}`,
+    identity.stateEnteredAt,
+  ];
+  return createHash('sha256')
+    .update(fields.join(FIELD_SEPARATOR), 'utf8')
+    .digest('hex')
+    .slice(0, ATTENTION_ID_LENGTH);
+}

@@ -174,6 +174,7 @@ function runResultWithDenials(denials: { count: number; tools: readonly string[]
     reasonCodes: Object.freeze([]),
     remediatedVerifyFailure: false,
     continuedUsageLimit: false,
+    usageLimitContinuation: null,
     continuedHumanDecision: false,
     reconciliation: null,
     resume: null,

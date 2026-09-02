@@ -93,6 +93,10 @@ import {
   type InvocationGrant,
 } from './invocation-grant.js';
 import { resumePointToState } from '../core/resume-policy.js';
+import {
+  usageLimitContinuation,
+  type UsageLimitContinuationReading,
+} from '../core/usage-limit-continuation.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
 import {
   isLoopDrivenState,
@@ -336,13 +340,30 @@ export interface RunResult {
   readonly continuedHumanDecision: boolean;
   /**
    * Whether this run spent the operator's decision to continue a
-   * `BLOCKED_USAGE_LIMIT` task that recorded no reset time.
+   * `BLOCKED_USAGE_LIMIT` task the machine cannot wait out.
    *
    * The third of the same shape, reported for the same reason: the operator
    * bought one departure and has to be able to see whether it was used. Never
    * persisted — it is a fact about one call.
    */
   readonly continuedUsageLimit: boolean;
+  /**
+   * How this run read a `BLOCKED_USAGE_LIMIT` record, or `null` for a run that
+   * never met one.
+   *
+   * The reading `core/usage-limit-continuation.ts` produced, carried out so that
+   * an operator meeting the block is told **which** of its readings applies —
+   * whether the wait is still the machine's, whether the automatic path owns the
+   * task and is refusing on the repository rather than the record, or whether
+   * the decision is theirs. `--continue-usage-limit`'s help promises that
+   * `run --task <id>` prints it, and this field is what makes that true rather
+   * than an intention.
+   *
+   * Never persisted, and never authority: the permission is re-derived at the
+   * conjunct from the record and the clock, so a reading that travelled here
+   * cannot become a grant somewhere else.
+   */
+  readonly usageLimitContinuation: UsageLimitContinuationReading | null;
   /**
    * What the writing agent was refused, **across every step of this run**.
    *
@@ -445,22 +466,24 @@ export interface RunRequest {
   readonly continueHumanDecision?: boolean;
   /**
    * Whether the operator asked, on this invocation, to continue a
-   * `BLOCKED_USAGE_LIMIT` task **that recorded no reset time**, from the resume
-   * point it did record.
+   * `BLOCKED_USAGE_LIMIT` task **the machine cannot wait out**, from the resume
+   * point it recorded.
    *
    * The third half of the same story, and it was found the same way: by asking
    * which declared edge no executor could take. `BLOCKED_USAGE_LIMIT` is
    * `resumable: true` with `resumeReentry: 'DIRECT'` and a `REQUIRED` resume
    * point, and its edges back into the work loop are declared. The automatic
-   * path takes them — but only against a reported reset instant. Without one,
-   * `evaluateAutomaticResume` denies `RESET_TIME_MISSING` for ever, and the two
-   * operator conjuncts beside this one are pinned by their first terms to other
-   * states. The task could not be moved by anything.
+   * path takes them — but only where the *record* it reads permits. Where it
+   * does not — no reset instant to wait for, or a withdrawn resume record —
+   * `evaluateAutomaticResume` denies for ever, and the two operator conjuncts
+   * beside this one are pinned by their first terms to other states. Such a task
+   * could not be moved by anything.
    *
-   * The narrowing to `reportedResetAt === null` lives in the driver's conjunct,
-   * not here, because it is a property of the *record* rather than of the
-   * invocation — see {@link mayContinueUsageLimit} for why a known reset must
-   * not be reachable through this door.
+   * Which records qualify lives in the driver's conjunct, not here, because it
+   * is a property of the *record* rather than of the invocation — see
+   * `core/usage-limit-continuation.ts` for the readings and
+   * {@link mayContinueUsageLimit} for why a machine-owned wait must not be
+   * reachable through this door.
    *
    * Conjoined with `mayContinueUsageLimit(continuationGrant)`, so it does
    * nothing without `ATTENDED`, and spent after one use — see
@@ -559,6 +582,7 @@ function runResult(
     remediatedVerifyFailure: false,
     continuedHumanDecision: false,
     continuedUsageLimit: false,
+    usageLimitContinuation: null,
     permissionDenials: NO_PERMISSION_DENIALS,
     ...from,
   });
@@ -917,22 +941,43 @@ export async function runTask(
 
     // The third, and the one conjunct its siblings have no equivalent of.
     //
-    // `state.reportedResetAt === null` is what keeps this door shut on every
-    // block that can still clear itself. A recorded instant — future or past —
-    // means the automatic path owns the question: in the future it is a wait,
-    // and in the past `evaluateAutomaticResume` already grants it unless the
-    // *world* denies, and this decision carries no evidence about the world.
-    // Without the conjunct an operator flag would silently become a way to
-    // start a reviewer before its window returned, which is the waste M2 slice
-    // 6 exists to stop.
+    // `usageLimitContinuation` is what keeps this door shut on every block that
+    // can still clear itself, and it is a *call into the resume policy* rather
+    // than a second reading of it. It permits exactly the states whose own
+    // record makes an automatic resume impossible — no reset instant recorded,
+    // an instant that is not a timestamp, or a resume record that was withdrawn
+    // after the reset had already passed — and refuses everything else. A future
+    // instant is `RESET_AHEAD`: the machine knows when the quota returns and an
+    // escape that overrode that would start an agent before its window, which is
+    // the waste M2 slice 6 exists to stop. A past instant over an intact record
+    // is `MACHINE_MAY_STILL_RESUME`: the automatic path grants that one unless
+    // the *world* denies, and this decision carries no evidence about the world.
+    //
+    // Until M3 slice 2 the term was `state.reportedResetAt === null`, which is
+    // the `RESET_UNRECORDED` reading above and nothing else. It was too narrow
+    // by one shape and the gap was measured, not argued: a block written with
+    // its interruption checkpoint withdrawn records a reset **and** cannot be
+    // resumed from, and every command in the build refused it. See that module's
+    // header for the reproduction.
     //
     // No phase term, for the reason its `HUMAN_DECISION_REQUIRED` sibling gives:
     // this state declares three work-loop edges and the record says which one,
     // while `RESUME_PHASE_NOT_DRIVEN` still refuses a nonsense point at the
-    // write.
+    // write. `state.resumeFrom !== null` is kept beside it all the same, and is
+    // not redundant with the reading's own `RESUME_POINT_MISSING` refusal: this
+    // is the read of one particular record that the write below depends on.
+    //
+    // Read once per iteration and used twice: the permission below, and the
+    // reading carried out to the operator on the refusal. One read rather than
+    // two so that a clock crossing the reset instant between them cannot make
+    // the report disagree with the decision it is reporting.
+    const quota =
+      state.state === 'BLOCKED_USAGE_LIMIT' ? usageLimitContinuation(state, deps.now()) : null;
+
     const continuingUsageLimit =
       state.state === 'BLOCKED_USAGE_LIMIT' &&
-      state.reportedResetAt === null &&
+      quota !== null &&
+      quota.permitted &&
       request.continueUsageLimit === true &&
       mayContinueUsageLimit(request.continuationGrant) &&
       state.resumeFrom !== null &&
@@ -952,6 +997,7 @@ export async function runTask(
         reasonCodes: resume.reasonCodes,
         reconciliation,
         resume,
+        ...(quota === null ? {} : { usageLimitContinuation: quota.reading }),
       });
     }
 
@@ -1020,8 +1066,8 @@ export async function runTask(
     // sentence is a third input, and folding it in would make one grant look
     // like an authority it is not. It widens nothing either —
     // `continuingUsageLimit` has already required `ATTENDED`, this exact state,
-    // an **absent** reset instant, a recorded resume point and an unspent
-    // decision. The iteration after the resume needs none of this: the task is
+    // a **record the machine cannot wait out**, a recorded resume point and an
+    // unspent decision. The iteration after the resume needs none of this: the task is
     // then in-flight and classifies `ATTENDED_ONLY` like any other.
     const granted = permitsContinuation(
       request.continuationGrant,

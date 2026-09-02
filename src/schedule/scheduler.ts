@@ -89,13 +89,49 @@
  * which has no default and is itself capped by `MAX_SCHEDULER_CYCLES` where the
  * loop reads it.
  *
+ * ── What M3-02 added, and why it did not change the argument above ─────────
+ *
+ * One optional number, `idlePollMs`. Without it a pass that leaves nothing
+ * recorded to wait for ends the invocation, which is what every invocation
+ * before that slice did and what the first case in
+ * `tests/m3-02-recurring-operation.test.ts` pins. With it the loop sleeps that
+ * interval and plans again instead.
+ *
+ * It exists because "no future wake" never meant "nothing will ever be runnable
+ * again". The wake horizon is a horizon of *recorded quota resets*: work that
+ * becomes runnable for any other reason — a task somebody writes, a dependency
+ * another repository satisfies, a block an operator clears — is invisible to it.
+ * The honest answers to that are to stop or to look again on an interval
+ * somebody chose, and both are now available while neither is implied.
+ *
+ * Termination is unaffected. An idle cycle is still a cycle, `--max-cycles`
+ * still bounds them, and `MAX_SCHEDULER_CYCLES` still caps that where the loop
+ * reads it. What the interval bounds is how *often* a pass happens, never how
+ * many.
+ *
  * ── What this module deliberately is not ───────────────────────────────────
  *
  * Not a daemon, not a service, not a cron, not a job queue and not a timer
  * wheel. It has no notion of a recurring job, no user-authored schedule, no
- * event subscription and no persistence of its own. The only condition it can
- * wait for is the one the durable contract already expresses — a reported quota
- * reset — and the only thing it does when the wait matures is plan again.
+ * event subscription and no persistence of its own. The two conditions it can
+ * wait for are a reported quota reset, which the durable contract already
+ * expresses, and an interval an operator typed on the command line; neither is
+ * stored anywhere, and the only thing it does when a wait ends is plan again.
+ *
+ * It also has no notion of **notification**, and that is structural rather than
+ * a habit: `tests/m3-01-persistent-scheduler.test.ts` reads this file with its
+ * prose stripped and refuses the tokens for a notifier, a grant, a cron
+ * expression and a persisted schedule. M3-02 needed a finished **pass** to be
+ * *observable*, so it added {@link SchedulerDependencies.observePass} — a
+ * neutral seam that says "a pass ended, here is what it drove" and knows nothing
+ * about who cares. `cli/repositories-command.ts` owns that question, because it
+ * already owns every question about the operator's own profile.
+ *
+ * A pass rather than a cycle, and it is called the moment the pass returns
+ * rather than at the bottom of the iteration. A cycle is not finished until its
+ * wait is, and a wait can be a day: the first spelling of this seam would have
+ * deferred everything the observer does by the whole sleep. See that
+ * dependency's own comment.
  */
 
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
@@ -142,6 +178,31 @@ export function isUsableCycleBound(value: number): boolean {
 }
 
 /**
+ * The shortest idle interval this build will schedule on.
+ *
+ * One second. Not a guess about what an operator wants — it is the floor under
+ * *this* loop specifically, and what sits below it is the cost of a pass: an
+ * idle cycle re-resolves every enlisted repository through real `git` children,
+ * re-plans each of them, and re-admits every task the previous cycle already
+ * settled (`README.md`'s L-M3-01-3). Sub-second polling would spend all of that
+ * on a registry nobody touched.
+ *
+ * It is a floor and not the thing that stops a spin. What bounds an idle loop is
+ * `--max-cycles`, which is required whenever waiting is permitted at all and is
+ * itself capped by {@link MAX_SCHEDULER_CYCLES}. A one-second poll therefore
+ * ends after at most 4096 cycles however the operator typed it, and saying that
+ * plainly is better than pretending a minimum interval is a safety property.
+ */
+export const MIN_IDLE_POLL_MS = 1_000;
+
+/** `true` for an idle interval this build will sleep on. Total, fail-closed. */
+export function isUsableIdlePollBound(value: number): boolean {
+  return (
+    Number.isSafeInteger(value) && value >= MIN_IDLE_POLL_MS && value <= MAX_WAIT_MS_CEILING
+  );
+}
+
+/**
  * Whether this invocation may wait between coordinator passes, and under what
  * bounds.
  *
@@ -153,7 +214,30 @@ export function isUsableCycleBound(value: number): boolean {
  */
 export type SchedulerWaitPolicy =
   | { readonly wait: false }
-  | { readonly wait: true; readonly maxWaitMs: number; readonly maxCycles: number };
+  | {
+      readonly wait: true;
+      readonly maxWaitMs: number;
+      readonly maxCycles: number;
+      /**
+       * How long to sleep when a pass leaves **nothing recorded to wait for**,
+       * before planning again — or `null` to end there, which is what every
+       * invocation before M3 slice 2 did.
+       *
+       * This is the whole of "recurring operation", and it is one number rather
+       * than a schedule on purpose. The loop already knows how to run a pass,
+       * sleep holding nothing, re-establish the registry and plan again; the only
+       * thing it could not do was carry on when the durable state named no
+       * instant. A repository that becomes runnable later — a task a person
+       * added, a dependency another repository just satisfied, a block an
+       * operator just cleared — is invisible to the wake horizon, because the
+       * wake horizon is a horizon of *recorded quota resets* and nothing else.
+       *
+       * `null`, and no default anywhere in this module, for the reason the two
+       * bounds beside it have none: an interval nobody typed is a machine kept
+       * busy by a default.
+       */
+      readonly idlePollMs: number | null;
+    };
 
 /**
  * What the scheduler did at the end of a cycle, and — when it did not sleep —
@@ -211,6 +295,17 @@ export const SCHEDULER_DISPOSITIONS = [
   /** Slept and ran another coordinator pass. Never an ending. */
   'WAITED',
   /**
+   * Nothing was recorded to wait for, an idle interval was permitted, and it
+   * was slept before planning again. Never an ending.
+   *
+   * Its own member rather than a `WAITED` with a different number, because the
+   * two answer different questions. `WAITED` means "a task told me when to come
+   * back and I did"; this means "nothing told me anything and I looked again
+   * anyway". An operator reading a report of forty `WAITED` rows would think
+   * forty quota windows had turned over.
+   */
+  'IDLE_POLLED',
+  /**
    * A recorded reset matured *while the pass was running*, so another pass ran
    * at once without sleeping. Never an ending.
    *
@@ -224,6 +319,8 @@ export const SCHEDULER_DISPOSITIONS = [
   'WAIT_BOUND_UNUSABLE',
   /** `--max-cycles` is not a bound this build will schedule on. Nothing ran. */
   'CYCLE_BOUND_UNUSABLE',
+  /** `--idle-poll-ms` is not an interval this build will sleep on. Nothing ran. */
+  'IDLE_POLL_BOUND_UNUSABLE',
 ] as const;
 
 export type SchedulerDisposition = (typeof SCHEDULER_DISPOSITIONS)[number];
@@ -284,6 +381,33 @@ export type SchedulerRegistryRead =
       readonly maxConcurrentRepositories: number;
     }
   | { readonly ok: false; readonly code: string };
+
+/**
+ * One finished coordinator pass, handed to
+ * {@link SchedulerDependencies.observePass}.
+ *
+ * A **pass**, not a cycle, and the difference is the whole reason this shape
+ * changed before the slice shipped. A cycle is not finished until its wait is,
+ * and a wait can be a day: an observer bound to the cycle would have written
+ * down and announced an operator-blocking condition found at minute zero only at
+ * hour twenty-four. So it carries no disposition and no wait — it says *a pass
+ * ended, here is what it drove and what it came to* — and the loop calls it the
+ * moment `driveRepositories` returns, before anything is decided about waiting.
+ *
+ * The set travels with it rather than being captured by the observer, because it
+ * is re-established after every sleep: an observer holding the set it was built
+ * with would, after a five-hour wait, be looking at repositories the operator
+ * had withdrawn. It is the resolved set rather than a list of paths, because an
+ * observer that has to say *which repository* needs something needs the declared
+ * identity as well as the root.
+ */
+export interface PassObservation {
+  /** 1-based, matching the cycle this pass belongs to. */
+  readonly sequence: number;
+  readonly run: CrossRepositoryRunResult;
+  /** The repositories this pass actually drove, in registry order. */
+  readonly repositories: readonly RegisteredRepository[];
+}
 
 /** A shutdown request, as this module can observe one. */
 export interface ShutdownSeam {
@@ -356,6 +480,39 @@ export interface SchedulerDependencies {
   readonly scanDurableWakes?: typeof scanDurableWakes;
   readonly sleep?: (ms: number, cancel: Promise<void>) => Promise<void>;
   readonly shutdown?: ShutdownSeam;
+  /**
+   * Called once per finished coordinator pass, the moment it returns and before
+   * anything is decided about waiting.
+   *
+   * A neutral observer, and neutral is the design. This module is pinned by
+   * `tests/m3-01-persistent-scheduler.test.ts` against naming a notifier, a
+   * grant, a cron expression or a persisted schedule of its own, and the pin is
+   * right: a loop that decided who to tell about what would be a second policy
+   * living inside a scheduler. So the loop says *a pass ended, here is what it
+   * drove*, and `cli/repositories-command.ts` — the layer that already owns
+   * every question about the operator's profile — decides whether anything
+   * follows from that.
+   *
+   * **Before the wait, and that placement is the point.** Called at the bottom
+   * of the iteration it would have inherited the cycle's whole sleep, so a
+   * condition needing a person would have been written down and announced up to
+   * a day after it was found. Three reviewers produced that path independently.
+   * The counter-proof is an ordering assertion in
+   * `tests/m3-02-recurring-operation.test.ts`: the observer's call must precede
+   * the sleep that follows it.
+   *
+   * It is also why nothing new sits between the last shutdown check and the next
+   * pass. An awaited observer *there* would have re-opened the window the two
+   * post-wait `stopAfterWait` checks exist to close — an interrupt arriving
+   * while an outbox was being written would have bought a full coordinator pass,
+   * agents included.
+   *
+   * Awaited, so an observer that writes to disk finishes before the loop moves
+   * on. Its failures are its own: this loop wraps the call and a rejection
+   * changes no disposition, because an outbox that could not be written must not
+   * rewrite the scheduler's answer about the repositories.
+   */
+  readonly observePass?: (observation: PassObservation) => Promise<void>;
 }
 
 function cycle(
@@ -428,6 +585,13 @@ export async function driveScheduler(
   if (request.wait.wait && !isUsableCycleBound(request.wait.maxCycles)) {
     return result([], 'MAX_CYCLES_INVALID', 'CYCLE_BOUND_UNUSABLE');
   }
+  if (
+    request.wait.wait &&
+    request.wait.idlePollMs !== null &&
+    !isUsableIdlePollBound(request.wait.idlePollMs)
+  ) {
+    return result([], 'IDLE_POLL_MS_INVALID', 'IDLE_POLL_BOUND_UNUSABLE');
+  }
 
   const cycles: SchedulerCycle[] = [];
 
@@ -446,10 +610,41 @@ export async function driveScheduler(
     ? Math.min(request.wait.maxCycles, MAX_SCHEDULER_CYCLES)
     : 0;
 
+  const idlePollMs = request.wait.wait ? request.wait.idlePollMs : null;
+
   let repositories = request.repositories;
   let capacity = request.maxConcurrentRepositories;
+  /** The set the cycle in progress is driving. Re-derived at every cycle. */
+  let driving: readonly RegisteredRepository[] = [];
+
+  /**
+   * Lets the caller look at a pass the moment it ends.
+   *
+   * Every pass goes through here, including the one belonging to the cycle that
+   * ends the invocation, so the last thing a long-running process did is
+   * observable rather than only the passes it continued from. The observer's
+   * failures are swallowed on purpose — see the dependency's own comment.
+   */
+  const observePass = async (
+    sequence: number,
+    run: CrossRepositoryRunResult,
+  ): Promise<void> => {
+    if (deps.observePass === undefined) return;
+    try {
+      await deps.observePass({ sequence, run, repositories: driving });
+    } catch {
+      // The thrown value is dropped rather than formatted: it comes from an
+      // observer this module knows nothing about.
+    }
+  };
+
+  /** Records one finished cycle. Synchronous, and deliberately so — see above. */
+  const record = (entry: SchedulerCycle): void => {
+    cycles.push(entry);
+  };
 
   for (let sequence = 1; ; sequence += 1) {
+    driving = repositories;
     // The moment this pass began, kept so the scan below can tell a reset that
     // matured *inside* the pass from one that was already behind when it
     // started. See `WakeWindow`.
@@ -474,6 +669,13 @@ export async function driveScheduler(
       },
     );
 
+    // The pass is over and every admission it made has settled and released.
+    // Whatever the caller wants to do with what it left behind happens **here**,
+    // before a single line of the wait decision below: a sleep can be a day
+    // long, and an operator-blocking condition found by this pass has to be
+    // written down and said now rather than when the sleep ends.
+    await observePass(sequence, run);
+
     // ── The refusals, in fail-closed order ────────────────────────────────
     //
     // The operator's opt-in first, then whether anything is recorded to wait
@@ -488,7 +690,7 @@ export async function driveScheduler(
     // in it, and doing that for a caller who cannot act on the answer would be
     // this slice quietly changing a command it is supposed to leave alone.
     if (!request.wait.wait) {
-      cycles.push(cycle({ sequence, run, scan: NOT_SCANNED, disposition: 'NOT_REQUESTED' }));
+      record(cycle({ sequence, run, scan: NOT_SCANNED, disposition: 'NOT_REQUESTED' }));
       return result(cycles, null);
     }
 
@@ -511,7 +713,9 @@ export async function driveScheduler(
     // me everything was fine". An interrupted run did not finish on its own
     // terms, whatever else was true, and the report has to say so.
     if (shutdown.stopped()) {
-      cycles.push(cycle({ sequence, run, scan: horizon, disposition: 'SHUTDOWN_REQUESTED', wake }));
+      record(
+        cycle({ sequence, run, scan: horizon, disposition: 'SHUTDOWN_REQUESTED', wake }),
+      );
       return result(cycles, null);
     }
 
@@ -547,7 +751,7 @@ export async function driveScheduler(
       return release !== null && release.code !== 'RELEASED';
     });
     if (unproven !== undefined) {
-      cycles.push(
+      record(
         cycle({ sequence, run, scan: horizon, disposition: 'LEASE_RELEASE_UNPROVEN', wake }),
       );
       return result(cycles, null);
@@ -567,7 +771,7 @@ export async function driveScheduler(
     // conservative about a login is never wrong.
     if (matured !== null) {
       if (sequence >= cycleBudget) {
-        cycles.push(
+        record(
           cycle({
             sequence,
             run,
@@ -578,19 +782,36 @@ export async function driveScheduler(
         );
         return result(cycles, null);
       }
-      cycles.push(
+      record(
         cycle({ sequence, run, scan: horizon, disposition: 'MATURED_DURING_PASS', wake: matured }),
       );
       continue;
     }
 
-    if (wake === null) {
-      cycles.push(cycle({ sequence, run, scan: horizon, disposition: 'NO_FUTURE_WAKE' }));
+    // ── Nothing recorded to wait for ──────────────────────────────────────
+    //
+    // Without an idle interval this is where the invocation has always ended,
+    // and it still is: `NO_FUTURE_WAKE` is reported before the cycle budget is
+    // consulted, exactly as before, so an operator who did not ask to keep going
+    // gets the same ending on the same fixture.
+    //
+    // With one, the loop carries on — and the reason it may is that the wake
+    // horizon is a horizon of *recorded quota resets* and nothing else. Work
+    // that becomes runnable for any other reason — a task somebody wrote, a
+    // dependency another repository just satisfied, a block an operator just
+    // cleared — is invisible to it, so "no future wake" has never meant "nothing
+    // will ever be runnable again". It meant "nothing has told me when", and the
+    // honest answer to that is either to stop or to look again on an interval
+    // the operator chose. Both are now available and neither is implied.
+    if (wake === null && idlePollMs === null) {
+      record(cycle({ sequence, run, scan: horizon, disposition: 'NO_FUTURE_WAKE' }));
       return result(cycles, null);
     }
 
     if (sequence >= cycleBudget) {
-      cycles.push(cycle({ sequence, run, scan: horizon, disposition: 'CYCLE_BUDGET_SPENT', wake }));
+      record(
+        cycle({ sequence, run, scan: horizon, disposition: 'CYCLE_BUDGET_SPENT', wake }),
+      );
       return result(cycles, null);
     }
 
@@ -599,29 +820,97 @@ export async function driveScheduler(
       // Unreachable while the scan reported a wake — it refuses an unparseable
       // clock before reading anything — and kept because "another module's
       // reasoning says this cannot happen" is not the same as a check, and the
-      // cost of being wrong here is a sleep computed from `NaN`.
-      cycles.push(
+      // cost of being wrong here is a sleep computed from `NaN`. It is reachable
+      // on the idle path, where no scan result stands between the clock and the
+      // arithmetic.
+      record(
         cycle({ sequence, run, scan: horizon, disposition: 'CURRENT_TIME_UNPARSEABLE', wake }),
       );
       return result(cycles, null);
     }
 
-    // The `+ 1` is not an assumption about the policy; it is a consequence of
-    // it. `evaluateAutomaticResume` refuses while `now <= reportedResetAt`, so
-    // waking *at* the reported instant is refused, and a schedule aimed exactly
-    // there would reliably produce a second `RESET_TIME_NOT_REACHED` — and,
-    // because that instant would then no longer be strictly future, no third
-    // attempt. One millisecond later is the earliest moment the existing policy
-    // can possibly allow, and it is still only *possibly*: the policy is re-run
-    // after the wake and is the authority, whatever this arithmetic aimed at.
-    const deadlineMs = wake.resetAtMs + 1;
-    const requiredWaitMs = deadlineMs - nowMs;
-    if (requiredWaitMs > request.wait.maxWaitMs) {
-      cycles.push(cycle({ sequence, run, scan: horizon, disposition: 'BOUND_EXCEEDED', wake }));
-      return result(cycles, null);
+    // ── What this cycle is about to sleep for ─────────────────────────────
+    //
+    // Two sources, one sleep. The bound differs because the two numbers mean
+    // different things: `--max-wait-ms` is a ceiling on how long a *recorded*
+    // instant may be waited for, and an idle interval is the whole of its own
+    // duration, so it is its own bound. Reusing `--max-wait-ms` for both would
+    // let a short ceiling silently truncate an interval the operator typed.
+    let deadlineMs: number;
+    let sleepBudgetMs: number;
+    let sleptDisposition: SchedulerDisposition;
+
+    /**
+     * The idle interval, measured from **now** rather than from the clock
+     * reading taken before the scan.
+     *
+     * `nowIso` is read before `scanDurableWakes`, which enumerates every
+     * enlisted repository's runtime directory and reads every state file in it.
+     * On a large registry that is seconds, and a deadline anchored before it
+     * would have made the effective interval `idlePollMs` *minus the scan* —
+     * zero for a scan that costs more than the interval, which is
+     * `MIN_IDLE_POLL_MS`'s own floor being unenforceable by the code that
+     * documents it. `null` when the clock stopped being a timestamp in between.
+     */
+    const idleSleep = (): { readonly deadlineMs: number; readonly budget: number } | null => {
+      if (idlePollMs === null) return null;
+      const at = Date.parse(deps.now());
+      if (!Number.isFinite(at)) return null;
+      return { deadlineMs: at + idlePollMs, budget: idlePollMs };
+    };
+
+    if (wake === null) {
+      // Checked above: `idlePollMs === null` already returned.
+      const idle = idleSleep();
+      if (idle === null) {
+        record(cycle({ sequence, run, scan: horizon, disposition: 'CURRENT_TIME_UNPARSEABLE' }));
+        return result(cycles, null);
+      }
+      deadlineMs = idle.deadlineMs;
+      sleepBudgetMs = idle.budget;
+      sleptDisposition = 'IDLE_POLLED';
+    } else {
+      // The `+ 1` is not an assumption about the policy; it is a consequence of
+      // it. `evaluateAutomaticResume` refuses while `now <= reportedResetAt`, so
+      // waking *at* the reported instant is refused, and a schedule aimed
+      // exactly there would reliably produce a second `RESET_TIME_NOT_REACHED` —
+      // and, because that instant would then no longer be strictly future, no
+      // third attempt. One millisecond later is the earliest moment the existing
+      // policy can possibly allow, and it is still only *possibly*: the policy is
+      // re-run after the wake and is the authority, whatever this arithmetic
+      // aimed at.
+      deadlineMs = wake.resetAtMs + 1;
+      const requiredWaitMs = deadlineMs - nowMs;
+      if (requiredWaitMs > request.wait.maxWaitMs) {
+        // ── A recorded wake further away than the operator will sleep ──────
+        //
+        // Without an idle interval this ends the invocation, as it always has:
+        // there is nothing else this loop knows how to do, and `--max-wait-ms`
+        // said not to sleep that long.
+        //
+        // With one, ending would be reading half of what the operator typed.
+        // `--max-wait-ms 600000 --idle-poll-ms 60000` says two things — do not
+        // block more than ten minutes on a recorded wait, and look again every
+        // minute — and both are satisfied by falling back to the interval. The
+        // alternative that shipped for one round did not: one distant quota
+        // reset in one repository ended a run that was polling for work in every
+        // other, which is exactly the case `--idle-poll-ms` exists for, since a
+        // block a person clears is invisible to the wake horizon.
+        const idle = idleSleep();
+        if (idle === null) {
+          record(cycle({ sequence, run, scan: horizon, disposition: 'BOUND_EXCEEDED', wake }));
+          return result(cycles, null);
+        }
+        deadlineMs = idle.deadlineMs;
+        sleepBudgetMs = idle.budget;
+        sleptDisposition = 'IDLE_POLLED';
+      } else {
+        sleepBudgetMs = request.wait.maxWaitMs;
+        sleptDisposition = 'WAITED';
+      }
     }
 
-    const slept = await sleepUntilInstant(deadlineMs, request.wait.maxWaitMs, {
+    const slept = await sleepUntilInstant(deadlineMs, sleepBudgetMs, {
       now: deps.now,
       sleep,
       shouldStop: shutdown.stopped,
@@ -629,7 +918,7 @@ export async function driveScheduler(
     });
 
     if (slept.outcome !== 'DEADLINE_REACHED') {
-      cycles.push(
+      record(
         cycle({
           sequence,
           run,
@@ -662,21 +951,19 @@ export async function driveScheduler(
      * moment when nothing was in flight and the scheduler was holding nothing:
      * exactly the state the design says an interrupt ends.
      */
-    const stopAfterWait = (): SchedulerResult =>
-      result(
-        [
-          ...cycles,
-          cycle({
-            sequence,
-            run,
-            scan: horizon,
-            disposition: 'SHUTDOWN_REQUESTED',
-            wake,
-            waitedMs: slept.elapsedMs,
-          }),
-        ],
-        null,
+    const stopAfterWait = (): SchedulerResult => {
+      record(
+        cycle({
+          sequence,
+          run,
+          scan: horizon,
+          disposition: 'SHUTDOWN_REQUESTED',
+          wake,
+          waitedMs: slept.elapsedMs,
+        }),
       );
+      return result(cycles, null);
+    };
 
     if (shutdown.stopped()) return stopAfterWait();
 
@@ -685,7 +972,7 @@ export async function driveScheduler(
     if (shutdown.stopped()) return stopAfterWait();
 
     if (!registry.ok) {
-      cycles.push(
+      record(
         cycle({
           sequence,
           run,
@@ -709,7 +996,7 @@ export async function driveScheduler(
       registry.maxConcurrentRepositories < 1 ||
       registry.maxConcurrentRepositories > MAX_CONCURRENT_REPOSITORIES
     ) {
-      cycles.push(
+      record(
         cycle({
           sequence,
           run,
@@ -725,12 +1012,12 @@ export async function driveScheduler(
     repositories = registry.repositories;
     capacity = registry.maxConcurrentRepositories;
 
-    cycles.push(
+    record(
       cycle({
         sequence,
         run,
         scan: horizon,
-        disposition: 'WAITED',
+        disposition: sleptDisposition,
         wake,
         waitedMs: slept.elapsedMs,
       }),

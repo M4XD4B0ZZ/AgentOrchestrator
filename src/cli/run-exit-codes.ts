@@ -1184,11 +1184,13 @@ const SCHEDULER_EXIT_CODES = Object.freeze({
   // invoking again with the same value repeats exactly.
   WAIT_BOUND_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
   CYCLE_BOUND_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
-  // Neither is reachable as an ending — each is a cycle that continued — and
-  // both are graded as defects rather than given a benign code, for the reason
-  // the table's header gives.
+  IDLE_POLL_BOUND_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
+  // None of the three is reachable as an ending — each is a cycle that
+  // continued — and all are graded as defects rather than given a benign code,
+  // for the reason the table's header gives.
   WAITED: EXIT_RUN_UNEXPECTED,
   MATURED_DURING_PASS: EXIT_RUN_UNEXPECTED,
+  IDLE_POLLED: EXIT_RUN_UNEXPECTED,
 }) satisfies Record<SchedulerDisposition, CliExitCode>;
 
 /**

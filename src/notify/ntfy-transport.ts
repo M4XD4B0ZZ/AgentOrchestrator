@@ -43,6 +43,7 @@ import type {
   OperatorNotification,
   TransportResult,
 } from './notification.js';
+import type { AttentionPush, AttentionTransport } from './attention-notification.js';
 
 /** The whole budget for one attempt, connection included. */
 export const NOTIFICATION_TIMEOUT_MS = 10_000;
@@ -125,6 +126,97 @@ export function createNtfyTransport(config: NotificationConfig): NotificationTra
 
     // Not read, and not left dangling either: an unconsumed body keeps a socket
     // in play, and reading it would take in text this process has no use for.
+    try {
+      await response.body?.cancel();
+    } catch {
+      // A body that cannot be cancelled says nothing about whether the
+      // notification arrived, which is the only question here.
+    }
+
+    if (response.ok) return { ok: true };
+    if (response.status === 401 || response.status === 403) {
+      return { ok: false, code: 'REJECTED_UNAUTHORISED' };
+    }
+    return { ok: false, code: 'REJECTED_BY_SERVER' };
+  };
+}
+
+/* ─────────────── the second payload: an open operator-attention item ─────── */
+
+/**
+ * The human-readable half of an attention push.
+ *
+ * Built from validated ids, closed codes and one sentence out of
+ * `core/task-attention.ts`'s fixed table. Deliberately **less** than the durable
+ * record beside it carries: the record names the repository root, because it
+ * lives outside every repository and has to say which one it came from, and this
+ * does not, because a filesystem layout is exactly the kind of thing that must
+ * not leave the machine. The declared id identifies the repository on the wire,
+ * which is the rule `notificationForBlockRun` already follows.
+ */
+function attentionMessageFor(notification: AttentionPush): string {
+  const lines = [
+    notification.action,
+    '',
+    `task:   ${notification.taskId}`,
+    `state:  ${notification.state}`,
+    `reason: ${notification.reason}`,
+    ...(notification.detail === null ? [] : [`detail: ${notification.detail}`]),
+    ...(notification.reportedResetAt === null
+      ? []
+      : [`reset:  ${notification.reportedResetAt}`]),
+  ];
+  return lines.join('\n');
+}
+
+/** The document posted for one attention item. */
+function attentionBodyFor(topic: string, notification: AttentionPush): string {
+  return JSON.stringify({
+    topic,
+    title: `${notification.repositoryId} / ${notification.taskId} needs an operator`,
+    message: attentionMessageFor(notification),
+    priority: PRIORITY,
+    tags: TAGS,
+  });
+}
+
+/**
+ * A transport for attention items, bound to one validated configuration.
+ *
+ * A sibling of {@link createNtfyTransport} rather than a widening of it, and
+ * that is the whole reason it is a second function in this file. The two
+ * payloads answer different questions — "how did this block run end" and "what
+ * is open against this task" — and `OperatorNotification` hard-carries a block
+ * id, a run id and a stop reason that an attention item has none of. Making one
+ * type cover both would have meant nullable halves and a `tests/v2-10` suite
+ * asserting a shape that no longer describes anything.
+ *
+ * It lives **in this file** because the property worth keeping is not "one
+ * transport" but "egress happens in one place", which is what
+ * `tests/v2-10-operator-notification.test.ts` measures over the tree. A second
+ * socket-opening module would have broken that whatever it was called.
+ *
+ * One bounded attempt, no retry, no redirect, no response body — identical to
+ * its sibling, for the reasons this file's header gives.
+ */
+export function createNtfyAttentionTransport(config: NotificationConfig): AttentionTransport {
+  return async (notification: AttentionPush): Promise<TransportResult> => {
+    let response: Response;
+    try {
+      response = await fetch(config.endpoint, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(config.token === null ? {} : { authorization: `Bearer ${config.token}` }),
+        },
+        body: attentionBodyFor(config.topic, notification),
+        redirect: 'error',
+        signal: AbortSignal.timeout(NOTIFICATION_TIMEOUT_MS),
+      });
+    } catch (error: unknown) {
+      return failureFor(error);
+    }
+
     try {
       await response.body?.cancel();
     } catch {

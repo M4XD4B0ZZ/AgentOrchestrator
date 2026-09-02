@@ -3880,27 +3880,159 @@ and because the failure mode it describes — a command that cannot start is
 
 ### Carried forward, deliberately
 
-- **L-M3-01-1** — the wake scan is **strictly weaker than
-  `evaluateAutomaticResume`**, on two facts it has already read. That authority
-  additionally requires `currentCommit !== null` and
-  `worktreeCleanAtCheckpoint === true`, both properties of the *record* rather
-  than of the world, so a `BLOCKED_USAGE_LIMIT` state carrying a reset **and** a
-  withdrawn checkpoint can never resume automatically — and is refused the
-  operator escape too, because `--continue-usage-limit` requires
-  `reportedResetAt === null`. `loop-step.ts` reaches `checkpoint: null` on four
-  production paths, so the shape is routine rather than exotic. The scheduler
-  schedules a wake for it, wakes once, plans, and then finds no future wake
-  because the instant is behind: one wasted pass, never a loop, and pinned as
-  such. What it can cost is wall clock — under the minimum `--max-cycles 2` a
-  doomed near wake spends the whole budget and a live later wake is never
-  reached, reported honestly as `CYCLE_BUDGET_SPENT`, exit 5.
+- **L-M3-01-1 — half closed by M3 slice 2.** It said that a
+  `BLOCKED_USAGE_LIMIT` state carrying a reset **and** a withdrawn checkpoint
+  could never resume automatically — `evaluateAutomaticResume` additionally
+  requires `currentCommit !== null` and `worktreeCleanAtCheckpoint === true`,
+  both properties of the *record* — and was refused the operator escape too,
+  because `--continue-usage-limit` required `reportedResetAt === null`. Such a
+  task could be moved by nothing.
 
-  Narrowing the scan by those two fields is free of I/O and would remove the
-  largest class of dead wakes. It is **not** taken, and the reason is the one
-  this build applies elsewhere: it would be a second reading of another module's
-  policy, correct only for as long as that policy keeps those two checks
-  record-only. The stuck state itself is a pre-existing M2 defect — the escape's
-  own guard excludes it — and belongs to whoever reopens that guard, not here.
+  **That half is closed.** The escape's guard is now
+  `usageLimitContinuation(state, now).permitted`, which asks the resume policy
+  which of its own refusals survive a world stipulated to agree with the record,
+  and permits exactly where that set is non-empty and does not include the wait.
+  The objection this entry raised against narrowing — that it would be a second
+  reading of another module's policy — is what shaped the fix: it is a *call*
+  into that policy, so a later slice that makes either check consult the world
+  moves the answer with it and nothing has to be edited. Reproduced against the
+  shipped CLI at `fdbe999` before the change (four commands, all refusing, the
+  state file byte-identical from each) and measured recovering afterwards.
+
+  **The wake-scan half stands.** The scan is still strictly weaker than the
+  resume policy, so it still schedules a wake for a task whose record can never
+  be resumed from: it wakes once, plans, and finds no future wake because the
+  instant is behind — one wasted pass, never a loop, and pinned as such. Under
+  the minimum `--max-cycles 2` a doomed near wake can still spend the whole
+  budget before a live later wake is reached, reported honestly as
+  `CYCLE_BUDGET_SPENT`, exit 5. Narrowing it is now *available* rather than
+  refused on principle, because the single-source predicate exists; it is still
+  not taken, and the reason is now a measurement rather than an argument.
+  `tests/dist-artifact/persistent-scheduler-dist-artifact.mjs` builds every one
+  of its parked fixtures out of exactly that shape — it is the only way to reach
+  the resume decision without starting a real agent — so narrowing the scan would
+  make M3 slice 1's own proof unbuildable. A wake that leads nowhere costs one
+  pass; that harness is what stops an agent being started in a test.
+
+- **L-M3-02-1** — an attention item is **announced at most once, and a crash
+  between the record and the send loses the announcement**. The durable record is
+  written first, deliberately: it is the sink an operator can always find, and it
+  survives. The push follows, and only for a record this call created — so a
+  process that dies in between leaves an item that is discoverable and was never
+  said out loud, and no later pass says it, because the name is already taken. A
+  delay rather than a loss, and it is the same concession `ntfy-transport.ts`
+  already makes about its missing retry: a retry is a second decision. Closing it
+  means a delivery marker beside each record, which is a second document.
+
+  Note what this is *not*, because an earlier draft of the store made it worse: a
+  crash during the **write** no longer burns the identity. The record is written
+  under a staging name and given its real one with `link`, which is atomic and
+  refuses an existing target, so the record's own name never exists holding a
+  partial document. A crash before the link leaves no record at all, and the next
+  pass writes it.
+
+- **L-M3-02-2** — **two settles can interleave and delay one item by a pass.**
+  Process A derives its set; process B then finds a *new* condition and records
+  it; A, whose set predates it, removes it. Nothing is lost — the condition is
+  still in the task's own durable state, so the next pass of either process
+  derives it and writes it again — and the alternative is a lock over a shared
+  directory, which would cost the property that makes this store safe at all. The
+  window is one pass, and the cost of losing it is one duplicate push.
+
+- **L-M3-02-9** — a quota block **only the world refuses** raises no item. A
+  reset that has passed over an *intact* record reads `MACHINE_MAY_STILL_RESUME`
+  and is silent, because as far as the document is concerned the automatic path
+  owns it. If the repository is what keeps denying — a worktree somebody
+  dirtied, a commit that moved, a login that stopped working — nobody is told by
+  the outbox, and the wake scan stops offering the instant once it is behind, so
+  the task sits. Three reviewers found this independently and it is the honest
+  limit of a judgement that is a pure function of a record: "the world refuses"
+  is not in the record. What an operator sees instead is the pass report, which
+  names the task and the refusing checks every time it is admitted. Closing it
+  needs an attention judgement that can run Git and an auth preflight, which is a
+  different and much larger thing.
+
+- **L-M3-02-10** — a long recurring run **prints nothing until it ends and holds
+  every cycle in memory**. `--idle-poll-ms 60000 --max-cycles 4096` is a
+  ~2.8-day invocation, and the scheduler accumulates one `SchedulerCycle` per
+  cycle — each retaining a whole `CrossRepositoryRunResult` and a `WakeScan` —
+  plus one attention report per pass, and the whole report is written in a single
+  `write()` at the end. Before this slice the practical cycle count was the
+  number of recorded quota resets in a run, a handful. Streaming the report per
+  cycle is a change to what `repositories` prints, which is its own decision; the
+  durable outbox is the part an operator can read *while* a run is going, and
+  that is written as each pass ends.
+
+- **L-M3-02-3** — **`READY_FOR_PR` raises no item**, and it is the one judgement
+  in `core/task-attention.ts` a reasonable person would make the other way. It is
+  terminal, it has a real operator action (`agent-loop delivery`), and an earlier
+  design note asked for one closing message on it. The outbox settles by
+  *removal*, so an item on a terminal state could never be resolved by the task
+  moving, and every finished task would leave one open for ever. Making it work
+  needs an acknowledgement the operator gives back, which is a second mechanism.
+  `notify/attention.ts` already grades the corresponding block-run ending
+  `COMPLETE: silent`, so the build is at least consistent with itself.
+
+- **L-M3-02-4** — **`BLOCKED_AUTH` is a second declared edge with no executor**,
+  and this slice reports it rather than closing it. `transitions.ts` declares
+  `BLOCKED_AUTH → AUTH_PREFLIGHT` and `resume-policy.ts` declares
+  `resumeReentry: 'VIA_AUTH_PREFLIGHT'`; nothing in `src/` ever writes
+  `AUTH_PREFLIGHT`, and the three operator conjuncts are pinned by their first
+  terms to other states. So restoring the login is necessary and is not
+  sufficient, and the attention sentence says exactly that. The first draft of it
+  said "log in, then re-run", which is what `render-lifecycle.ts` implies and
+  what no code delivers — caught by measurement, not by reading. Closing it is
+  the same shape of decision M2 slice 6 took for `BLOCKED_USAGE_LIMIT` and needs
+  its own.
+
+- **L-M3-02-5** — the outbox is written **without any repository's execution
+  lease**, between coordinator passes, holding nothing. That is not a gap in the
+  authority model and it is worth stating rather than leaving to be noticed: the
+  record is authority for nothing. No lifecycle decision reads it, no resume
+  consults it, and deleting the whole directory costs a re-notification on the
+  next pass. The exclusive create is what makes concurrent writers safe, not a
+  lease.
+
+- **L-M3-02-6** — an **idle poll re-drives every already-settled task**, which is
+  L-M3-01-3 multiplied by the poll rate: each cycle re-resolves every enlisted
+  repository through real `git` children, re-plans it, and re-admits every
+  `(repository, task)` pair the previous cycle drove. Not a correctness break —
+  the terminal state refuses inside `runTask` — and bounded by `--max-cycles`. It
+  is why `MIN_IDLE_POLL_MS` exists, and why that floor is documented as a floor
+  under one sleep rather than as a safety property.
+
+  Measured on this machine, 2026-09-02, against the shipped `dist/`: two
+  enlisted repositories with nothing runnable cost **1.6 s of wall clock per
+  pass**, so four cycles at a one-second interval took 7.9 s against 1.6 s for
+  the single pass an invocation without `--idle-poll-ms` makes. The pass, not the
+  outbox, is what an idle cycle costs. The outbox itself settles a realistic
+  registry — 3 repositories, 30 task states, 3 of them open — in **45 ms cold
+  and 31 ms warm**, and a repeat settle raises nothing; the numbers scale with
+  states read rather than with items open (10 repositories × 50 states: 559 ms
+  and 538 ms). At the extreme the scan dominates: 10 × 1024 states costs about
+  **8 s**, which is longer than the shortest permitted interval, so an operator
+  with a registry that size wants an interval measured in minutes. Nothing
+  clamps it for them; the number is theirs to choose and this is the number to
+  choose it from.
+
+- **L-M3-02-7** — `repositoryRoot` and `worktreePath` are `NonBlankString` in the
+  state contract, so a **relative path is schema-valid**, and
+  `canonicalPathsEqual` refuses a relative path on either side. Such a record can
+  therefore never resume automatically, for a reason that is neither a wait nor a
+  withdrawn checkpoint. It reads `RECORD_REFUSAL_UNRECOGNISED` and is **refused**
+  the operator escape, which is the right direction to fail in — the escape has
+  no sentence for that fault, and permitting it under one that talks about
+  commits and worktrees would be a report lying — but it means such a task is
+  still recoverable by nothing. Requiring both paths to be absolute is a state-
+  contract change with existing records behind it, and is its own decision.
+
+- **L-M3-02-8** — the outbox is **per OS user and machine-global**, and an item
+  is only ever resolved by a pass that scanned the repository it names. An
+  operator who withdraws a repository from the registry while an item stands
+  against it keeps that item until they remove the file or re-enlist the
+  repository. Deliberate: the alternative is a settle that removes records for
+  repositories it did not look at, which is how a run over half a registry would
+  empty the other half's inbox.
 - **L-M3-01-2** — a **throw out of a coordinator pass discards every completed
   cycle's report**. `driveScheduler` does not wrap `drive(...)`, so a planner
   rethrow escapes to the command's `catch` and exits `EXIT_RUN_UNEXPECTED` with
@@ -4024,6 +4156,14 @@ and because the failure mode it describes — a command that cannot start is
   had to survive and did. The two rules that stop the verify cycle apply here
   too. They are kept for the same reason and described as floors rather than as
   the bound.
+
+  **The third flag's bound is the same floor**, measured by M3 slice 2's own
+  campaign: replacing `!usageLimitContinuationSpent` with `true` survives
+  `tests/run-driver.test.ts` and the three `m3-02` files. What makes a second
+  invocation take no second departure is that the task has *left*
+  `BLOCKED_USAGE_LIMIT` by then, so the conjunct's first term refuses — the
+  outcome the suite measures, and not the mechanism. Said in the test itself
+  rather than left implied.
 - **L-M1-RG-1 — a task brief is clamped to 8192 UTF-8 bytes, and a task file the
   writer cannot open loses the remainder.** `MAX_TASK_BODY_BYTES = 8_192`
   (`src/plan/task-brief.ts`) clamps the task body before `buildImplementPayload`
@@ -12884,6 +13024,20 @@ become a way to start a reviewer before its window returned, which is the exact
 waste the rest of this slice exists to prevent. It is pinned in both directions:
 a future reset moves nothing and starts no process, and a past one is measured
 being taken by the *automatic* path with the operator's decision unspent.
+
+> **Superseded by M3 slice 2, and the paragraph above is kept as the record of
+> what M2 slice 6 decided rather than as a description of the build.** The
+> conjunct is now `usageLimitContinuation(state, now).permitted`, which permits
+> exactly the blocks whose **record** — not the world — makes an automatic resume
+> impossible. The reasoning above survives for the two shapes it was written
+> about: a future reset is still refused, and a past one over an intact record is
+> still the automatic path's. What it got wrong was the set. A block whose
+> interruption checkpoint was withdrawn records a reset **and** can never be
+> resumed from, so `reportedResetAt === null` refused the one class of task that
+> most needed the escape — reproduced against the shipped CLI at `fdbe999`, four
+> commands, all refusing, the state file byte-identical from each. See
+> `docs/decisions/2026-09-02-adr-actionable-notifications-and-recurring-operation.md`
+> and the rewritten **L-M3-01-1** above.
 
 One asymmetry is worth stating, because it is the one line the two siblings did
 not need. `BLOCKED_VERIFY` and `HUMAN_DECISION_REQUIRED` are both

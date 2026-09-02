@@ -287,3 +287,92 @@ function finish(denied: readonly AutomaticResumeReasonCode[]): AutomaticResumeDe
     missingChecks: Object.freeze(denied.map((code) => CHECK_NAMES[code])),
   });
 }
+
+/* ────────────── which refusals belong to the record, not the world ────────── */
+
+/**
+ * The refusals a perfect world could not remove.
+ *
+ * Exactly one member, and it is here because it cannot be *satisfied* from a
+ * pure function rather than because it is uninteresting: `authEvidence` is the
+ * opaque artefact a real preflight mints, and {@link recordOnlyResumeRefusals}
+ * is documented as performing no I/O, so it has no way to produce one. Every
+ * other world fact this module reads is a value the caller can state, and
+ * {@link recordOnlyResumeRefusals} states each of them favourably.
+ *
+ * Kept as a named set rather than a filter written inline so that the claim is
+ * checkable: the suite asserts that a record with nothing wrong with it refuses
+ * under favourable evidence with *this set exactly*, which is what makes
+ * removing a member — or forgetting to add one — a failure rather than a
+ * silently wider permission.
+ */
+export const WORLD_DEPENDENT_RESUME_REFUSALS: ReadonlySet<AutomaticResumeReasonCode> = new Set([
+  'AUTH_PREFLIGHT_NOT_PASSED',
+]);
+
+/**
+ * The refusals that survive a world agreeing with the record on every fact.
+ *
+ * ── The question this answers ──────────────────────────────────────────────
+ *
+ * `evaluateAutomaticResume` denies for two very different kinds of reason, and
+ * the difference decides who owns a parked task:
+ *
+ *  - the **world** disagrees with the record — a dirty tree, a moved HEAD, a
+ *    login that no longer passes. An operator can go and fix any of those, and
+ *    the automatic path will then grant the resume by itself;
+ *  - the **record** cannot be resumed from at all — it names no commit, or it
+ *    says the worktree was already dirty when the interruption was recorded, or
+ *    it carries no reset instant. Nothing anybody does to the repository changes
+ *    those, because they are properties of the document.
+ *
+ * This function returns the second kind. It gets them by *asking the policy* —
+ * evaluating it against evidence that agrees with the record on every
+ * observable fact — rather than by restating which checks are record-only. That
+ * distinction is the whole point of the construction. `README.md`'s L-M3-01-1
+ * declined to narrow the wake scan by `currentCommit` and
+ * `worktreeCleanAtCheckpoint` precisely because doing so would have been "a
+ * second reading of another module's policy, correct only for as long as that
+ * policy keeps those two checks record-only". A call is not a second reading:
+ * if a later slice makes one of them consult the world, or adds a third check
+ * of either kind, this function's answer moves with it and nothing here has to
+ * be edited.
+ *
+ * ── The one maintenance obligation, and the test that enforces it ──────────
+ *
+ * The favourable evidence below has to stay favourable. A new world fact added
+ * to {@link AutomaticResumeEvidence} would arrive here as whatever value the
+ * object literal happens not to set, and a denying default would make every
+ * record look unresumable. The guard is a test rather than a comment: a state
+ * with nothing wrong with it must produce `[]`, so a new check that denies
+ * under a perfect world fails the suite instead of silently widening an
+ * operator escape.
+ *
+ * Pure and side-effect free, like everything else in this module: no clock read,
+ * no filesystem, no Git. `now` is supplied.
+ */
+export function recordOnlyResumeRefusals(
+  state: TaskState,
+  now: string | Date,
+): readonly AutomaticResumeReasonCode[] {
+  const decision = evaluateAutomaticResume(state, {
+    now,
+    // The one fact that cannot be stated favourably. See the set above.
+    authEvidence: null,
+    // Every remaining fact, asserted to agree with the record. Where the record
+    // itself is `null` the comparison still denies, and that denial is exactly
+    // what this function is for.
+    observedRepositoryId: state.repositoryId,
+    observedRepositoryRoot: state.repositoryRoot,
+    observedWorktreePath: state.worktreePath,
+    worktreeExists: true,
+    observedBasePinnedCommit: state.basePinnedCommit,
+    observedCurrentCommit: state.currentCommit,
+    worktreeClean: true,
+    divergenceDetected: false,
+  });
+
+  return Object.freeze(
+    decision.reasonCodes.filter((code) => !WORLD_DEPENDENT_RESUME_REFUSALS.has(code)),
+  );
+}

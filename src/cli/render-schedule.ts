@@ -55,9 +55,14 @@ export const SCHEDULER_DISPOSITION_SENTENCES = {
     'The earliest recorded reset is further away than --max-wait-ms permitted, so nothing ' +
     'slept. Invoke again nearer the time, or raise the bound. The wait itself is unchanged and ' +
     'still on disk: nothing here consumed it.',
+  // Two shapes end here, and the sentence has to cover both: a recorded reset
+  // still ahead, and — with --idle-poll-ms — an interval that would have looked
+  // again. The first spelling asserted the reset, which is a sentence an idle
+  // run makes false every time it ends normally.
   CYCLE_BUDGET_SPENT:
-    '--max-cycles was spent while a recorded reset was still ahead. Nothing was lost — the ' +
-    'wait is durable — and invoking again reconstructs it from the same state.',
+    '--max-cycles was spent while there was still something to come back for: a recorded reset ' +
+    'still ahead, or the idle interval you asked for. Nothing was lost — a recorded wait is ' +
+    'durable — and invoking again reconstructs it from the same state.',
   SHUTDOWN_REQUESTED:
     'A shutdown was requested and the scheduler stopped without planning further. No execution ' +
     'lease was held while it waited, so the durable state is exactly what the last completed ' +
@@ -92,6 +97,13 @@ export const SCHEDULER_DISPOSITION_SENTENCES = {
     'ran. Invoking again with the same value repeats exactly.',
   CYCLE_BOUND_UNUSABLE:
     '--max-cycles is not a bound this build will schedule on, so nothing was planned and ' +
+    'nothing ran. Invoking again with the same value repeats exactly.',
+  IDLE_POLLED:
+    'The scheduler was still between idle passes when this report was produced, which it ' +
+    'should never be. Treat it as a defect in the scheduler rather than as a statement about ' +
+    'the work.',
+  IDLE_POLL_BOUND_UNUSABLE:
+    '--idle-poll-ms is not an interval this build will sleep on, so nothing was planned and ' +
     'nothing ran. Invoking again with the same value repeats exactly.',
 } as const satisfies Record<SchedulerDisposition, string>;
 
@@ -203,6 +215,9 @@ export const SCHEDULER_TRAILER =
   'invocation instead. The wait ' +
   'itself is not stored anywhere — it is re-read from each task’s own durable state before ' +
   'every sleep — so stopping this process loses nothing, and invoking it again reconstructs ' +
-  'the same wait without being told which task or which instant. A quota block that records NO ' +
-  'reset time is never scheduled here and stays the operator’s: `agent-loop run --repository ' +
-  '<path> --task <id> --attended --continue-usage-limit`.';
+  'the same wait without being told which task or which instant. A quota block the machine ' +
+  'cannot wait out — one that records NO reset time, or one whose reset has passed over a ' +
+  'withdrawn resume record — is never scheduled here and stays the operator’s: `agent-loop run ' +
+  '--repository <path> --task <id> --attended --continue-usage-limit`. Any such block found ' +
+  'while waiting is written into the operator-attention outbox, which the section below this ' +
+  'report prints when there is one.';
