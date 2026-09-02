@@ -2388,10 +2388,19 @@ describe('an escalation is continued only on an explicit decision', () => {
  * slice 6 gave the reviewer a second way to produce it, which is what made
  * closing it a condition of that slice.
  *
- * The conjunct these cases are really about is `state.reportedResetAt === null`.
- * A pause that names an instant must stay the machine's, and §"refuses a block
- * that records a reset" is the pin that keeps this flag from quietly becoming a
- * way to start an agent before its window returned.
+ * The conjunct these cases are really about was `state.reportedResetAt === null`
+ * when they were written, and M3 slice 2 replaced it with
+ * `usageLimitContinuation(state, now).permitted` — a call into the resume policy
+ * that permits every record the policy itself can never resume from, of which a
+ * missing reset instant is one. Every case below is unchanged and still passes,
+ * which is the point: the widening had to keep all of them true. The cases the
+ * widening *adds* are in the sibling section underneath, and the shapes it
+ * refuses are pinned there and in `tests/m3-02-usage-limit-recovery.test.ts`.
+ *
+ * A pause that names a *future* instant must still stay the machine's, and
+ * §"refuses a block whose reset is still in the future" is the pin that keeps
+ * this flag from quietly becoming a way to start an agent before its window
+ * returned.
  */
 describe('M2-06 — --continue-usage-limit moves a quota pause that nothing else can', () => {
   /** A quota pause exactly as `recordAgentInterruption` writes one. */
@@ -2606,6 +2615,168 @@ describe('M2-06 — --continue-usage-limit moves a quota pause that nothing else
     expect(run.continuedUsageLimit).toBe(true);
     expect(run.continuedHumanDecision).toBe(false);
     expect(run.remediatedVerifyFailure).toBe(false);
+  });
+
+  /* ── M3 slice 2: the shape the narrow term refused ────────────────── */
+
+  /**
+   * A quota pause whose interruption checkpoint was **withdrawn**, over a reset
+   * that has already passed.
+   *
+   * This is what `recordAgentInterruption` writes whenever the settlement could
+   * not be established — an out-of-scope tree, a commit that did not complete, a
+   * HEAD Git would not print — and `loop/loop-step.ts` reaches it on several
+   * ordinary paths. `evaluateAutomaticResume` denies on `currentCommit` and
+   * `worktreeCleanAtCheckpoint`, both properties of the document, so no passage
+   * of time and no repair to the repository can ever make the automatic resume
+   * possible; and until this slice the operator conjunct refused it too, because
+   * the reset instant was recorded. Nothing in the build could move it.
+   */
+  function withdrawn(root: string, overrides: Partial<TaskStateInput> = {}): StateLoadSuccess {
+    return paused(root, {
+      reportedResetAt: '2020-01-01T00:00:00.000Z',
+      currentCommit: null,
+      worktreeCleanAtCheckpoint: false,
+      ...overrides,
+    });
+  }
+
+  it('stops on a withdrawn record when nobody asked, exactly as it always did', async () => {
+    const root = repoRoot();
+    withdrawn(root);
+    const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+
+    // The control that makes the next case mean something: the same fixture,
+    // the same everything, without the flag. It must not move, and the two
+    // record-only denials must be what stopped it.
+    const run = await runTask(
+      request(root),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.outcome).toBe('BLOCKED_USAGE_LIMIT');
+    expect(run.steps).toBe(0);
+    expect(run.continuedUsageLimit).toBe(false);
+    expect([...run.reasonCodes].sort()).toEqual([
+      'CURRENT_COMMIT_MISMATCH',
+      'WORKTREE_NOT_CLEAN',
+    ]);
+    expect(reload(root).state.state).toBe('BLOCKED_USAGE_LIMIT');
+    expect(agent.count()).toBe(0);
+  });
+
+  it('takes the edge the record names when the operator asks', async () => {
+    const root = repoRoot();
+    withdrawn(root);
+    const agent = scriptedAgent(agentCommandResult({ stdout: findingsReview() }));
+
+    const run = await runTask(
+      request(root, { continueUsageLimit: true, maxSteps: 2 }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    // The recovery. It is the *operator's* decision that moved it — asserted by
+    // `continuedUsageLimit`, which the automatic path leaves false — and the
+    // record still chose the phase: `REVIEW`, so a reviewer ran.
+    expect(run.continuedUsageLimit).toBe(true);
+    expect(run.steps).toBeGreaterThanOrEqual(2);
+    expect(agent.calls[0]?.agent).toBe('codex');
+    expect(reload(root).state.state).not.toBe('BLOCKED_USAGE_LIMIT');
+  });
+
+  it('refuses a withdrawn record whose reset is still ahead, and starts nothing', async () => {
+    const root = repoRoot();
+    // Differs from the case above in exactly one field, so the instant is the
+    // only thing that can explain the refusal. This is the pin that keeps the
+    // widening from becoming a way past a wait the machine can still make.
+    withdrawn(root, { reportedResetAt: '2099-01-01T00:00:00.000Z' });
+    const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+
+    const run = await runTask(
+      request(root, { continueUsageLimit: true }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.outcome).toBe('BLOCKED_USAGE_LIMIT');
+    expect(run.steps).toBe(0);
+    expect(run.continuedUsageLimit).toBe(false);
+    expect(run.usageLimitContinuation).toBe('RESET_AHEAD');
+    expect(reload(root).state.reportedResetAt).toBe('2099-01-01T00:00:00.000Z');
+    expect(agent.count()).toBe(0);
+  });
+
+  it('carries the reading out to the report on every refusal', async () => {
+    // `--continue-usage-limit`'s registered help promises that `run --task <id>`
+    // prints which reading applies. A promise in help text is a promise, so it
+    // is measured: an operator meeting the block has to be able to tell whose
+    // task it is now.
+    const root = repoRoot();
+    paused(root, { reportedResetAt: '2099-01-01T00:00:00.000Z' });
+    const run = await runTask(
+      request(root),
+      deps(root, { agent: cappedAgent(agentCommandResult({ stdout: '' }), 0).runner }),
+    );
+    expect(run.usageLimitContinuation).toBe('RESET_AHEAD');
+  });
+
+  it('carries no reading for a run that never met a quota block', async () => {
+    const root = repoRoot();
+    persist(root, {
+      state: 'HUMAN_DECISION_REQUIRED',
+      blockedAgent: 'codex',
+      resumeFrom: { phase: 'REVIEW', round: 1 },
+      currentCommit: null,
+      worktreeCleanAtCheckpoint: false,
+    });
+    const run = await runTask(
+      request(root),
+      deps(root, { agent: cappedAgent(agentCommandResult({ stdout: '' }), 0).runner }),
+    );
+    expect(run.outcome).toBe('HUMAN_DECISION_REQUIRED');
+    expect(run.usageLimitContinuation).toBeNull();
+  });
+
+  it('is still refused without an operator, on the shape it newly covers', async () => {
+    for (const grant of ['NO_CONTINUATION', 'AUTOMATIC_RESUME_ONLY'] as const) {
+      const root = repoRoot();
+      withdrawn(root);
+      const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+
+      const run = await runTask(
+        request(root, { continuationGrant: grant, continueUsageLimit: true }),
+        deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+      );
+
+      // The widening moved which *records* qualify and nothing about who may
+      // ask. `AUTOMATIC_RESUME_ONLY` is the sharp one: it says nobody is
+      // present, and "a human decided to abandon the checkpoint" is precisely a
+      // human's sentence.
+      expect(run.outcome).toBe('BLOCKED_USAGE_LIMIT');
+      expect(run.steps).toBe(0);
+      expect(run.continuedUsageLimit).toBe(false);
+      expect(reload(root).state.state).toBe('BLOCKED_USAGE_LIMIT');
+      expect(agent.count()).toBe(0);
+    }
+  });
+
+  it('buys exactly one departure on the shape it newly covers', async () => {
+    const root = repoRoot();
+    withdrawn(root);
+    const agent = scriptedAgent(agentCommandResult({ stdout: findingsReview() }));
+
+    const run = await runTask(
+      request(root, { continueUsageLimit: true, maxSteps: 2 }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+    expect(run.continuedUsageLimit).toBe(true);
+
+    // Spent. A second invocation is a second decision the operator has to make,
+    // and `driveLifecycle` bounds it across invocations from exactly this field.
+    const second = await runTask(
+      request(root, { continueUsageLimit: true }),
+      deps(root, { agent: cappedAgent(agentCommandResult({ stdout: '' }), 0).runner }),
+    );
+    expect(second.continuedUsageLimit).toBe(false);
   });
 
   it('is spent on one departure, so a returning block is not continued again', async () => {

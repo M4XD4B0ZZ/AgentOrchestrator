@@ -14,6 +14,7 @@
  * spelled twice can drift.
  */
 
+import { USAGE_LIMIT_CONTINUATION_SENTENCES } from '../core/usage-limit-continuation.js';
 import type { RunResult } from '../run/run-driver.js';
 import type { StartTaskOutcome, StartTaskResult } from '../run/start-task.js';
 
@@ -95,6 +96,38 @@ function codes(values: readonly string[]): string {
   return values.length === 0 ? 'none' : values.join(', ');
 }
 
+/** How wide a wrapped sentence may be, indent included. */
+const SENTENCE_WIDTH = 92;
+
+/**
+ * One sentence as indented console lines, wrapped on spaces.
+ *
+ * Every other sentence in this file is hand-wrapped inside its own constant, and
+ * these are not, because they come from `core/usage-limit-continuation.ts` —
+ * where they sit beside the readings they belong to, so that a reading and its
+ * sentence cannot be edited apart. A table that has to be laid out for a
+ * particular console width would be a table shaped by its renderer.
+ *
+ * Words longer than the budget are emitted on a line of their own rather than
+ * broken: none of these sentences contains one, and a renderer that split a
+ * closed code in half would be inventing a value.
+ */
+function wrapped(sentence: string): readonly string[] {
+  const lines: string[] = [];
+  let current = '';
+  for (const word of sentence.split(' ')) {
+    const candidate = current === '' ? word : `${current} ${word}`;
+    if (candidate.length + 2 > SENTENCE_WIDTH && current !== '') {
+      lines.push(`  ${current}`);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current !== '') lines.push(`  ${current}`);
+  return lines;
+}
+
 /**
  * Renders the start half of an attended run.
  *
@@ -140,6 +173,20 @@ export function renderRunResult(result: RunResult): string {
     lines.push(line('Continuation', `${result.resume.continuation}  (${result.resume.classification})`));
   }
   lines.push(line('Reasons', codes(result.reasonCodes)));
+  // How a quota block was read, and only for a run that met one.
+  //
+  // Two lines rather than a code, because the code alone answers the wrong
+  // question. An operator standing in front of a `BLOCKED_USAGE_LIMIT` wants to
+  // know whose task it is now — the scheduler's, the automatic path's, or
+  // theirs — and `--continue-usage-limit`'s help promises that `run --task <id>`
+  // says which. The sentence is the promise being kept; the reading beside it is
+  // what a report can be grepped for.
+  if (result.usageLimitContinuation !== null) {
+    lines.push(
+      line('Quota decision', result.usageLimitContinuation),
+      ...wrapped(USAGE_LIMIT_CONTINUATION_SENTENCES[result.usageLimitContinuation]),
+    );
+  }
   // What became of this run's attempt to make a verification failure durable.
   //
   // Only on a run that produced one, so a clean run gains no line — and the

@@ -204,6 +204,16 @@ pinned in both directions: a future reset moves nothing and starts no process,
 and a past one is measured being taken by the *automatic* path with the
 operator's decision unspent.
 
+> **Superseded by M3 slice 2 (2026-09-02), and kept as the record of what this
+> slice decided rather than as a description of the build.** The conjunct is now
+> `usageLimitContinuation(state, now).permitted`. Both refusals argued for above
+> still hold — a future reset stays the machine's, and a past reset over an
+> intact record stays the automatic path's — but the *set* was wrong by one
+> shape: a block whose interruption checkpoint was withdrawn records a reset and
+> can never be resumed from either, so this conjunct refused the one class of
+> task that most needed the escape. See
+> `2026-09-02-adr-actionable-notifications-and-recurring-operation.md`.
+
 One asymmetry the siblings did not need: `BLOCKED_USAGE_LIMIT` is the eligible
 state, so a denied automatic resume classifies `AUTOMATIC_RESUME_REFUSED` ->
 `BLOCKED`, which no grant permits. The operator's decision is therefore also a

@@ -277,8 +277,8 @@ export function mayContinueHumanDecision(grant: InvocationGrant): boolean {
 }
 
 /**
- * Whether this invocation may continue a `BLOCKED_USAGE_LIMIT` task that has no
- * reported reset time.
+ * Whether this invocation may continue a `BLOCKED_USAGE_LIMIT` task the machine
+ * cannot wait out.
  *
  * ── The condition it exists for, and the one it must not touch ────────────
  *
@@ -297,15 +297,25 @@ export function mayContinueHumanDecision(grant: InvocationGrant): boolean {
  * which is what made closing it a condition of that slice rather than a
  * follow-up.
  *
- * **A known reset is emphatically not this predicate's business**, and the
- * driver's conjunct says so with `state.reportedResetAt === null`. A future
- * instant means the machine knows when the quota returns and the answer is to
- * wait for it — an escape that overrode that would spend a reviewer call to
- * learn what the record already said. A past instant is already the automatic
- * path's to grant; when *that* denies, it denies on the world — a dirty tree,
- * an auth preflight that did not pass — and those are refusals about facts this
- * decision has no evidence against. Widening to cover them would be a different
- * and much larger authority than "the pause has no end recorded".
+ * **Which records qualify is emphatically not this predicate's business**, and
+ * the driver's conjunct says so by calling `core/usage-limit-continuation.ts`.
+ * A future instant means the machine knows when the quota returns and the answer
+ * is to wait for it — an escape that overrode that would spend a reviewer call
+ * to learn what the record already said, and it stays refused. A past instant
+ * over an intact record is already the automatic path's to grant; when *that*
+ * denies, it denies on the world — a dirty tree, an auth preflight that did not
+ * pass — and those are refusals about facts this decision has no evidence
+ * against, so it stays refused too.
+ *
+ * The paragraph above read "a known reset is emphatically not this predicate's
+ * business" until M3 slice 2, and the unqualified version was false by one
+ * shape. A block whose interruption checkpoint was withdrawn records a reset
+ * **and** can never be resumed from — `evaluateAutomaticResume` denies on
+ * `currentCommit` and `worktreeCleanAtCheckpoint`, which are properties of the
+ * document — so the narrow term refused the one class of task that most needed
+ * the escape. What replaced it is not a wider guess: it asks the resume policy
+ * which of its own refusals survive a world that agrees with the record, and
+ * permits only where that set is non-empty and does not include the wait.
  *
  * ── What it does not do ───────────────────────────────────────────────────
  *

@@ -672,7 +672,7 @@ describe('M3 slice 1 — the scheduler does not hold a second opinion about "due
     await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 4 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 4, idlePollMs: null },
       }),
       test.deps,
     );
@@ -720,7 +720,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: 60_000, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: 60_000, maxCycles: 8, idlePollMs: null },
       }),
       test.deps,
     );
@@ -750,7 +750,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
       test.deps,
     );
@@ -771,7 +771,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: 60_000, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: 60_000, maxCycles: 8, idlePollMs: null },
       }),
       test.deps,
     );
@@ -798,7 +798,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 2 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 2, idlePollMs: null },
       }),
       test.deps,
     );
@@ -824,7 +824,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
       test.deps,
     );
@@ -847,7 +847,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
       test.deps,
     );
@@ -873,7 +873,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     await driveScheduler(
       request({
         repositories: [entryA],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
       {
         ...test.deps,
@@ -902,7 +902,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
       test.deps,
     );
@@ -927,7 +927,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
       {
         now: () => new Date(clock).toISOString(),
@@ -965,7 +965,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 64 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 64, idlePollMs: null },
       }),
       test.deps,
     );
@@ -995,7 +995,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 64 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 64, idlePollMs: null },
       }),
       test.deps,
     );
@@ -1023,7 +1023,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
         // Deliberately a bound the waiting repository exceeds, so the run ends
         // after one pass. What is measured is that the pass HAPPENED and saw
         // both repositories — the wait is decided after the work, never before.
-        wait: { wait: true, maxWaitMs: 60_000, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: 60_000, maxCycles: 8, idlePollMs: null },
       }),
       {
         ...test.deps,
@@ -1054,7 +1054,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
       {
         now: () => new Date(clock).toISOString(),
@@ -1113,7 +1113,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
         repositories: [entry],
         // Two cycles. Cycle 1 matures T-1 and re-plans; cycle 2 matures T-2 and
         // must stop rather than re-planning a third time.
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 2 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 2, idlePollMs: null },
       }),
       {
         now: () => new Date(clock).toISOString(),
@@ -1163,7 +1163,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
       {
         now: () => new Date(clock).toISOString(),
@@ -1201,7 +1201,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
       {
         now: () => NOW,
@@ -1262,7 +1262,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
       const result = await driveScheduler(
         request({
           repositories: [entry],
-          wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+          wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
         }),
         test.deps,
       );
@@ -1316,7 +1316,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
       test.deps,
     );
@@ -1354,7 +1354,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
     const result = await driveScheduler(
       request({
         repositories: [entry],
-        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
       test.deps,
     );
@@ -1718,12 +1718,12 @@ describe('M3 slice 1 — the CLI refuses before anything is resolved', () => {
     const entry = await registered(root);
 
     for (const [wait, ending] of [
-      [{ wait: true, maxWaitMs: Number.NaN, maxCycles: 4 }, 'WAIT_BOUND_UNUSABLE'],
-      [{ wait: true, maxWaitMs: MAX_WAIT_MS_CEILING + 1, maxCycles: 4 }, 'WAIT_BOUND_UNUSABLE'],
-      [{ wait: true, maxWaitMs: 1000, maxCycles: Number.NaN }, 'CYCLE_BOUND_UNUSABLE'],
-      [{ wait: true, maxWaitMs: 1000, maxCycles: 1 }, 'CYCLE_BOUND_UNUSABLE'],
+      [{ wait: true, maxWaitMs: Number.NaN, maxCycles: 4, idlePollMs: null }, 'WAIT_BOUND_UNUSABLE'],
+      [{ wait: true, maxWaitMs: MAX_WAIT_MS_CEILING + 1, maxCycles: 4, idlePollMs: null }, 'WAIT_BOUND_UNUSABLE'],
+      [{ wait: true, maxWaitMs: 1000, maxCycles: Number.NaN, idlePollMs: null }, 'CYCLE_BOUND_UNUSABLE'],
+      [{ wait: true, maxWaitMs: 1000, maxCycles: 1, idlePollMs: null }, 'CYCLE_BOUND_UNUSABLE'],
       [
-        { wait: true, maxWaitMs: 1000, maxCycles: MAX_SCHEDULER_CYCLES + 1 },
+        { wait: true, maxWaitMs: 1000, maxCycles: MAX_SCHEDULER_CYCLES + 1, idlePollMs: null },
         'CYCLE_BOUND_UNUSABLE',
       ],
     ] as const) {
