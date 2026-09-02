@@ -50,6 +50,7 @@ import type {
 import type { RunPlanConclusion } from '../run/run-plan.js';
 import type { StartTaskOutcome } from '../run/start-task.js';
 import type { UnattendedResumeResult } from '../run/unattended-resume.js';
+import type { SchedulerDisposition, SchedulerResult } from '../schedule/scheduler.js';
 
 export const EXIT_RUN_OK = 0;
 export const EXIT_RUN_UNEXPECTED = 1;
@@ -1132,6 +1133,62 @@ export function exitCodeForCrossRepositoryRun(result: {
         ? EXIT_RUN_UNEXPECTED
         : exitCodeForLifecycleRun(admission.lifecycle),
     );
+  }
+  return code;
+}
+
+/**
+ * What each scheduler ending means for the process's exit code. Total; pinned
+ * by test.
+ *
+ * Only the endings the *scheduler* decides. Every cycle's own coordinator run is
+ * graded by {@link exitCodeForCrossRepositoryRun} and folded in below, so a
+ * scheduler that waited perfectly around a task that failed still reports the
+ * failure — the wait is not an answer about the work.
+ *
+ * `WAITED` is present and graded as a defect. It is not reachable as an ending —
+ * a cycle that waited is followed by another cycle — and a table that omitted it
+ * would either not compile or need a fallback, and a fallback here is a silent
+ * `EXIT_RUN_OK` for a scheduler that stopped in the middle of a sleep.
+ */
+const SCHEDULER_EXIT_CODES = Object.freeze({
+  // Nothing to add: the invocation did exactly what a `repositories --attended`
+  // run has always done, and its admissions decide the answer.
+  NOT_REQUESTED: EXIT_RUN_OK,
+  // The scheduler ran until there was nothing recorded to wait for. That is the
+  // successful ending of a wait, and it says nothing about the work — which the
+  // admissions below still do.
+  NO_FUTURE_WAKE: EXIT_RUN_OK,
+  // Progress was made and a durable wait remains. `EXIT_RUN_CALL_AGAIN` is
+  // exactly its sentence: invoking again, later or with a larger bound, can
+  // continue. Nothing was consumed.
+  BOUND_EXCEEDED: EXIT_RUN_CALL_AGAIN,
+  CYCLE_BUDGET_SPENT: EXIT_RUN_CALL_AGAIN,
+  SHUTDOWN_REQUESTED: EXIT_RUN_CALL_AGAIN,
+  SLEEP_BUDGET_SPENT: EXIT_RUN_CALL_AGAIN,
+  // A clock that does not produce timestamps is not something an operator fixes
+  // by editing an argument, and it is not a refusal this build reasoned its way
+  // to. It is the machine behaving unexpectedly.
+  CURRENT_TIME_UNPARSEABLE: EXIT_RUN_UNEXPECTED,
+  // The registry stopped being readable during the wait: a document to fix,
+  // which is code 2 for the same reason every other registry refusal is.
+  REGISTRY_UNUSABLE_AFTER_WAIT: EXIT_RUN_INPUT_UNUSABLE,
+  WAITED: EXIT_RUN_UNEXPECTED,
+}) satisfies Record<SchedulerDisposition, CliExitCode>;
+
+/**
+ * The exit code of a whole scheduler invocation.
+ *
+ * The worst of the scheduler's own ending and every cycle's coordinator result,
+ * by {@link EXIT_CODE_SEVERITY}. Worst-of rather than last-of, deliberately: a
+ * scheduler that drove a repository into `BLOCKED_AUTH` in cycle 1 and then
+ * waited out an unrelated repository's quota reset has not stopped needing an
+ * operator, and an ending that reported only the last cycle would say it had.
+ */
+export function exitCodeForScheduler(result: SchedulerResult): CliExitCode {
+  let code: CliExitCode = SCHEDULER_EXIT_CODES[result.ending];
+  for (const cycle of result.cycles) {
+    code = worseExitCode(code, exitCodeForCrossRepositoryRun(cycle.run));
   }
   return code;
 }
