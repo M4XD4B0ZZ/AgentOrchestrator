@@ -3904,8 +3904,8 @@ and because the failure mode it describes — a command that cannot start is
   configuration mistake into a scheduling decision. The scheduler re-resolves the
   registry after **every** sleep, so post-wait the same read ends the invocation
   with `REGISTRY_UNUSABLE_AFTER_WAIT` and exit 2. The failure set includes
-  `GIT_UNAVAILABLE`, which a transient `git` child failure or a held `index.lock`
-  can produce — so a momentary fault in one repository can end a multi-day run
+  `GIT_UNAVAILABLE`, which a `git` child that cannot start, or cannot complete one
+  of the resolver's read-only queries, produces — so a momentary fault in one repository can end a multi-day run
   while every other repository's durable wake is still on disk. Measured in the
   M3 final dogfood: with one registered repository renamed away, two healthy
   repositories with runnable work did nothing, under `--attended`, and no lease
@@ -13375,11 +13375,12 @@ This section is the run that asked it. It changed no production code.
 defines as an authorisation and not as a claim that somebody is looking. What was
 demonstrated is one invocation driving three repositories across six cycles with
 no re-invocation between them, and a restart that lost nothing. It settles
-nothing about U1–U4, and a human intervened deliberately six times: the
+nothing about U1–U4, and a human intervened deliberately throughout: the
 orchestrator was killed, three quota records were written by hand, two fixtures
 were rebuilt after the reconciler refused them, one was retired, the attention
-store was deleted on purpose, and one operator escape was run by hand. The
-decision record names each one.
+store was deleted on purpose, one operator escape was run by hand, the operator's
+registry was substituted, and two failure injections were made. The decision
+record names each one.
 
 ### It used the operator's real home, because there is no other production path
 
@@ -13426,9 +13427,11 @@ running.
 process's first cycle over the same three repositories, whose three admissions
 were a terminal re-read, an unchanged block and a refusal. In it `bravo/WAIT-1`
 **was admitted** — admission #3 — took and gave back its lease, and its resume
-was then refused `RESET_TIME_NOT_REACHED`. That is `L-M3-01-3` behaving as
-recorded. What it raised was nothing at all, and that is the interesting half: a
-wait the machine owns is not a person's problem.
+was then refused `RESET_TIME_NOT_REACHED`. There is no quota-aware admission
+filter: eligibility is a property of the task definition, so the refusal arrives
+from the resume policy inside the run. What it raised was nothing at all, and
+that is the interesting half: a wait the machine owns is not a person's
+problem.
 
 The two `SHARED-1` tasks got their own worktree under their own repository root,
 on a branch of the same name in two different object stores, at different
@@ -13438,7 +13441,8 @@ commits. Reversing the registry file did not move the binding.
 
 The process was terminated with `taskkill /F` while it slept between passes —
 all three leases free, no lease file anywhere. It wrote zero bytes, and two
-seconds later nothing it had started was still running. Four durable documents
+seconds later no `claude`, `codex` or `ao-launch` process it had started was
+still running. Four durable documents
 were byte-identical across the kill. A second process, given the same arguments
 and told no task and no instant, re-read the wake from the same record:
 
@@ -13450,7 +13454,8 @@ Waited          : 132460 ms of wall clock
 and then drove `WAIT-1` to `READY_FOR_PR` in the next cycle, without repeating
 `alpha`'s finished work or duplicating `charlie`'s item. **This is a restart
 between passes, where the invocation holds nothing.** A kill *inside* a pass
-leaves a lease this command may not recover — `L-M3-F-1` below.
+leaves a lease this command may not recover — `L-M3-F-1`, in *Carried forward,
+deliberately* above.
 
 ### The ownership split, isolated inside one state name
 

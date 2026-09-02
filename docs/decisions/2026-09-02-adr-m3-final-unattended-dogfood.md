@@ -20,6 +20,12 @@ the question the product exists to answer**, which is a single sentence:
 This record is the run that asked it. It changed no production code, because
 nothing it found made the defined product wrong, unsafe or unrecoverable.
 
+The file names quoted below — `E-run1.log`, `E-run2.log`, `H-run3.log` and the
+rest — are the run's evidence bundle, which lives **outside this repository**, as
+the M1 release gate's evidence does. Nothing in it is a repository artefact and
+nothing here depends on it being readable later; every claim that rests on a
+transcript rather than on a captured log says so where it is made.
+
 ## What this run is, and what it is not
 
 Every invocation below carries `--attended`, because that is the only grant
@@ -30,8 +36,10 @@ them**, and a restart that lost nothing.
 
 It is **not** a demonstration that unattended operation is supported. **U1–U4 are
 untouched** and the Status section's claim is left exactly as it stands. A human
-intervened deliberately six times over twenty-five minutes, and each intervention
-is named in this record.
+intervened deliberately throughout: the six acts below inside the run, plus the
+substitution of the operator's registry and the two injections in the failure
+table. Every one of them is named in this record; the list is not offered as a
+count.
 
 ## Why the real operator home, and not a test profile
 
@@ -133,7 +141,8 @@ most useful thing this run learned about that residual — the pass that does th
 work is the pass whose report you do not get.
 
 So what is known of that pass is durable state, two real commits, the process
-table and a third-party timestamp, observed while it ran:
+table and a third-party timestamp, observed while it ran and transcribed into the
+evidence bundle as `E-inflight-observation.txt`:
 
 ```text
 18:36:11Z   alpha    lease=HELD   SHARED-1=REVIEWING
@@ -169,11 +178,13 @@ exclusion it respects is on `gitCommonDir`, not on `repository.id`.
 
 In that cycle **`bravo/WAIT-1` was admitted** — admission #3, `concurrent: 3` —
 took and gave back its execution lease, and its automatic resume was then refused
-`RESET_TIME_NOT_REACHED`. That is accepted residual `L-M3-01-3` behaving as
-recorded: every cycle re-admits every settled task and the refusal arrives as
-data from inside the run, not from an admission filter. What it **raised** is
-nothing at all, and that is the interesting half: a wait the machine owns is not
-a person's problem.
+`RESET_TIME_NOT_REACHED`. There is no quota-aware admission filter in this build:
+eligibility is a property of the task *definition*, so a `BLOCKED_USAGE_LIMIT`
+task with a recorded reset is an ordinary candidate — `bravo` reports
+`first choice : WAIT-1, eligible : 1, blocked : 0` — and the refusal arrives as
+data from the resume policy inside the run. What it **raised** is nothing at all,
+and that is the interesting half: a wait the machine owns is not a person's
+problem.
 
 ### Cross-repository isolation, from disk
 
@@ -198,8 +209,9 @@ between passes. The pre-kill observation is the part that makes it a restart
 rather than a crash-recovery test: **all three repositories reported a free lease
 and no lease file existed for any of them.**
 
-Measured two seconds after the kill: nothing the run started survived it, and the
-only `claude`/`codex` processes left were two that predate the dogfood by a day.
+Measured two seconds after the kill: no `claude`, `codex` or `ao-launch` process
+the run had started survived it — the sweep is filtered to those three names —
+and the only ones left were two that predate the dogfood by a day.
 Four durable documents were hashed before the kill and after it — the three task
 states and the attention item — and all four were byte-identical.
 
@@ -220,7 +232,7 @@ duplicate `charlie`'s item.
 
 **This is a restart between passes, where the invocation holds nothing.** A kill
 *inside* a pass leaves a lease naming a dead pid, and `repositories` may not
-recover it — see the residuals below.
+recover it — `L-M3-F-1` in README's *Carried forward, deliberately*.
 
 ## The ownership discriminator, isolated
 
@@ -285,8 +297,9 @@ returned the message, with a timestamp matching the attention record's
 
 Two things that observation settles and nothing local could: an HTTPS request
 really left this machine, and **no filesystem path is on the wire** — the durable
-record carries `repositoryRoot`, the push carries the ids and a `<path>`
-placeholder and nothing else.
+record carries `repositoryRoot`, while the push carries the ids, the state, the
+reason, the detail and the action sentence — and the only path-shaped thing on
+the wire is the `<path>` placeholder inside that sentence.
 
 Across the six cycles of one invocation and across two processes, that condition
 was sent **once**. A second message for the same condition appears in the topic
@@ -301,7 +314,7 @@ An invocation without it reads no notification configuration and touches no stor
 
 | Injection | Result |
 | --- | --- |
-| one registered repository renamed away | `Resolution : REFUSED`, `REPOSITORY_UNRESOLVABLE / REPOSITORY_NOT_FOUND`, entry index named, exit 2 — read-only **and** under `--attended`. No lease was taken anywhere, so no repository could execute with another's binding — **and no attention item was raised**, which is the measurement behind residual `L-M3-F-3` below |
+| one registered repository renamed away | `Resolution : REFUSED`, `REPOSITORY_UNRESOLVABLE / REPOSITORY_NOT_FOUND`, entry index named, exit 2 — read-only **and** under `--attended`. No lease was taken anywhere, so no repository could execute with another's binding — **and no attention item was raised**, which is the measurement behind residual `L-M3-F-3` in README's *Carried forward, deliberately* |
 | process interrupted | above |
 | repeated observation | six cycles, two processes, one file per condition, `Raised now : 0` |
 | condition resolved | `Resolved : 1`, and only that one |
@@ -362,10 +375,12 @@ unrecoverable. Three independent reviews and this run found no such path. Every
 substantive finding was either an already-accepted residual behaving exactly as
 recorded, a rendering artefact of the last pass, a defect in the dogfood's own
 fixtures (fixed in the fixtures), or a defect in this record's own prose (fixed
-here). Three capability gaps that no register named are added to the register by
-this slice as `L-M3-F-1` to `L-M3-F-3`; none of them is reachable as a product
-defect on the path this run drove, and each is a limit on fault tolerance rather
-than on correctness.
+here). Four capability gaps that no register named are added to the register by
+this slice as `L-M3-F-1` to `L-M3-F-4`; none of them is reachable as a product
+defect on the path this run drove. The first three are limits on fault tolerance
+rather than on correctness; `L-M3-F-4` is a different shape — a silence about the
+one record class nothing in this build can move — and extends `L-M3-02-7` by the
+sentence that entry omits.
 
 **U1–U4 are untouched, and unattended operation stays unsupported.** The
 interrupt landed between passes, where no lease is held, so U1's
