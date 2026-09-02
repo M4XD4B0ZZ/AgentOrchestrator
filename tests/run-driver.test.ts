@@ -2770,8 +2770,16 @@ describe('M2-06 — --continue-usage-limit moves a quota pause that nothing else
     );
     expect(run.continuedUsageLimit).toBe(true);
 
-    // Spent. A second invocation is a second decision the operator has to make,
-    // and `driveLifecycle` bounds it across invocations from exactly this field.
+    // A second invocation does not take a second departure. What this case
+    // measures is the *outcome*, not the mechanism, and saying which is the
+    // point: a counter-proof replacing `!usageLimitContinuationSpent` with
+    // `true` survives here, because by the second invocation the task has left
+    // `BLOCKED_USAGE_LIMIT` and the conjunct's FIRST term is what refuses. The
+    // spend flag is a fail-closed floor that does not fire today — the same
+    // finding `README.md`'s L-M1-VR-6 already records for the two sibling
+    // flags, and for the same two reasons: a `BLOCKED` loop step ends the
+    // `runTask` call, and `driveLifecycle` re-enters only on
+    // `STEP_BUDGET_EXHAUSTED`.
     const second = await runTask(
       request(root, { continueUsageLimit: true }),
       deps(root, { agent: cappedAgent(agentCommandResult({ stdout: '' }), 0).runner }),

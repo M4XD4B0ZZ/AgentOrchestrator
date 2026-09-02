@@ -226,7 +226,14 @@ another repository satisfies, a block an operator clears — is invisible to it.
 **Optional, with no default.** Without it a pass that leaves nothing to wait for
 ends the invocation, before the cycle budget is even consulted, which is what
 this command has always done. A default would turn every existing scheduler
-invocation into a process that no longer exits. Termination is unaffected: an
+invocation into a process that no longer exits.
+
+**It also takes over from a wake that is out of reach.** `--max-wait-ms 600000
+--idle-poll-ms 60000` says two things — do not block more than ten minutes on a
+recorded wait, and look again every minute — and the first spelling honoured only
+the first: a quota reset five hours out in one repository ended a run that was
+polling for work in every other, which is precisely the case the interval exists
+for. `BOUND_EXCEEDED` now ends the invocation only when no interval was given. Termination is unaffected: an
 idle cycle is still a cycle, `--max-cycles` still bounds them, and
 `MAX_SCHEDULER_CYCLES` still caps that where the loop reads it. `MIN_IDLE_POLL_MS`
 is a floor under one sleep, not a safety property; what bounds an idle loop is the

@@ -811,6 +811,7 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
           recoverStaleLease: request.recoverStaleLease,
           remediateVerifyFailure: request.remediateVerifyFailure,
           continueHumanDecision: request.continueHumanDecision,
+          continueUsageLimit: request.continueUsageLimit,
         },
       });
       return lifecycleResult();
@@ -825,13 +826,23 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
       [`${alpha}::A1`, `${beta}::B1`].sort(),
     );
     // The rule the command's help states: only the ordinary attended grant, and
-    // the three destructive ones refused on every admission.
+    // every one-use or destructive decision refused on every admission.
+    //
+    // `continueUsageLimit` is here because it was NOT, and a counter-proof
+    // measured the cost. M2 slice 6 added that flag and this list was not
+    // widened with it, so setting it `true` in the coordinator survived the
+    // whole suite — a selector spending an operator's quota decision, on a task
+    // nobody named, with nothing turning red. M3 slice 2 made that worse in
+    // principle rather than in code: the coordinator now runs unattended across
+    // days rather than for one invocation. An exhaustive list only measures
+    // while it stays exhaustive.
     for (const entry of seen) {
       expect(entry.grants).toEqual({
         continuationGrant: 'ATTENDED',
         recoverStaleLease: false,
         remediateVerifyFailure: false,
         continueHumanDecision: false,
+        continueUsageLimit: false,
       });
     }
   });

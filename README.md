@@ -4156,6 +4156,14 @@ and because the failure mode it describes — a command that cannot start is
   had to survive and did. The two rules that stop the verify cycle apply here
   too. They are kept for the same reason and described as floors rather than as
   the bound.
+
+  **The third flag's bound is the same floor**, measured by M3 slice 2's own
+  campaign: replacing `!usageLimitContinuationSpent` with `true` survives
+  `tests/run-driver.test.ts` and the three `m3-02` files. What makes a second
+  invocation take no second departure is that the task has *left*
+  `BLOCKED_USAGE_LIMIT` by then, so the conjunct's first term refuses — the
+  outcome the suite measures, and not the mechanism. Said in the test itself
+  rather than left implied.
 - **L-M1-RG-1 — a task brief is clamped to 8192 UTF-8 bytes, and a task file the
   writer cannot open loses the remainder.** `MAX_TASK_BODY_BYTES = 8_192`
   (`src/plan/task-brief.ts`) clamps the task body before `buildImplementPayload`
