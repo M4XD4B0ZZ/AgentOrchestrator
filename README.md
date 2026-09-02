@@ -12780,17 +12780,61 @@ resume by itself after a process restart is M3 slice 1.
   spend one call and re-park with a fresh instant a day later. Bounded and
   self-correcting, but not free — and not fixable without a fixture nobody has
   yet;
-- **a recognised refusal that names no time has no operator lever.** It parks at
-  `BLOCKED_USAGE_LIMIT` with `reportedResetAt: null`, which
-  `evaluateAutomaticResume` denies with `RESET_TIME_MISSING` for ever, while
-  `run-driver.ts`'s two operator escapes are pinned to `BLOCKED_VERIFY` and
-  `HUMAN_DECISION_REQUIRED`. This is **not new** — the Claude writer has
-  produced that exact shape since V3-11, for a refusal whose stream reported no
-  instant — but the reviewer path used to land in the continuable
-  `HUMAN_DECISION_REQUIRED`, so this slice adds a producer to an existing dead
-  end. No recorded Codex message reaches it: all 51 carry a time. Giving
-  `BLOCKED_USAGE_LIMIT` the operator half `HUMAN_DECISION_REQUIRED` got in M1
-  is the fix, and it is a decision of its own rather than a line in this slice.
+- **a recognised refusal that names no time spends a reviewer call to learn
+  nothing.** It parks at `BLOCKED_USAGE_LIMIT` with `reportedResetAt: null`, and
+  clearing it is an operator decision (below) rather than a wait, because there
+  is no instant to wait for. No recorded Codex message reaches this: all 51
+  carry a time.
+
+### The operator half, because otherwise the pause was a dead end
+
+A block that records no reset instant cannot clear itself:
+`evaluateAutomaticResume` denies `RESET_TIME_MISSING` for ever. Until this
+slice, `run-driver.ts`'s two operator escapes were pinned by their first terms
+to `BLOCKED_VERIFY` and `HUMAN_DECISION_REQUIRED`, so **nothing in the build
+could move such a task** — it was unrecoverable, and only a hand-edited state
+file would have brought it back.
+
+That was not new: the Claude writer has produced the same shape since V3-11, for
+a refusal whose stream reported no instant. What this slice changed is that the
+reviewer's quota block used to land in the *continuable*
+`HUMAN_DECISION_REQUIRED` and now lands here — so the slice would have added a
+producer to a dead end, which is why closing it belongs to the slice and not to
+a follow-up.
+
+`--continue-usage-limit` is the third of exactly the shape M1 built twice:
+
+```
+agent-loop run --repository <path> --task <id> --attended --continue-usage-limit
+```
+
+It waits for nothing, retries nothing, schedules nothing and asserts nothing
+about the allowance — only that a human decided to try. If the quota is still
+gone the next run reports a fresh block. It requires `--attended` and `--task`,
+is refused under `--automatic-resume-only`, is not an option on
+`agent-loop repositories` at all, and buys **one** departure per invocation.
+
+**And it refuses any block that records a reset — future or past.** That
+conjunct, `state.reportedResetAt === null`, is the whole reason the flag is safe
+to have. A future instant means the machine knows when the window returns and
+the answer is to wait for it; a past one is already
+`evaluateAutomaticResume`'s to grant, and when *that* denies it denies on the
+world — a dirty tree, an auth preflight that did not pass — which this decision
+holds no evidence about. Without the conjunct an operator flag would quietly
+become a way to start a reviewer before its window returned, which is the exact
+waste the rest of this slice exists to prevent. It is pinned in both directions:
+a future reset moves nothing and starts no process, and a past one is measured
+being taken by the *automatic* path with the operator's decision unspent.
+
+One asymmetry is worth stating, because it is the one line the two siblings did
+not need. `BLOCKED_VERIFY` and `HUMAN_DECISION_REQUIRED` are both
+`automaticResumeEligible: false`, so they classify `ATTENDED_ONLY` and an
+attended grant permits them. `BLOCKED_USAGE_LIMIT` *is* eligible, so a denied
+automatic resume classifies `AUTOMATIC_RESUME_REFUSED` and maps to `BLOCKED` —
+which no grant permits, correctly, because that gate asks whether the run may
+continue *on its own*. The operator's decision is therefore a disjunct at that
+gate too, and `permitsContinuation` stays a pure function of the two
+vocabularies.
 
 See the decision record:
 [Reviewer quota resilience](docs/decisions/2026-09-02-adr-reviewer-quota-resilience.md).

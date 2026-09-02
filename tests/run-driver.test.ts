@@ -67,7 +67,9 @@ import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.
 import {
   agentCommandResult,
   claudeResultStream,
+  codexFailedTurn,
   codexTranscript,
+  CODEX_USAGE_LIMIT_MESSAGE,
   passingReview,
   SHA_A,
   SHA_B,
@@ -2324,6 +2326,27 @@ describe('an escalation is continued only on an explicit decision', () => {
     }
   });
 
+  it('reports the departure separately from the usage-limit one', async () => {
+    const root = repoRoot();
+    escalated(root, 'REMEDIATE');
+    const agent = scriptedAgent(
+      agentCommandResult({ stdout: claudeResultStream({ subtype: 'success', isError: false }) }),
+    );
+
+    // The third decision, held apart from this one exactly as the verify one is.
+    const run = await runTask(
+      request(root, { continueHumanDecision: true, continueUsageLimit: true }),
+      deps(root, {
+        git: scriptedGit(root, { writingPass: true }),
+        agent: agent.runner,
+        verify: scriptedVerify({ exitCode: 0 }).runner,
+      }),
+    );
+
+    expect(run.continuedHumanDecision).toBe(true);
+    expect(run.continuedUsageLimit).toBe(false);
+  });
+
   it('reports the departure separately from the verify one', async () => {
     const root = repoRoot();
     escalated(root, 'REMEDIATE');
@@ -2347,5 +2370,264 @@ describe('an escalation is continued only on an explicit decision', () => {
 
     expect(run.continuedHumanDecision).toBe(true);
     expect(run.remediatedVerifyFailure).toBe(false);
+  });
+});
+
+/* ══ M2-06 — the operator half of a quota pause that records no reset ══════ */
+
+/**
+ * The third of the same shape, and the reason it had to exist before M2 could
+ * close.
+ *
+ * `BLOCKED_USAGE_LIMIT` is the one state that clears itself — through
+ * `evaluateAutomaticResume`, which needs a reported instant to wait for. When
+ * the agent reported none, that path denies `RESET_TIME_MISSING` for ever, and
+ * the two operator conjuncts beside it are pinned by their first terms to
+ * `BLOCKED_VERIFY` and `HUMAN_DECISION_REQUIRED`. Nothing in the build could
+ * move the task. The Claude writer has produced that shape since V3-11; M2
+ * slice 6 gave the reviewer a second way to produce it, which is what made
+ * closing it a condition of that slice.
+ *
+ * The conjunct these cases are really about is `state.reportedResetAt === null`.
+ * A pause that names an instant must stay the machine's, and §"refuses a block
+ * that records a reset" is the pin that keeps this flag from quietly becoming a
+ * way to start an agent before its window returned.
+ */
+describe('M2-06 — --continue-usage-limit moves a quota pause that nothing else can', () => {
+  /** A quota pause exactly as `recordAgentInterruption` writes one. */
+  function paused(
+    root: string,
+    overrides: Partial<TaskStateInput> = {},
+  ): StateLoadSuccess {
+    return persist(root, {
+      state: 'BLOCKED_USAGE_LIMIT',
+      blockedAgent: 'codex',
+      resumeFrom: { phase: 'REVIEW', round: 1 },
+      reviewRound: 0,
+      reportedResetAt: null,
+      currentCommit: SHA_B,
+      worktreeCleanAtCheckpoint: true,
+      ...overrides,
+    });
+  }
+
+  it('stops where it always did when nobody asked, writing nothing', async () => {
+    const root = repoRoot();
+    paused(root);
+    const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+    const verify = cappedVerify(0);
+
+    // An ordinary attended run. `--attended` says a human is present, never
+    // what they decided — this is the measured pre-fix behaviour, and it must
+    // survive the flag being added.
+    const run = await runTask(
+      request(root),
+      deps(root, { agent: agent.runner, verify: verify.runner }),
+    );
+
+    expect(run.outcome).toBe('BLOCKED_USAGE_LIMIT');
+    expect(run.steps).toBe(0);
+    expect(run.continuedUsageLimit).toBe(false);
+    expect(reload(root).state.state).toBe('BLOCKED_USAGE_LIMIT');
+    expect(reload(root).state.resumeFrom).toEqual({ phase: 'REVIEW', round: 1 });
+    expect(agent.count()).toBe(0);
+    expect(verify.count()).toBe(0);
+  });
+
+  it('takes the edge the record names when the operator asked', async () => {
+    const root = repoRoot();
+    paused(root);
+    const agent = scriptedAgent(agentCommandResult({ stdout: findingsReview() }));
+
+    // `maxSteps: 2`: the resume is one durable step and the review it enters is
+    // the second, so the run stops on its budget having left the state. The
+    // record names REVIEW, so a *reviewer* must run — the flag does not choose
+    // the phase.
+    const run = await runTask(
+      request(root, { continueUsageLimit: true, maxSteps: 2 }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.steps).toBeGreaterThanOrEqual(2);
+    expect(run.continuedUsageLimit).toBe(true);
+    expect(agent.calls.length).toBeGreaterThanOrEqual(1);
+    expect(agent.calls[0]?.agent).toBe('codex');
+    expect(reload(root).state.state).not.toBe('BLOCKED_USAGE_LIMIT');
+  });
+
+  it('refuses a block whose reset is still in the future, and starts nothing', async () => {
+    const root = repoRoot();
+    // The same producer shape as `paused`, differing in exactly one field, so
+    // the reset instant is the only thing that can explain the refusal.
+    paused(root, { reportedResetAt: '2099-01-01T00:00:00.000Z' });
+    const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+
+    const run = await runTask(
+      request(root, { continueUsageLimit: true }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    // **The load-bearing conjunct.** A pause that names a future instant is the
+    // machine's to clear, and the flag must not become a way to start an agent
+    // before its window returned — which is the waste M2 slice 6 exists to
+    // stop. The state is untouched and no process ran.
+    expect(run.outcome).toBe('BLOCKED_USAGE_LIMIT');
+    expect(run.steps).toBe(0);
+    expect(run.continuedUsageLimit).toBe(false);
+    expect(reload(root).state.state).toBe('BLOCKED_USAGE_LIMIT');
+    expect(reload(root).state.reportedResetAt).toBe('2099-01-01T00:00:00.000Z');
+    expect(agent.count()).toBe(0);
+  });
+
+  it('leaves a block whose reset has passed to the path that already owns it', async () => {
+    const root = repoRoot();
+    paused(root, { reportedResetAt: '2020-01-01T00:00:00.000Z' });
+    const agent = scriptedAgent(agentCommandResult({ stdout: findingsReview() }));
+
+    const run = await runTask(
+      request(root, { continueUsageLimit: true, maxSteps: 2 }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    // The other half of the same conjunct, and it is not "nothing happens": the
+    // reset has passed, so `evaluateAutomaticResume` grants the resume and the
+    // task moves — under `AUTOMATIC_ALLOWED`, on the machine's own authority.
+    // What must be true is that the operator's decision was NOT what moved it
+    // and was NOT spent, so it is still there for a block that needs it. A flag
+    // that fired here would be taking ownership of a question already answered.
+    expect(run.continuedUsageLimit).toBe(false);
+    // It really did move, and a reviewer really did run — so this is "the other
+    // path took it", not "nothing happened", which a weaker assertion would
+    // have been satisfied by. (`run.resume` describes the *last* iteration, by
+    // which point the task is in-flight and classifies `ATTENDED_ONLY`; the
+    // grant that moved it is visible in `continuedUsageLimit` being false while
+    // the state changed anyway.)
+    expect(reload(root).state.state).not.toBe('BLOCKED_USAGE_LIMIT');
+    expect(agent.calls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('refuses every grant that is not an attended one', async () => {
+    for (const grant of ['NO_CONTINUATION', 'AUTOMATIC_RESUME_ONLY'] as const) {
+      const root = repoRoot();
+      paused(root);
+      const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+
+      const run = await runTask(
+        request(root, { continuationGrant: grant, continueUsageLimit: true }),
+        deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+      );
+
+      // `AUTOMATIC_RESUME_ONLY` is the sharp one: it is the grant that exists to
+      // wait out a reset, and this block has none to wait for. "A human said to
+      // try anyway" is a human's sentence, so an invocation claiming nobody is
+      // present may not say it.
+      expect(run.outcome).toBe('BLOCKED_USAGE_LIMIT');
+      expect(run.steps).toBe(0);
+      expect(run.continuedUsageLimit).toBe(false);
+      expect(reload(root).state.state).toBe('BLOCKED_USAGE_LIMIT');
+      expect(agent.count()).toBe(0);
+    }
+  });
+
+  it('refuses to move any other blocked state', async () => {
+    for (const state of ['HUMAN_DECISION_REQUIRED', 'BLOCKED_VERIFY', 'BLOCKED_AUTH'] as const) {
+      const root = repoRoot();
+      persist(root, {
+        state,
+        blockedAgent: state === 'BLOCKED_VERIFY' ? null : 'codex',
+        resumeFrom: { phase: 'REVIEW' as const, round: 1 },
+        currentCommit: null,
+        worktreeCleanAtCheckpoint: false,
+        ...(state === 'BLOCKED_VERIFY'
+          ? { resumeFrom: { phase: 'REMEDIATE' as const, round: 1 } }
+          : {}),
+      });
+      const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+
+      const run = await runTask(
+        request(root, { continueUsageLimit: true }),
+        deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+      );
+
+      // Three decisions, three flags, and none buys another. Every one of these
+      // states also records `reportedResetAt: null`, so the state term is the
+      // only thing refusing them — which is exactly what has to be pinned.
+      expect(run.outcome).toBe(state);
+      expect(run.steps).toBe(0);
+      expect(run.continuedUsageLimit).toBe(false);
+      expect(reload(root).state.state).toBe(state);
+      expect(agent.count()).toBe(0);
+    }
+  });
+
+  it('cannot meet a record that names no resume point, because none can exist', () => {
+    // The driver's conjunct keeps `state.resumeFrom !== null`, and this is why
+    // it is a floor rather than the thing that refuses: the state contract
+    // makes a resume point `REQUIRED` for `BLOCKED_USAGE_LIMIT`, so such a
+    // record cannot be written in the first place. Asserted against the store
+    // rather than the driver, because that is the layer that holds it.
+    const root = repoRoot();
+    const saved = saveTaskState(
+      taskState(root, {
+        state: 'BLOCKED_USAGE_LIMIT',
+        blockedAgent: 'codex',
+        resumeFrom: null,
+        reportedResetAt: null,
+        currentCommit: SHA_B,
+        worktreeCleanAtCheckpoint: true,
+      }),
+      { repositoryRoot: root },
+    );
+
+    expect(saved.ok).toBe(false);
+    if (saved.ok) expect.unreachable();
+    expect(saved.code).toBe('STATE_CONTRACT_VIOLATION');
+  });
+
+  it('reports the departure separately from the other two', async () => {
+    const root = repoRoot();
+    paused(root);
+    const agent = scriptedAgent(agentCommandResult({ stdout: findingsReview() }));
+
+    // All three flags on one invocation, one applicable state. The run must
+    // report taking this one and neither of the others: `driveLifecycle` bounds
+    // each across invocations from exactly these three fields, and marking the
+    // wrong one spent would cost the operator a departure they never took.
+    const run = await runTask(
+      request(root, {
+        continueUsageLimit: true,
+        continueHumanDecision: true,
+        remediateVerifyFailure: true,
+        maxSteps: 2,
+      }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.continuedUsageLimit).toBe(true);
+    expect(run.continuedHumanDecision).toBe(false);
+    expect(run.remediatedVerifyFailure).toBe(false);
+  });
+
+  it('is spent on one departure, so a returning block is not continued again', async () => {
+    const root = repoRoot();
+    paused(root);
+    // The reviewer's allowance is still gone: the resumed review reports the
+    // recorded quota refusal again, so the task returns to the same state. The
+    // decision must NOT be spendable a second time inside one call — otherwise
+    // "try again" becomes an unbounded retry loop, which is the one thing this
+    // flag promises not to be.
+    const agent = scriptedAgent(
+      agentCommandResult({ exitCode: 1, stdout: codexFailedTurn(CODEX_USAGE_LIMIT_MESSAGE) }),
+    );
+
+    const run = await runTask(
+      request(root, { continueUsageLimit: true, maxSteps: 8 }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.continuedUsageLimit).toBe(true);
+    expect(reload(root).state.state).toBe('BLOCKED_USAGE_LIMIT');
+    // One reviewer call, not a loop of them.
+    expect(agent.calls.filter((call) => call.agent === 'codex')).toHaveLength(1);
   });
 });

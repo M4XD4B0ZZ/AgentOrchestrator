@@ -76,11 +76,31 @@ einen gemessenen Worktree-Checkpoint, und `evaluateAutomaticResume` verweigert
 dann nur noch mit `RESET_TIME_NOT_REACHED` — genau die Bedingung, auf die
 `--wait-for-reset` wartet.
 
-**Was weiterhin nicht von selbst weiterläuft:** ein Block ohne gemeldete
-Reset-Zeit. Dann bleibt `reportedResetAt: null`, `evaluateAutomaticResume`
-verweigert mit `RESET_TIME_MISSING`, und es gibt für `BLOCKED_USAGE_LIMIT`
-**kein** Operator-Flag — anders als bei `BLOCKED_VERIFY` und
-`HUMAN_DECISION_REQUIRED`. Ein solcher Task wartet auf eine spätere Slice.
+**Was nicht von selbst weiterläuft — und was du dagegen tust:** ein Block **ohne**
+gemeldete Reset-Zeit. Dann bleibt `reportedResetAt: null` und
+`evaluateAutomaticResume` verweigert mit `RESET_TIME_MISSING` — es gibt keinen
+Zeitpunkt, auf den man warten könnte. Dafür gibt es seit M2 Slice 6 das dritte
+Operator-Flag, in genau der Form der beiden anderen:
+
+```
+agent-loop run --repository <pfad> --task <id> --attended --continue-usage-limit
+```
+
+Es wartet auf nichts, wiederholt nichts, plant nichts und behauptet nichts über
+das Kontingent — es sagt nur, dass **du** entschieden hast, es zu versuchen. Ist
+das Kontingent noch leer, meldet der nächste Run einen frischen Block. Braucht
+`--attended` und `--task`, wird mit `--automatic-resume-only` abgelehnt, gibt es
+auf `agent-loop repositories` gar nicht, und gilt für **einen** Ausstieg pro
+Invocation.
+
+**Es greift bewusst nicht, wenn eine Reset-Zeit im Record steht** — weder eine
+zukünftige noch eine vergangene. Eine zukünftige gehört der Maschine: sie weiß,
+wann das Fenster zurückkommt, also warte darauf. Eine vergangene gibt
+`evaluateAutomaticResume` ohnehin frei; verweigert *die*, dann wegen der Welt
+(schmutziger Worktree, Auth), und darüber hat diese Entscheidung keinen Nachweis.
+Sonst wäre das Flag ein Weg, einen Reviewer zu starten, bevor sein Fenster
+zurück ist — genau die Verschwendung, die Slice 6 abstellt.
+
 Und: nach einem *Prozess-Neustart* weckt sich nichts selbst auf — der Wartezustand
 steht auf der Platte, aber den nächsten Run startest du. Das ist M3.
 

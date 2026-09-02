@@ -149,6 +149,7 @@ interface RunOptions {
   readonly recoverStaleLease?: boolean;
   readonly remediateVerifyFailure?: boolean;
   readonly continueHumanDecision?: boolean;
+  readonly continueUsageLimit?: boolean;
 }
 
 /**
@@ -252,6 +253,25 @@ function refuseArguments(options: RunOptions): ArgumentRefusal | null {
         '--continue-human-decision requires --task. The decision is about one escalated ' +
         'task, and letting the selector choose which one to continue would make the ' +
         'operator authorise a task they never named.',
+    };
+  }
+  if (options.continueUsageLimit === true && !attended) {
+    return {
+      code: 'USAGE_LIMIT_CONTINUATION_WITHOUT_OPERATOR',
+      sentence:
+        '--continue-usage-limit is an operator decision and requires --attended. It asserts ' +
+        'that a subscription window nobody recorded an end for is worth trying again, which ' +
+        'is a judgement about the world outside this machine, so a run that claims nobody ' +
+        'is present may not make it.',
+    };
+  }
+  if (options.continueUsageLimit === true && options.task === undefined) {
+    return {
+      code: 'USAGE_LIMIT_CONTINUATION_WITHOUT_TASK',
+      sentence:
+        '--continue-usage-limit requires --task. The decision is about one paused task, ' +
+        'and letting the selector choose which one to continue would make the operator ' +
+        'spend an agent allowance on a task they never named.',
     };
   }
   if (unattended && options.recoverStaleLease === true) {
@@ -440,6 +460,7 @@ async function executeAttended(
     readonly recoverStaleLease: boolean;
     readonly remediateVerifyFailure: boolean;
     readonly continueHumanDecision: boolean;
+    readonly continueUsageLimit: boolean;
   },
   seams: RunCommandSeams,
 ): Promise<CliExitCode> {
@@ -474,6 +495,10 @@ async function executeAttended(
       // established that it came with `--attended` and a named task; the state,
       // the resume point and the one-per-invocation bound are the driver's.
       continueHumanDecision: lifecycle.continueHumanDecision,
+      // And the third, on the same terms. The conjunct that makes it narrow —
+      // that the paused task recorded no reset instant — is a property of the
+      // record, so it is checked where the record is read.
+      continueUsageLimit: lifecycle.continueUsageLimit,
       recoverStaleLease: lifecycle.recoverStaleLease,
       maxSteps: lifecycle.maxSteps,
       maxInvocations: lifecycle.maxInvocations,
@@ -610,6 +635,19 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
         '--attended and --task, is refused with --automatic-resume-only, and buys exactly ' +
         'one departure from the state per invocation. Read what was recorded with ' +
         '`run --task <id>` before deciding.',
+    )
+    .option(
+      '--continue-usage-limit',
+      'Continue ONE named task out of BLOCKED_USAGE_LIMIT, on your decision, from the ' +
+        'resume point that task recorded -- and ONLY when that task recorded NO reset ' +
+        'time. A pause that names an instant clears itself: wait for that instant, or ' +
+        'run with --automatic-resume-only --wait-for-reset. This flag is for the other ' +
+        'case, where the agent reported an exhausted allowance without saying when it ' +
+        'returns, and nothing could ever move the task again. It waits for nothing, ' +
+        'retries nothing and asserts nothing about the allowance -- only that you decided ' +
+        'to try. If it is still exhausted the run reports a fresh block. Requires ' +
+        '--attended and --task, is refused with --automatic-resume-only, and buys exactly ' +
+        'one departure from the state per invocation.',
     )
     // ── Why this is not called `--unattended-…` ─────────────────────────────
     //
@@ -772,6 +810,7 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
             recoverStaleLease: options.recoverStaleLease === true,
             remediateVerifyFailure: options.remediateVerifyFailure === true,
             continueHumanDecision: options.continueHumanDecision === true,
+            continueUsageLimit: options.continueUsageLimit === true,
           },
           seams,
         );

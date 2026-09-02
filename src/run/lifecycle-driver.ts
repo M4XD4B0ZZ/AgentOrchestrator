@@ -441,6 +441,18 @@ export interface LifecycleRequest {
    */
   readonly continueHumanDecision?: boolean;
   /**
+   * Whether the operator asked to continue a `BLOCKED_USAGE_LIMIT` task that
+   * recorded no reset time, forwarded verbatim to
+   * `RunRequest.continueUsageLimit`.
+   *
+   * Forwarded and not interpreted, for the same reason as the two fields above
+   * — and here the un-interpreted part carries the load-bearing conjunct: that
+   * the record names no reset is checked in `run-driver.ts`, beside the state
+   * it is a property of. A copy here would be a second opinion about when a
+   * quota pause may be overridden.
+   */
+  readonly continueUsageLimit?: boolean;
+  /**
    * Whether this run may remove a lease it can prove is dead.
    *
    * Off is the safe answer and there is no default. When off, a stale lease
@@ -706,6 +718,15 @@ async function driveUnderLease(
    * variable would let the first departure swallow the second.
    */
   let humanDecisionContinuationSpent = false;
+  /**
+   * And the same bound for the operator's one departure from a
+   * `BLOCKED_USAGE_LIMIT` that records no reset.
+   *
+   * A third variable, not a third use of one of the others: a lifecycle given
+   * all three flags must be able to spend each exactly once, and sharing would
+   * let the first departure swallow the rest.
+   */
+  let usageLimitContinuationSpent = false;
   let steps = 0;
   let start: StartTaskResult | null = null;
   // Whether the lease has already been given back. Read only by the `catch`
@@ -848,6 +869,9 @@ async function driveUnderLease(
           // The same bound, for the same reason, on the other operator decision.
           continueHumanDecision:
             request.continueHumanDecision === true && !humanDecisionContinuationSpent,
+          // And the same bound again, on the third.
+          continueUsageLimit:
+            request.continueUsageLimit === true && !usageLimitContinuationSpent,
           authEvidence,
           lease: evidence,
           maxSteps: request.maxSteps,
@@ -866,6 +890,7 @@ async function driveUnderLease(
       runs.push(run);
       if (run.remediatedVerifyFailure) verifyRemediationSpent = true;
       if (run.continuedHumanDecision) humanDecisionContinuationSpent = true;
+      if (run.continuedUsageLimit) usageLimitContinuationSpent = true;
       steps += run.steps;
       permissionDenials = mergePermissionDenials(permissionDenials, run.permissionDenials);
 

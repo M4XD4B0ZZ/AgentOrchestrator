@@ -270,6 +270,58 @@ export function mayContinueHumanDecision(grant: InvocationGrant): boolean {
 }
 
 /**
+ * Whether this invocation may continue a `BLOCKED_USAGE_LIMIT` task that has no
+ * reported reset time.
+ *
+ * ── The condition it exists for, and the one it must not touch ────────────
+ *
+ * `BLOCKED_USAGE_LIMIT` is the one state that clears itself, and
+ * `evaluateAutomaticResume` is how it does. That path needs an instant to wait
+ * for. When the CLI reported none — `RESET_TIME_MISSING` — there is nothing to
+ * wait for and never will be, and until M2 slice 6 there was also nothing to
+ * *ask*: the blocking gate admits `AUTOMATIC_ALLOWED`, which such a state can
+ * never carry, and the other two operator conjuncts are pinned by their first
+ * term to `BLOCKED_VERIFY` and `HUMAN_DECISION_REQUIRED`. The task was
+ * unrecoverable by any command the build then offered; this predicate is the
+ * command it now offers.
+ *
+ * The writer has produced that shape since V3-11, for a refusal whose stream
+ * reported no instant; M2 slice 6 gave the reviewer a second way to produce it,
+ * which is what made closing it a condition of that slice rather than a
+ * follow-up.
+ *
+ * **A known reset is emphatically not this predicate's business**, and the
+ * driver's conjunct says so with `state.reportedResetAt === null`. A future
+ * instant means the machine knows when the quota returns and the answer is to
+ * wait for it — an escape that overrode that would spend a reviewer call to
+ * learn what the record already said. A past instant is already the automatic
+ * path's to grant; when *that* denies, it denies on the world — a dirty tree,
+ * an auth preflight that did not pass — and those are refusals about facts this
+ * decision has no evidence against. Widening to cover them would be a different
+ * and much larger authority than "the pause has no end recorded".
+ *
+ * ── What it does not do ───────────────────────────────────────────────────
+ *
+ * It does not wait, retry, schedule or wake anything, and it makes no claim
+ * that the quota has returned — only that a human said to try. If the allowance
+ * is still exhausted the next run reports it again, with a fresh block, which
+ * is the honest outcome rather than a loop: the decision is spent after one use
+ * (`usageLimitContinuationSpent`).
+ *
+ * A third predicate rather than a wider spelling of the two above, for the
+ * reason {@link mayContinueHumanDecision} gives about the second: an operator
+ * who decided to continue an escalation has not thereby decided to spend a
+ * subscription window, and one flag authorising both would let the driver read
+ * a permission wider than the decision that produced it.
+ *
+ * `AUTOMATIC_RESUME_ONLY` answers `false`. Nobody is present on that grant, and
+ * "a human said to try anyway" is precisely a human's sentence.
+ */
+export function mayContinueUsageLimit(grant: InvocationGrant): boolean {
+  return grant === 'ATTENDED';
+}
+
+/**
  * Whether this invocation may remove an execution lease it did not create.
  *
  * A third authority, kept apart from the other two because it is destructive

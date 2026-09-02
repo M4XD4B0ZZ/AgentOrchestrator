@@ -158,7 +158,12 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       '  it. Waiting for the reset is a separate authority and is never implied by the block: it\n' +
       '  happens only when --automatic-resume-only and --wait-for-reset were both given, and\n' +
       '  only while the reported reset time is the one check still refusing the resume.\n' +
-      '  Otherwise, invoke again once the quota has returned.',
+      '  Otherwise, invoke again once the quota has returned. If the block records NO reset\n' +
+      '  time -- the agent said the allowance is gone without saying when it returns -- nothing\n' +
+      '  can clear it on its own, and continuing is a decision: re-run with --attended and\n' +
+      '  --continue-usage-limit. That waits for nothing and claims nothing about the quota; if\n' +
+      '  it is still exhausted the next run reports a fresh block. Spent on one departure per\n' +
+      '  invocation. `run --task <id>` prints whether a reset time was recorded.',
     BLOCKED_VERIFY:
       'The repository\'s verification commands failed and were not retried. The only\n' +
       '  continuation is remediation, which is a decision: re-run with --attended and\n' +

@@ -174,7 +174,43 @@ only minted from an observation, and that the mint has exactly one importer in
 `src/`. Both are still pinned, and a forged artefact is still refused for the
 review phase.
 
-### 4. One machine, one login, one reviewer call at a time
+### 4. Give `BLOCKED_USAGE_LIMIT` an operator half
+
+A block that records no reset instant cannot clear itself, and until this slice
+nothing could move it: the two operator escapes are pinned by their first terms
+to `BLOCKED_VERIFY` and `HUMAN_DECISION_REQUIRED`, and `AUTOMATIC_ALLOWED` is
+unreachable without an instant. The task was **unrecoverable**.
+
+Not a new hazard — the Claude writer has produced that shape since V3-11 — but
+the reviewer's quota block used to land in the continuable
+`HUMAN_DECISION_REQUIRED` and now lands here, so shipping decisions 1-3 without
+this would have added a producer to a dead end. That is why it is in the slice
+rather than after it.
+
+`--continue-usage-limit`, the third of exactly the shape M1 built twice:
+requires `--attended` and `--task`, refused under `--automatic-resume-only`,
+absent from `agent-loop repositories`, spent on one departure per invocation. It
+waits for nothing, retries nothing and schedules nothing; if the allowance is
+still gone the next run reports a fresh block.
+
+**The conjunct that makes it safe is `state.reportedResetAt === null`.** A
+recorded instant — future or past — is not this door's business. Future means
+the machine knows when the window returns; past is already
+`evaluateAutomaticResume`'s to grant, and when that denies it denies on the
+world, about which this decision holds no evidence. Without the conjunct an
+operator flag would become a way to start a reviewer before its window
+returned — the exact waste the other decisions exist to prevent — and it is
+pinned in both directions: a future reset moves nothing and starts no process,
+and a past one is measured being taken by the *automatic* path with the
+operator's decision unspent.
+
+One asymmetry the siblings did not need: `BLOCKED_USAGE_LIMIT` is the eligible
+state, so a denied automatic resume classifies `AUTOMATIC_RESUME_REFUSED` ->
+`BLOCKED`, which no grant permits. The operator's decision is therefore also a
+disjunct at the continuation gate, expressed at the call site so that
+`permitsContinuation` stays a pure function of the two vocabularies.
+
+### 5. One machine, one login, one reviewer call at a time
 
 Slice 5's bound is the Git common directory, because that is the lease's key.
 The reviewer's quota is not scoped that way: `codex` reads its login from the
@@ -252,16 +288,9 @@ This slice's job is to make sure there is something correct for it to resume.
   read-only Git commands (`worktree list --porcelain`, `rev-parse`, `status
   --porcelain`, `merge-base --is-ancestor`), so this is roughly four to eight
   subprocesses added to a step measured in minutes;
-- **a recognised refusal that names no time has no operator lever.** It parks at
-  `BLOCKED_USAGE_LIMIT` with `reportedResetAt: null`; `evaluateAutomaticResume`
-  denies `RESET_TIME_MISSING` for ever, and `run-driver.ts`'s two operator
-  escapes are pinned to `BLOCKED_VERIFY` and `HUMAN_DECISION_REQUIRED`. Not a
-  new hazard — the Claude writer has produced that shape since V3-11, for a
-  refusal whose stream reported no instant — but the reviewer path used to land
-  in the continuable `HUMAN_DECISION_REQUIRED`, so this slice adds a producer to
-  an existing dead end. No recorded Codex message reaches it; all 51 carry a
-  time. The fix is to give `BLOCKED_USAGE_LIMIT` the operator half
-  `HUMAN_DECISION_REQUIRED` got in M1, which is a decision of its own;
+- **a recognised refusal that names no time spends a reviewer call to learn
+  nothing**, and is then an operator decision rather than a wait — see decision
+  4. No recorded Codex message reaches it; all 51 carry a time;
 - **the writer half of slice 5's cost is unchanged.** Nothing coordinates two
   writing agents against the Claude window. The default of
   `maxConcurrentRepositories: 1` is still what keeps that a choice.

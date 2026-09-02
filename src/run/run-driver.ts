@@ -87,6 +87,7 @@ import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import {
   mayContinueHumanDecision,
+  mayContinueUsageLimit,
   mayRemediateVerifyFailure,
   permitsContinuation,
   type InvocationGrant,
@@ -334,6 +335,15 @@ export interface RunResult {
    */
   readonly continuedHumanDecision: boolean;
   /**
+   * Whether this run spent the operator's decision to continue a
+   * `BLOCKED_USAGE_LIMIT` task that recorded no reset time.
+   *
+   * The third of the same shape, reported for the same reason: the operator
+   * bought one departure and has to be able to see whether it was used. Never
+   * persisted — it is a fact about one call.
+   */
+  readonly continuedUsageLimit: boolean;
+  /**
    * What the writing agent was refused, **across every step of this run**.
    *
    * Run-level rather than per-step, and that placement is the whole point.
@@ -434,6 +444,36 @@ export interface RunRequest {
    */
   readonly continueHumanDecision?: boolean;
   /**
+   * Whether the operator asked, on this invocation, to continue a
+   * `BLOCKED_USAGE_LIMIT` task **that recorded no reset time**, from the resume
+   * point it did record.
+   *
+   * The third half of the same story, and it was found the same way: by asking
+   * which declared edge no executor could take. `BLOCKED_USAGE_LIMIT` is
+   * `resumable: true` with `resumeReentry: 'DIRECT'` and a `REQUIRED` resume
+   * point, and its edges back into the work loop are declared. The automatic
+   * path takes them — but only against a reported reset instant. Without one,
+   * `evaluateAutomaticResume` denies `RESET_TIME_MISSING` for ever, and the two
+   * operator conjuncts beside this one are pinned by their first terms to other
+   * states. The task could not be moved by anything.
+   *
+   * The narrowing to `reportedResetAt === null` lives in the driver's conjunct,
+   * not here, because it is a property of the *record* rather than of the
+   * invocation — see {@link mayContinueUsageLimit} for why a known reset must
+   * not be reachable through this door.
+   *
+   * Conjoined with `mayContinueUsageLimit(continuationGrant)`, so it does
+   * nothing without `ATTENDED`, and spent after one use — see
+   * `usageLimitContinuationSpent`.
+   *
+   * A *different* field from the two above rather than a wider spelling, and
+   * the existing pins that each of those refuses to move the other's state stay
+   * true afterwards.
+   *
+   * Defaulting is deliberate: absent means no.
+   */
+  readonly continueUsageLimit?: boolean;
+  /**
    * The artefact a *fresh* auth preflight produced, or `null` when none ran.
    *
    * Evidence, never assumed — and since V2-05 that is enforced rather than
@@ -518,6 +558,7 @@ function runResult(
     lastStep: null,
     remediatedVerifyFailure: false,
     continuedHumanDecision: false,
+    continuedUsageLimit: false,
     permissionDenials: NO_PERMISSION_DENIALS,
     ...from,
   });
@@ -617,12 +658,15 @@ export async function runTask(
    * spendable twice by a loop that returns to the state it left.
    */
   let humanDecisionContinuationSpent = false;
+  /** The third decision, bounded exactly as its two siblings are. */
+  let usageLimitContinuationSpent = false;
   const stop = (from: Partial<RunResult> & { readonly outcome: RunOutcome }): RunResult =>
     runResult({
       taskId,
       permissionDenials,
       remediatedVerifyFailure: verifyRemediationSpent,
       continuedHumanDecision: humanDecisionContinuationSpent,
+      continuedUsageLimit: usageLimitContinuationSpent,
       ...from,
     });
 
@@ -871,11 +915,35 @@ export async function runTask(
       state.resumeFrom !== null &&
       !humanDecisionContinuationSpent;
 
+    // The third, and the one conjunct its siblings have no equivalent of.
+    //
+    // `state.reportedResetAt === null` is what keeps this door shut on every
+    // block that can still clear itself. A recorded instant — future or past —
+    // means the automatic path owns the question: in the future it is a wait,
+    // and in the past `evaluateAutomaticResume` already grants it unless the
+    // *world* denies, and this decision carries no evidence about the world.
+    // Without the conjunct an operator flag would silently become a way to
+    // start a reviewer before its window returned, which is the waste M2 slice
+    // 6 exists to stop.
+    //
+    // No phase term, for the reason its `HUMAN_DECISION_REQUIRED` sibling gives:
+    // this state declares three work-loop edges and the record says which one,
+    // while `RESUME_PHASE_NOT_DRIVEN` still refuses a nonsense point at the
+    // write.
+    const continuingUsageLimit =
+      state.state === 'BLOCKED_USAGE_LIMIT' &&
+      state.reportedResetAt === null &&
+      request.continueUsageLimit === true &&
+      mayContinueUsageLimit(request.continuationGrant) &&
+      state.resumeFrom !== null &&
+      !usageLimitContinuationSpent;
+
     if (
       isBlockingState(state.state) &&
       resume.continuation !== 'AUTOMATIC_ALLOWED' &&
       !remediatingVerifyFailure &&
-      !continuingHumanDecision
+      !continuingHumanDecision &&
+      !continuingUsageLimit
     ) {
       return stop({
         outcome: BLOCKING_OUTCOME[state.state],
@@ -931,12 +999,36 @@ export async function runTask(
     // argument carries it — for the rest of this call, not for one phase. See
     // `continuingOwnAutomaticResume` above for why refusing there would spend a
     // pause and do no work, and why the permission cannot outlive this frame.
+    //
+    // ── And why the third operator decision is a disjunct here (M2-06) ─────
+    //
+    // Its two siblings need nothing at this gate: `BLOCKED_VERIFY` and
+    // `HUMAN_DECISION_REQUIRED` are both `automaticResumeEligible: false`, so
+    // `classifyResume` calls them `HUMAN_DECISION_REQUIRED` and
+    // `continuationFor` maps that to `ATTENDED_ONLY`, which `ATTENDED` permits.
+    //
+    // `BLOCKED_USAGE_LIMIT` is the state that *is* eligible, so a denied
+    // automatic resume classifies `AUTOMATIC_RESUME_REFUSED` and maps to
+    // `BLOCKED` — a value no grant permits. That is the right answer to the
+    // question this gate asks, "may this run continue **on its own**", and it
+    // is not the question the flag answers. Without the disjunct the operator's
+    // decision would pass the blocking gate and die here, which is how it was
+    // measured before this line existed.
+    //
+    // Expressed at the call site rather than by widening `permitsContinuation`,
+    // which stays a pure function of the two vocabularies: an operator's
+    // sentence is a third input, and folding it in would make one grant look
+    // like an authority it is not. It widens nothing either —
+    // `continuingUsageLimit` has already required `ATTENDED`, this exact state,
+    // an **absent** reset instant, a recorded resume point and an unspent
+    // decision. The iteration after the resume needs none of this: the task is
+    // then in-flight and classifies `ATTENDED_ONLY` like any other.
     const granted = permitsContinuation(
       request.continuationGrant,
       resume.continuation,
       continuingOwnAutomaticResume,
     );
-    if (!granted.permitted) {
+    if (!granted.permitted && !continuingUsageLimit) {
       return stop({
         outcome: 'CONTINUATION_NOT_AUTHORISED',
         state: state.state,
@@ -966,7 +1058,8 @@ export async function runTask(
     if (
       resume.continuation === 'AUTOMATIC_ALLOWED' ||
       remediatingVerifyFailure ||
-      continuingHumanDecision
+      continuingHumanDecision ||
+      continuingUsageLimit
     ) {
       // The phase this resume would enter must be one this run can actually
       // continue from, and that is checked *before* the write for the same
@@ -1060,6 +1153,8 @@ export async function runTask(
         // to the point — must not have consumed it either, or a refused write
         // would silently cost the operator their one departure.
         verifyRemediationSpent = true;
+      } else if (continuingUsageLimit) {
+        usageLimitContinuationSpent = true;
       } else {
         humanDecisionContinuationSpent = true;
       }
