@@ -38,6 +38,20 @@
  * asserted below is decided before or after any preflight — the durable records,
  * the store on disk, the cycle count, and whether the process was still alive.
  *
+ * **M4 broke that promise and this is how it was restored.** Giving the outbox a
+ * second subject meant a *run's own ending* could raise an item, and on CI every
+ * pass ends `AUTH_PREFLIGHT_FAILED` — the one fact this harness had carefully
+ * arranged never to depend on. Seven checks failed on CI while all 44 passed
+ * locally, which is the exact failure mode the paragraph above exists to
+ * prevent, arriving from a direction it did not anticipate.
+ *
+ * The repair is not to suppress the new items. It is that the counts here were
+ * always counts of **task** conditions — `taskId === 'HD-1'`,
+ * `ESCALATED_DECISION_REQUIRED` — and they now say so, over
+ * {@link outbox}'s task view. The new subject is measured by
+ * {@link checkRepositoryItems}, which asserts a *property* every repository item
+ * must have rather than a count that would depend on the machine again.
+ *
  * ── The phases ─────────────────────────────────────────────────────────────
  *
  *  A. control — the same fixtures, the same binary, no `--idle-poll-ms`. One
@@ -275,19 +289,90 @@ function operatorProfile(roots, maxConcurrentRepositories) {
 /* ──────────────────────────── the instruments ───────────────────────────── */
 
 /** The outbox, read from disk exactly as an operator would find it. */
+/**
+ * The outbox on disk, split by what each item is *about*.
+ *
+ * `names`/`records` are every file, unchanged. `taskNames`/`taskRecords` are the
+ * items about a task, which is what every count below was written to measure
+ * when a task was the only subject there was.
+ *
+ * The split is not tidying. M4 gave the store a second subject — a condition
+ * that belongs to the **repository**, raised when a run's own ending leaves no
+ * task record to judge — and the very first CI run of this harness after that
+ * change failed seven checks here while passing locally. The reason is exactly
+ * the reason the subject exists: on a machine with no agent subscription login,
+ * every pass ends `AUTH_PREFLIGHT_FAILED` before a task state is ever written,
+ * and that now raises `REPOSITORY_RUN_REFUSED`. It is correct — an unattended
+ * machine whose login is gone will never run anything and must say so — and it
+ * is environment-dependent, because a developer's machine *is* logged in.
+ *
+ * So the counts below are taken over the subject they were always about, and the
+ * new subject is measured by a property that holds in both environments rather
+ * than by a count that holds in neither.
+ */
 function outbox(home) {
   const root = join(home, '.agent-orchestrator', 'operator-attention');
-  if (!existsSync(root)) return { names: [], records: [] };
+  const empty = {
+    names: [],
+    records: [],
+    taskNames: [],
+    taskRecords: [],
+    repositoryRecords: [],
+  };
+  if (!existsSync(root)) return empty;
   const names = readdirSync(root).sort();
   const records = [];
+  const taskNames = [];
+  const taskRecords = [];
+  const repositoryRecords = [];
   for (const name of names) {
+    let record;
     try {
-      records.push(JSON.parse(readFileSync(join(root, name), 'utf8')));
+      record = JSON.parse(readFileSync(join(root, name), 'utf8'));
     } catch {
-      records.push({ unreadable: name });
+      record = { unreadable: name };
+    }
+    records.push(record);
+    // Defaulted to `TASK`, not asserted, so this harness still reads a record
+    // written by a build that predates the discriminant rather than counting it
+    // as neither subject and silently dropping it from every check.
+    if ((record.subject ?? 'TASK') === 'REPOSITORY') repositoryRecords.push(record);
+    else {
+      taskNames.push(name);
+      taskRecords.push(record);
     }
   }
-  return { names, records, root };
+  return { names, records, taskNames, taskRecords, repositoryRecords, root };
+}
+
+/**
+ * Every repository item in a store is well-formed. True in every environment.
+ *
+ * A count would not be: whether any repository condition arises at all depends
+ * on whether this machine can log in to an agent. What does not depend on the
+ * environment is that a repository item names a repository condition and **no
+ * task** — which is the property `.strict()` and the discriminated schema exist
+ * to guarantee, checked here against the shipped artefact's own output.
+ */
+function checkRepositoryItems(label, store) {
+  for (const record of store.repositoryRecords) {
+    check(
+      typeof record.condition === 'string' && record.condition.length > 0,
+      `${label}: a repository item carries no condition`,
+    );
+    check(
+      typeof record.reason === 'string' && record.reason.startsWith('REPOSITORY_'),
+      `${label}: a repository item names a task reason: ${String(record.reason)}`,
+    );
+    check(
+      record.taskId === undefined && record.state === undefined,
+      `${label}: a repository item names a task: ${String(record.taskId)}`,
+    );
+    check(
+      typeof record.action === 'string' && record.action.length > 0,
+      `${label}: a repository item has nothing for an operator to do`,
+    );
+  }
 }
 
 const BASE_ARGS = ['--attended', '--max-steps', '1', '--max-invocations', '1'];
@@ -389,23 +474,24 @@ process.stdout.write(`   control pass: ${String(controlMs)} ms, ending ${endingO
 // The outbox is written by the control too — it asked to wait — and that is the
 // first proof that a durable item exists at all.
 const controlOutbox = outbox(homeControl);
+checkRepositoryItems('A', controlOutbox);
 check(
-  controlOutbox.names.length === 1,
-  `A: expected exactly one open item, found ${String(controlOutbox.names.length)}`,
+  controlOutbox.taskNames.length === 1,
+  `A: expected exactly one open task item, found ${String(controlOutbox.taskNames.length)}`,
 );
 check(
-  controlOutbox.records[0]?.taskId === 'HD-1',
-  `A: the open item names the wrong task: ${String(controlOutbox.records[0]?.taskId)}`,
+  controlOutbox.taskRecords[0]?.taskId === 'HD-1',
+  `A: the open item names the wrong task: ${String(controlOutbox.taskRecords[0]?.taskId)}`,
 );
 check(
-  controlOutbox.records[0]?.reason === 'ESCALATED_DECISION_REQUIRED',
-  `A: the open item names the wrong reason: ${String(controlOutbox.records[0]?.reason)}`,
+  controlOutbox.taskRecords[0]?.reason === 'ESCALATED_DECISION_REQUIRED',
+  `A: the open item names the wrong reason: ${String(controlOutbox.taskRecords[0]?.reason)}`,
 );
 // The load-bearing silence. The quota block is a machine-known wait, so it must
 // NOT be an item — and the fixture differs from the one that is only in its
 // state, so the classification is what explains the difference.
 check(
-  controlOutbox.records.every((record) => record.taskId !== 'QUOTA-1'),
+  controlOutbox.taskRecords.every((record) => record.taskId !== 'QUOTA-1'),
   'A: a task the scheduler can wait for was reported as needing a person',
 );
 
@@ -491,6 +577,7 @@ check(
 banner('C  four cycles, two conditions, no duplicates');
 
 const afterRecurring = outbox(homeControl);
+checkRepositoryItems('C', afterRecurring);
 process.stdout.write(`   items: ${afterRecurring.names.join(', ') || 'none'}\n`);
 
 // **Two** items now, and the second one is the whole slice in a fixture. The
@@ -501,8 +588,8 @@ process.stdout.write(`   items: ${afterRecurring.names.join(', ') || 'none'}\n`)
 // became the operator's, and the outbox says so without anybody deciding twice:
 // the same predicate that permits `--continue-usage-limit` is what raised it.
 check(
-  afterRecurring.names.length === 2,
-  `C: expected two open conditions, found ${String(afterRecurring.names.length)}`,
+  afterRecurring.taskNames.length === 2,
+  `C: expected two open task conditions, found ${String(afterRecurring.taskNames.length)}`,
 );
 
 const escalated = afterRecurring.records.find((record) => record.taskId === 'HD-1');
@@ -512,11 +599,11 @@ const quota = afterRecurring.records.find((record) => record.taskId === 'QUOTA-1
 // phase B. A store that grew per cycle would be the spam this design exists to
 // prevent, and the identity being stable is what stops it.
 check(
-  afterRecurring.names.includes(controlOutbox.names[0]),
+  afterRecurring.taskNames.includes(controlOutbox.taskNames[0]),
   'C: the phase A item was re-created under a different name, so the identity is not stable',
 );
 check(
-  afterRecurring.names.filter((name) => name === controlOutbox.names[0]).length === 1,
+  afterRecurring.taskNames.filter((name) => name === controlOutbox.taskNames[0]).length === 1,
   'C: the phase A item appears more than once',
 );
 
@@ -528,7 +615,7 @@ check(
 );
 check(
   typeof escalated?.attentionId === 'string' &&
-    afterRecurring.names.includes(`${escalated.attentionId}.json`),
+    afterRecurring.taskNames.includes(`${escalated.attentionId}.json`),
   'C: a record’s own id disagrees with the file it is in',
 );
 
@@ -573,25 +660,26 @@ const resolved = runCli(
   homeControl,
 );
 const resolvedOutbox = outbox(homeControl);
+checkRepositoryItems('D', resolvedOutbox);
 process.stdout.write(`   items: ${resolvedOutbox.names.join(', ') || 'none'}\n`);
 
 check(resolved.status !== 96, 'D: a socket was opened with no notification configuration');
 // The condition is gone, so the item is gone. A stale item that stayed would
 // send an operator to a task that no longer needs them.
 check(
-  !resolvedOutbox.names.includes(escalatedName),
+  !resolvedOutbox.taskNames.includes(escalatedName),
   'D: a resolved condition left its item behind',
 );
 // And **only** its item. The other repository's condition is untouched by the
 // first one being settled, which is what stops a run over a changing registry
 // from emptying an operator's inbox.
 check(
-  resolvedOutbox.names.includes(quotaName),
+  resolvedOutbox.taskNames.includes(quotaName),
   'D: resolving one condition removed an unrelated one',
 );
 check(
-  resolvedOutbox.names.length === 1,
-  `D: expected exactly the surviving item, found ${String(resolvedOutbox.names.length)}`,
+  resolvedOutbox.taskNames.length === 1,
+  `D: expected exactly the surviving task item, found ${String(resolvedOutbox.taskNames.length)}`,
 );
 
 /* ══════════════════════ phase E — two schedulers ═══════════════════════════ */
@@ -634,17 +722,18 @@ if (raceCodes === 'TIMEOUT') {
 }
 
 const raceOutbox = outbox(homeE);
+checkRepositoryItems('E', raceOutbox);
 process.stdout.write(`   items: ${raceOutbox.names.join(', ') || 'none'}\n`);
 
 // Two conditions, two records, whatever order the two processes found them in.
 // The exclusive create is the whole mechanism: two processes deriving one
 // condition derive one name, and the kernel gives the file to one of them.
 check(
-  raceOutbox.names.length === 2,
-  `E: two schedulers over two conditions produced ${String(raceOutbox.names.length)} records`,
+  raceOutbox.taskNames.length === 2,
+  `E: two schedulers over two conditions produced ${String(raceOutbox.taskNames.length)} task records`,
 );
 check(
-  new Set(raceOutbox.records.map((record) => record.taskId)).size === 2,
+  new Set(raceOutbox.taskRecords.map((record) => record.taskId)).size === 2,
   'E: the two records do not name two different tasks',
 );
 check(
@@ -684,15 +773,16 @@ const rebuilt = runCli(
   homeE,
 );
 const rebuiltOutbox = outbox(homeE);
+checkRepositoryItems('F', rebuiltOutbox);
 process.stdout.write(`   items: ${rebuiltOutbox.names.join(', ') || 'none'}\n`);
 
 check(rebuilt.status !== 96, 'F: a socket was opened with no notification configuration');
 check(
-  rebuiltOutbox.names.length === 2,
-  `F: a fresh process rebuilt ${String(rebuiltOutbox.names.length)} of 2 items`,
+  rebuiltOutbox.taskNames.length === 2,
+  `F: a fresh process rebuilt ${String(rebuiltOutbox.taskNames.length)} of 2 task items`,
 );
 check(
-  rebuiltOutbox.names.join(',') === raceOutbox.names.join(','),
+  rebuiltOutbox.taskNames.join(',') === raceOutbox.taskNames.join(','),
   'F: the rebuilt items have different identities, so the identity is not a function of the record',
 );
 
