@@ -449,16 +449,52 @@ describe('M3 slice 1 — the durable wake horizon', () => {
     expect(scan.future.map((wake) => wake.resetAt)).toEqual([soon, later]);
   });
 
-  it('breaks an identical instant by repository root, then task id', () => {
-    const a = makeRepository('tie-a', ['T-1', 'T-2']);
+  it('breaks an identical instant by repository root, against both weaker answers', () => {
+    const first = makeRepository('tie-a', ['T-1', 'T-2']);
+    const second = makeRepository('tie-b', ['T-1', 'T-2']);
     const at = new Date(NOW_MS + 60_000).toISOString();
-    writeBlockedState(a, 'T-2', at);
-    writeBlockedState(a, 'T-1', at);
+    const [low, high] = first < second ? [first, second] : [second, first];
 
-    const forwards = scanDurableWakes([a], NOW);
-    expect(forwards.future.map((wake) => wake.taskId)).toEqual(['T-1', 'T-2']);
-    // The same answer from a second read of the same unchanged disk.
-    expect(scanDurableWakes([a], NOW).earliest?.taskId).toBe('T-1');
+    // The lower-sorting ROOT is given the higher-sorting TASK, so the root
+    // comparison and the task comparison disagree about the answer. Without
+    // that the case is masked: a fixture whose task ids happen to run the same
+    // way as its roots passes with the root comparison deleted, which a
+    // mutation campaign measured directly.
+    writeBlockedState(low, 'T-2', at);
+    writeBlockedState(high, 'T-1', at);
+
+    // And fed HIGH first, so input order is the third wrong answer this rules
+    // out.
+    const scan = scanDurableWakes([high, low], NOW);
+
+    expect(scan.future.map((wake) => wake.repositoryRoot)).toEqual([low, high]);
+    expect(scan.future.map((wake) => wake.taskId)).toEqual(['T-2', 'T-1']);
+    expect(scan.earliest?.repositoryRoot).toBe(low);
+  });
+
+  it('breaks an identical instant and root by task id, where the file names disagree', () => {
+    // `X` and `X-1` are both legal task ids, and their FILE names sort the other
+    // way round: `-` (0x2D) precedes `.` (0x2E), so `X-1.json` comes before
+    // `X.json` while the id `X` precedes `X-1`. The scan reads names in name
+    // order, so this is the one input inside a single repository that reaches
+    // the task-id comparison at all.
+    //
+    // Written after a mutation campaign measured the previous version of this
+    // case passing on sort stability: it used `T-1`/`T-2`, whose file names
+    // already sort the way their ids do, so dropping both tie-breaks survived.
+    const root = makeRepository('tie-c', ['X', 'X-1']);
+    const at = new Date(NOW_MS + 60_000).toISOString();
+    writeBlockedState(root, 'X-1', at);
+    writeBlockedState(root, 'X', at);
+
+    // The premise, asserted rather than assumed: the names really do sort the
+    // other way. If a future change made them agree, this case would go on
+    // passing while measuring nothing, and this line is what turns red instead.
+    expect(['X.json', 'X-1.json'].sort()).toEqual(['X-1.json', 'X.json']);
+
+    const scan = scanDurableWakes([root], NOW);
+    expect(scan.future.map((wake) => wake.taskId)).toEqual(['X', 'X-1']);
+    expect(scan.earliest?.taskId).toBe('X');
   });
 
   it('reports an absent runtime directory as ordinary, and an unreadable one as a note', () => {

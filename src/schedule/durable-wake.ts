@@ -57,6 +57,7 @@
 
 import { readdirSync } from 'node:fs';
 
+import { compareTaskIds } from '../plan/task-id.js';
 import { isStateFileName, taskRuntimeDirectory, TASK_STATE_FILE_EXTENSION } from '../state/state-location.js';
 import { loadTaskState } from '../state/state-store.js';
 
@@ -149,12 +150,22 @@ function taskIdOf(fileName: string): string {
  * reads of one unchanged disk. The instant is what the sleep is computed from,
  * so a tie changes nothing about *when* the scheduler wakes; it changes what the
  * report says it woke for, and a report that varies is a report nobody can pin.
+ *
+ * Both tie-breaks are reachable, and the second is less obviously so. Within one
+ * repository the names are read in **file-name** order, and that is not the same
+ * order as the ids they carry: `-` precedes `.`, so `X-1.json` sorts before
+ * `X.json` while the id `X` precedes `X-1`. A mutation campaign measured the
+ * cost of assuming otherwise — dropping both tie-breaks survived a suite whose
+ * only tie case had been fed in an order the file-name sort already produced.
+ *
+ * The task-id comparison is `compareTaskIds` rather than a second `<`: that
+ * function is the build's one answer to "which task id comes first", and it says
+ * why it is code-unit order rather than a locale's.
  */
 function compareWakes(a: DurableWake, b: DurableWake): number {
   if (a.resetAtMs !== b.resetAtMs) return a.resetAtMs - b.resetAtMs;
   if (a.repositoryRoot !== b.repositoryRoot) return a.repositoryRoot < b.repositoryRoot ? -1 : 1;
-  if (a.taskId !== b.taskId) return a.taskId < b.taskId ? -1 : 1;
-  return 0;
+  return compareTaskIds(a.taskId, b.taskId);
 }
 
 /**

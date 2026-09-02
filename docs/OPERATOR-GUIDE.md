@@ -37,6 +37,26 @@ der Zustand der Maschine danach, hängen davon ab, dass ein Mensch da ist.* Gena
 das behauptet `--attended`. Deshalb blockiert keiner von ihnen den beaufsichtigten
 Betrieb, und jeder von ihnen ist für unbeaufsichtigten Betrieb tödlich.
 
+### Seit M3 Slice 1: der Aufruf überlebt ein Quota-Reset — der Wartezustand überlebt den Prozess
+
+`agent-loop repositories --attended --wait-for-reset --max-wait-ms <n>
+--max-cycles <n>` wartet **zwischen** den Durchläufen auf das früheste
+Quota-Reset, das irgendein eingetragenes Repository dauerhaft gemeldet hat, und
+plant danach neu. Beim Warten hält er nichts: keine Execution Lease, keinen
+Agenten, keinen Worktree, keinen State-Write.
+
+Der Wartezustand wird nirgends gespeichert — er wird vor jedem Schlafen neu von
+der Platte gelesen. Deshalb verliert ein hartes Beenden nichts, und ein **später
+gestarteter** Prozess findet dieselbe Wartezeit wieder, ohne dass du ihm sagen
+musst, welcher Task oder welcher Zeitpunkt. Details in Abschnitt 12b.
+
+Das ändert **an der Freigabe oben nichts**, und U1–U4 bleiben offen. Es kommt
+auch keine neue Berechtigung dazu: jede Admission läuft weiter unter dem
+gewöhnlichen `--attended`-Grant. Gewartet wird zwischen den Durchläufen; *was*
+ein Durchlauf darf, ist unverändert. Es ist kein Daemon, kein Dienst, kein Cron
+und kein wiederkehrender Job — der Aufruf endet, sobald nichts mehr zu warten ist
+oder eine deiner Schranken greift.
+
 ### Seit V3-08: ein sehr schmaler unbeaufsichtigter Pfad — und was er nicht ist
 
 `agent-loop run --automatic-resume-only --task <id>` setzt **einen einzelnen,
@@ -776,6 +796,144 @@ Agenten gegen das Claude-Kontingent. Deshalb ist der Default weiterhin 1 und
 keine Zahl, die Parallelität vorführt.
 
 ---
+
+## 12b. Über ein Quota-Reset hinweg weiterlaufen (M3 Slice 1)
+
+Bis M2 war jede Quota-Pause zwar dauerhaft auf der Platte gespeichert — mit dem
+Zeitpunkt, zu dem sie endet — aber **nichts im Build konnte darauf reagieren**.
+`repositories --attended` traf einen Task, der bis in drei Stunden blockiert war,
+gab die Lease zurück und war nach fünf Sekunden fertig. Nur
+`run --automatic-resume-only --wait-for-reset` wartete überhaupt: einmal, für
+**einen** Task, den du auf der Kommandozeile benennen musstest — und der
+Zeitpunkt lebte nur in den Argumenten dieses einen Aufrufs. Ein Neustart der
+Maschine mitten im Fenster hieß: du musst selbst herausfinden, welcher Task
+wartet und bis wann.
+
+Seit M3 Slice 1 gibt es dafür:
+
+```
+node .\dist\cli\index.js repositories --attended `
+  --wait-for-reset --max-wait-ms 21600000 --max-cycles 6
+```
+
+Was das tut: nach jedem Durchlauf liest AO die dauerhaften Task-States **aller
+eingetragenen Repositories**, nimmt das früheste gemeldete Reset, das noch in der
+Zukunft liegt, schläft bis kurz danach — und plant dann neu.
+
+### Was du dir dabei merken musst: nichts
+
+Der Wartezustand wird **nirgends gespeichert**. Er wird vor jedem Schlafen neu
+von der Platte gelesen. Das heißt:
+
+* Du kannst den Prozess jederzeit hart beenden (`Strg+C`, `taskkill`, Stromausfall).
+  Es geht nichts verloren, weil beim Warten **nichts gehalten wird**: keine
+  Execution Lease, kein Agent, kein Worktree, kein State-Write.
+* Ein **späterer** Aufruf mit demselben Befehl findet dieselbe Wartezeit wieder —
+  ohne dass du ihm sagen musst, welcher Task oder welcher Zeitpunkt.
+
+Genau das ist gemessen und nicht behauptet: ein echter CLI-Prozess wird beim
+Schlafen mit `taskkill /F` getötet, ein zweiter, völlig getrennter Prozess wird
+danach mit denselben Argumenten gestartet, und er muss denselben Zeitpunkt
+wörtlich ausgeben, ihn abwarten und danach einen zweiten Durchlauf unter einer
+echten Lease fahren.
+
+### Die zwei Schranken sind Pflicht
+
+Beide haben **keinen Default**, absichtlich:
+
+* `--max-wait-ms <n>` — Obergrenze für **ein** Schlafen, höchstens 86 400 000
+  (24 Stunden). Liegt das Reset weiter weg, endet der Aufruf mit
+  `BOUND_EXCEEDED`, statt zu schlafen. Die Wartezeit bleibt unangetastet auf der
+  Platte.
+* `--max-cycles <n>` — wie viele Planungsdurchläufe dieser Aufruf insgesamt macht,
+  den ersten mitgezählt. Mindestens 2, denn der erste Durchlauf ist der, der auf
+  den Block trifft.
+
+Ohne `--attended` werden beide abgelehnt, und `--wait-for-reset` ohne `--attended`
+ebenfalls — es gibt dann keine Durchläufe, zwischen denen gewartet werden könnte.
+
+### Worauf AO **nicht** wartet
+
+Auf einen Quota-Block **ohne** gemeldete Reset-Zeit. Der hat keinen
+maschinenlesbaren Weckzeitpunkt, taucht im Zeitplan gar nicht auf, und bleibt
+deine Entscheidung — genau wie in Abschnitt 1 beschrieben:
+
+```
+agent-loop run --repository <pfad> --task <id> --attended --continue-usage-limit
+```
+
+AO erfindet hier kein Intervall. Es gibt keinen Retry, kein Backoff und kein
+Pollen.
+
+### Was der Report dir zeigt
+
+Pro Durchlauf: der gewohnte `repositories`-Bericht, danach die Wartezeilen.
+
+```
+Durable wakes   : 1
+States read     : 3
+    waits until     : 2026-09-02T17:35:00.000Z
+    task            : M3-07
+    root            : D:\Projekt
+
+Scheduler       : WAITED
+Earliest wake   : 2026-09-02T17:35:00.000Z  (M3-07)
+Waited          : 3322 ms
+```
+
+`waits until` ist der Zeitpunkt **wörtlich so, wie er im Task-State steht** —
+nicht umgerechnet, nicht als lokale Uhrzeit. Das ist die Zeile, an der du siehst,
+dass ein frisch gestarteter Prozess die Wartezeit von der Platte rekonstruiert
+hat.
+
+Am Ende steht eine `Ending`-Zeile. Die wichtigsten:
+
+| Ending | Heißt |
+| --- | --- |
+| `NO_FUTURE_WAKE` | Nichts mehr, worauf zu warten wäre. Der normale Abschluss. |
+| `BOUND_EXCEEDED` | Das nächste Reset liegt weiter weg als `--max-wait-ms`. Später erneut aufrufen oder die Schranke erhöhen. |
+| `CYCLE_BUDGET_SPENT` | `--max-cycles` aufgebraucht, es wartet noch etwas. Erneut aufrufen. |
+| `SHUTDOWN_REQUESTED` | Du hast abgebrochen. |
+| `REGISTRY_UNUSABLE_AFTER_WAIT` | Nach dem Warten war `repositories.yaml` nicht mehr lesbar. |
+
+`BOUND_EXCEEDED`, `CYCLE_BUDGET_SPENT` und `SHUTDOWN_REQUESTED` liefern Exit-Code
+**5** („ruf nochmal auf"). Es ist nichts verbraucht und nichts verloren.
+
+### Abbrechen
+
+Während gewartet wird, bittet **ein** `Strg+C` den Scheduler, nach der gerade
+laufenden Arbeit aufzuhören — er beendet den Bericht ordentlich. **Ein zweites**
+`Strg+C` beendet den Prozess sofort, wie bei jedem anderen Befehl auch. Beides ist
+sicher: beim Warten wird nichts gehalten, und ein Abbruch mitten in einem
+Durchlauf ist derselbe Absturz, für den die Stale-Lease-Recovery ohnehin da ist.
+
+Wichtig: **ohne** `--wait-for-reset` verhält sich `Strg+C` genau wie bisher — der
+Prozess stirbt sofort. Der Signal-Handler wird nur für einen Aufruf installiert,
+der überhaupt schlafen kann.
+
+### Was das **nicht** ist
+
+Kein Daemon, kein Dienst, kein Cron, keine wiederkehrenden Jobs, keine selbst
+geschriebenen Zeitpläne, keine Benachrichtigungen. Der Aufruf endet, sobald es
+nichts mehr zu warten gibt oder eine deiner Schranken greift. Wenn du willst,
+dass AO über Tage weiterläuft, ist das Sache deines Task Schedulers — AO bleibt
+ein Befehl, den du startest.
+
+Es kommt auch **keine neue Berechtigung** dazu: jede Admission läuft weiter unter
+dem gewöhnlichen `--attended`-Grant, ohne Stale-Lease-Recovery, ohne
+`--remediate-verify-failure`, ohne `--continue-human-decision` und ohne
+`--continue-usage-limit`. Gewartet wird zwischen den Durchläufen; **was** ein
+Durchlauf darf, ändert sich nicht.
+
+### Zwei AO-Prozesse gleichzeitig
+
+Erlaubt, und ungefährlich. Beide dürfen dieselbe Wartezeit sehen und beide dürfen
+aufwachen — die Entscheidung ist nicht die Wirkung. Ausgeführt wird über die
+gewöhnliche Execution Lease, und wer sie nicht bekommt, meldet
+`LIVE_OWNER_PRESENT` und rührt nichts an. Gemessen mit einem dritten Prozess, der
+die Lease über den Aufwachmoment hinweg hält: beide Scheduler werden abgewiesen,
+das Lease-Dokument ist danach byteweise identisch, und kein Task-State ändert
+sich.
 
 ## 13. Die Run-ID
 

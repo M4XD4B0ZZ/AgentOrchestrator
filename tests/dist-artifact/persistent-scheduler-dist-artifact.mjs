@@ -676,6 +676,19 @@ const holderDeadline = Date.now() + 120_000;
 while (!holderOut.includes('HOLDER_READY') && Date.now() < holderDeadline) await sleep(50);
 check(holderOut.includes('HOLDER_READY'), `E: the lease holder never took the lease: ${holderOut}`);
 
+/**
+ * The control for every "no lease was held" assertion in phase B.
+ *
+ * Those are absence checks on `existsSync(leasePathOf(root))`, and an absence
+ * check is worth nothing until the same predicate has been shown to answer
+ * `true` for a lease that really exists. Here one really does — a separate
+ * process is holding it — so the instrument is demonstrated rather than assumed.
+ */
+check(
+  existsSync(leasePathOf(phaseE.root)),
+  'E: the lease-presence instrument cannot see a lease a live process is holding — every "no lease" check above measures nothing',
+);
+
 const leaseBytesBefore = existsSync(leasePathOf(phaseE.root))
   ? readFileSync(leasePathOf(phaseE.root))
   : null;

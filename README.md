@@ -12839,6 +12839,200 @@ vocabularies.
 See the decision record:
 [Reviewer quota resilience](docs/decisions/2026-09-02-adr-reviewer-quota-resilience.md).
 
+## A wait that outlives the process (M3 slice 1)
+
+M2 ended with every quota pause on disk, carrying the instant it ends, and with
+nothing in the build that could act on one. That is not a reading of the code; it
+was measured against `main @ baba91d`, through the shipped CLI, on a real Git
+repository whose one task was durably `BLOCKED_USAGE_LIMIT` with a reset **three
+hours away**:
+
+```
+[1b] `repositories --attended`  exit=3  elapsed=4769ms
+  #1 sched-fixture-a
+    task            : SCHED-1
+    outcome         : BLOCKED_USAGE_LIMIT
+    reasons         : RESET_TIME_NOT_REACHED
+
+state bytes unchanged after the attended run: true
+```
+
+Four point eight seconds, for a wait of three hours. The one thing that waits at
+all is `run --repository <path> --task <id> --automatic-resume-only
+--wait-for-reset`, and its own help text says the rest — *"nothing schedules
+it"*. It waits once, for one task named on its own command line, and the instant
+it waits for lives only in that invocation's arguments. A machine that reboots at
+hour three of a five-hour window leaves the task parked until a human works out
+which task, and until when, and types it again.
+
+This slice makes that sentence true instead:
+
+> If AgentOrchestrator stops while a task is waiting for a machine-understandable
+> future condition, a later AgentOrchestrator process can reconstruct that wait
+> from durable state and resume the task when the condition is satisfied, without
+> requiring a human to manually rediscover or re-enter the wait.
+
+### The wait was already durable; what was missing was a reader
+
+`TaskState.reportedResetAt` is the only durable "wake me at" value this build has
+ever had. It is ISO-8601 with an explicit zone — the schema refuses a zoneless
+one — and it is written only from what an agent CLI reported. Nothing invents
+one, and `record-interruption.ts` refuses the write that would let a caller
+attach a reset to a block that carried none.
+
+What no reader could do was ask *which* tasks are waiting. `state-store.ts` never
+enumerates the runtime directory: `loadTaskState` takes a task id, so every
+reader had to know the name first. `schedule/durable-wake.ts` is that
+enumeration, and it is the whole of the new reading capability — bounded,
+fail-closed, and holding no lease.
+
+**There is no second persisted queue, and that is a decision rather than an
+economy.** A due-date index would be a second answer to a question the task state
+already answers, and the two would be free to disagree — the shape this build has
+paid for before, where a gate proves one document and the effect lands against
+another.
+
+**Strictly in the future** is load-bearing twice. A reported instant that has
+already passed is not a wake: the pass that just ran has already had its chance
+at it, and scheduling it would produce a sleep of zero followed by a pass that
+admits the same nothing. It is also the termination argument — every wake moves
+the clock past at least one recorded instant, and a passed one is never reported
+again.
+
+Every uncertainty resolves to **fewer** wakes: an unreadable runtime directory, a
+state this build cannot parse, a reset `Date.parse` will not take, a clock that
+is not a timestamp. Each contributes nothing and is reported as a note, so "no
+wake was found" and "no wake could be looked for" are never the same sentence.
+
+### Due is not this layer's opinion
+
+The scheduler computes a *time to look again*, never a permission.
+`evaluateAutomaticResume` denies while `now <= reportedResetAt` — strictly — so
+the scheduler aims at `reportedResetAt + 1 ms`, the earliest moment that
+authority can possibly allow, and the authority is then re-run from a fresh clock
+inside the ordinary lifecycle. Aiming at the instant itself would wake into a
+guaranteed refusal, and — the instant no longer being future — would never try
+again. The `+ 1` is inherited from `run/unattended-resume.ts`, which derived it
+from the same `<=`.
+
+A block that records **no** reset has no machine-understandable wake. It
+contributes nothing to the horizon, is never waited for, and stays the operator's
+through `run --attended --continue-usage-limit`. Inventing a retry interval here
+would be this layer deciding the one thing the product says nothing may decide.
+
+### A loop above the coordinator, not a change to it
+
+`run/repository-coordinator.ts` is untouched. It is still not persistent, still
+has no queue, still has no timers and still polls nothing.
+`schedule/scheduler.ts` runs it, reads the horizon, sleeps, and plans again.
+
+**No execution lease is held across a sleep, and that is structural rather than
+asserted.** A coordinator pass returns only after every admission it made has
+settled, and a settled admission has released. The sleep sits strictly between
+two passes, so there is no path on which this loop could be holding one.
+
+Three things are re-established at every cycle boundary, each a rule rather than
+an optimisation: the **registry**, because a repository can be unenlisted, moved
+or broken during a five-hour wait; the **auth preflight**, through a factory
+called once per cycle, because the evidence artefact carries no freshness and a
+login proven before a six-hour sleep must not authorise the work after it; and
+the **horizon** itself, read after the pass so it describes the world the pass
+left behind. The only thing carried across a sleep is the operator's bounds, and
+they are spent rather than renewed.
+
+### Chunked sleeping, because the subject is an instant
+
+`schedule/bounded-sleep.ts` sleeps in slices of at most a minute, re-reading the
+clock between them. Chunking is **not** about Node's 2 147 483 647 ms timer
+limit — 24 hours already fits inside it. It is about the clock: a timer sleeps for
+a *duration*, the thing being waited for is an *instant*, and those are the same
+only while the wall clock runs at one second per second. An NTP correction or a
+virtual machine resumed from a snapshot breaks that, and re-reading bounds the
+error to one chunk whatever the step was.
+
+Re-reading creates the opposite trap — a clock stepped backwards makes the
+deadline recede — so the loop also counts chunks, a monotone quantity no clock
+can move. Exceeding what the bound could account for ends the wait as
+`SLEEP_BUDGET_SPENT`, which is not a failure: nothing was held, nothing was
+written, and the next act is to read durable state again.
+
+### The command, and the one signal handler in this build
+
+```
+agent-loop repositories --attended --wait-for-reset --max-wait-ms <n> --max-cycles <n>
+```
+
+Both bounds are required and neither has a default, for the reason
+`run --wait-for-reset` gives about its own: a multi-hour sleep invented by a
+default is a multi-hour sleep nobody asked for. `--max-cycles` is at least 2,
+because the first cycle is the pass that meets the block.
+
+**No authority was added.** Every admission still runs under the ordinary
+attended grant with all four destructive permissions `false`. The wait changes
+*when* passes happen and nothing about what a pass may do. **The invocation
+without the flags is unchanged, down to what it opens:** the wait is refused
+before the scan, so an ordinary `repositories --attended` enumerates no runtime
+directory and prints the report it always printed.
+
+`src/` had no process-level signal handler anywhere, and that is not an oversight
+— every command dies at once on an interrupt, and every durable guarantee is
+written to survive exactly that. So the handler is installed only for an
+invocation that can sleep, and removed on every path out. The first interrupt
+asks the scheduler to stop after what is already running; a second removes the
+handler and re-raises, restoring the default. A hard kill at any moment is safe:
+a wait holds nothing.
+
+### Two schedulers
+
+Two of them may both observe the same task as due, and that is not prevented
+because the decision is not the effect. Execution goes through the ordinary lease
+acquisition — an atomic `linkSync` on the canonical Git common directory — and
+the loser is refused `LIVE_OWNER_PRESENT` without reaching a recovery. No
+scheduler-level singleton was added: it would be a second exclusion with a
+different key, and the first question about it would be what happens when the two
+disagree.
+
+Measured, in real processes, with a third process holding the repository's real
+lease across the moment both schedulers wake: both are refused, the lease
+document comes out byte-identical, and neither changes a byte of task state.
+
+### The proof is a real restart
+
+`tests/dist-artifact/persistent-scheduler-dist-artifact.mjs` runs the shipped
+CLI. One process is started, put to sleep by its own scheduler, and terminated
+with `taskkill /F` while the reset is still ahead; a second, completely separate
+process is started afterwards with the same arguments and no knowledge of what
+the first was waiting for, and must print the same instant verbatim, wait it out,
+and run a second pass under a real lease. Its control is the same fixture through
+the same binary without the wait flags — which must return at once, and whose
+duration is what every timing threshold in the harness is derived from, so a slow
+runner moves the threshold rather than turning a guessed constant red.
+
+No fixture there can start an agent, and that is arranged rather than hoped for:
+every parked state records `worktreeCleanAtCheckpoint: false` against a worktree
+that really exists and really holds the recorded branch, so reconciliation is
+`CONSISTENT` — the run reaches the resume decision, which is the point — and the
+resume is then denied on a fact no passage of time can change.
+
+### What it costs, stated rather than discovered later
+
+- **a wake costs a pass, even when the pass can do nothing.** The planner selects
+  on the task file's `status`, so a repository whose task is still quota-blocked
+  is admitted, takes the lease, pays one auth preflight and is refused. That was
+  already true of every `repositories --attended` invocation; what is new is that
+  a scheduler makes several of them. One preflight is shared by every repository
+  in a cycle;
+- **a wake that leads nowhere costs one extra cycle.** A task whose reset passes
+  and which still cannot resume is woken for once, planned, and then contributes
+  no future wake because its instant is behind. One wasted pass, never a loop;
+- **idle waiting wakes once a minute** to compare two numbers. It opens no file,
+  starts no process and takes no lease;
+- **24 hours is still the longest wait this build will perform**, inherited
+  unchanged from `MAX_WAIT_MS_CEILING`.
+
+See the decision record:
+[A persistent scheduler, and a wait that outlives the process that made it](docs/decisions/2026-09-02-adr-persistent-scheduler-and-restart-safe-wait.md).
+
 ## Not implemented yet
 
 Still missing, deliberately: **unattended pull-request creation and unattended
