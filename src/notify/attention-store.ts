@@ -88,13 +88,20 @@ import { z } from 'zod';
 
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
 import { safeErrnoCode } from '../core/safe-error.js';
+import {
+  RUN_ATTENTION_JUDGED_CONDITIONS,
+  RUN_ATTENTION_REASONS,
+  type RunAttentionReason,
+} from '../core/run-attention.js';
 import { ATTENTION_REASONS, type AttentionReason } from '../core/task-attention.js';
 import { ALL_STATES, type TaskStateName } from '../core/states.js';
 import { USAGE_LIMIT_CONTINUATION_READINGS } from '../core/usage-limit-continuation.js';
 import { isContained, pathContainsLink } from '../doctor/safe-write.js';
 import {
+  attentionDeliveryPath,
   attentionIdOf,
   attentionStagingName,
+  deliveredAttentionIdOf,
   isAttentionFileName,
   isAttentionStagingName,
   operatorAttentionPath,
@@ -114,12 +121,35 @@ export const ATTENTION_RECORD_VERSION = 1;
  */
 export const MAX_ATTENTION_RECORD_BYTES = 8192;
 
-const AttentionRecordSchema = z
+/**
+ * The fields both subjects carry, and they mean the same thing in both.
+ *
+ * Split out rather than repeated so that "every record names a repository, an
+ * id, a reason, an instant and an action" is one statement in one place. A
+ * second copy is how the two halves start disagreeing about `observedAt`.
+ */
+const commonFields = {
+  attentionVersion: z.literal(ATTENTION_RECORD_VERSION),
+  attentionId: z.string().regex(/^[0-9a-f]{32}$/),
+  repositoryId: z.string().min(1),
+  repositoryRoot: z.string().min(1),
+  /** When this item was first written down. Not part of the identity. */
+  observedAt: z.string().min(1),
+  action: z.string().min(1),
+} as const;
+
+/**
+ * A record about one **task**, unchanged from M3-02 down to the field names.
+ *
+ * `subject` is new and is the only addition. It is not redundant with the
+ * presence of `taskId`: a reader that decided the kind by sniffing which
+ * optional fields were present would be inferring the contract instead of
+ * reading it, and the first record that gained a field would break the sniff.
+ */
+const TaskAttentionRecordSchema = z
   .object({
-    attentionVersion: z.literal(ATTENTION_RECORD_VERSION),
-    attentionId: z.string().regex(/^[0-9a-f]{32}$/),
-    repositoryId: z.string().min(1),
-    repositoryRoot: z.string().min(1),
+    ...commonFields,
+    subject: z.literal('TASK'),
     taskId: z.string().min(1),
     state: z.enum(ALL_STATES),
     reason: z.enum(ATTENTION_REASONS),
@@ -128,12 +158,38 @@ const AttentionRecordSchema = z
     stateEnteredAt: z.string().min(1),
     /** The reset the diagnosis mentions, when there is one. */
     reportedResetAt: z.string().min(1).nullable(),
-    /** When this item was first written down. Not part of the identity. */
-    observedAt: z.string().min(1),
-    action: z.string().min(1),
   })
   .strict();
 
+/**
+ * A record about a **repository**, for a condition no task record was written
+ * for (`U3`, `L-M3-F-3`).
+ *
+ * It carries no `taskId` and no `state` — not `null` versions of them, no field
+ * at all — because `.strict()` then makes "a repository record that names a task
+ * state" unrepresentable rather than merely discouraged. That is the same reason
+ * `core/task-attention.ts` discriminates its judgement instead of pairing a
+ * disposition with an optional action.
+ *
+ * `condition` is the exact lifecycle outcome, or `RUN_THREW`. It is closed
+ * vocabulary, never a message: an exception's text is not a document field.
+ */
+const RepositoryAttentionRecordSchema = z
+  .object({
+    ...commonFields,
+    subject: z.literal('REPOSITORY'),
+    condition: z.enum(RUN_ATTENTION_JUDGED_CONDITIONS as readonly [string, ...string[]]),
+    reason: z.enum(RUN_ATTENTION_REASONS),
+  })
+  .strict();
+
+const AttentionRecordSchema = z.discriminatedUnion('subject', [
+  TaskAttentionRecordSchema,
+  RepositoryAttentionRecordSchema,
+]);
+
+export type TaskAttentionRecord = z.infer<typeof TaskAttentionRecordSchema>;
+export type RepositoryAttentionRecord = z.infer<typeof RepositoryAttentionRecordSchema>;
 export type AttentionRecord = z.infer<typeof AttentionRecordSchema>;
 
 /** Every way writing one record can end. A closed set. */
@@ -337,6 +393,20 @@ export type AttentionEntryReading = (typeof ATTENTION_ENTRY_READINGS)[number];
 
 export interface AttentionListing {
   readonly records: readonly AttentionRecord[];
+  /**
+   * The ids that carry a delivery receipt: this item reached a configured
+   * endpoint and the endpoint acknowledged it (`U2`, M4).
+   *
+   * Ids rather than a flag on each record, because a receipt can outlive the
+   * moment its record was read and because a receipt for an id no record is
+   * listed under is a real state — a record removed between the two reads. The
+   * caller that cares about the pairing does the pairing.
+   *
+   * The **complement** is what makes silence mean something: an item that is in
+   * `records` and not in `delivered` was written down and never acknowledged by
+   * anybody, which is a fact on disk rather than the absence of one.
+   */
+  readonly delivered: readonly string[];
   /** Names present that this build did not write or could not read. */
   readonly foreignNames: number;
   readonly unreadable: number;
@@ -370,6 +440,7 @@ export function listAttentionRecords(
 ): AttentionListing {
   const empty = {
     records: Object.freeze([]),
+    delivered: Object.freeze([]),
     foreignNames: 0,
     unreadable: 0,
     staging: 0,
@@ -393,6 +464,7 @@ export function listAttentionRecords(
   }
 
   const records: AttentionRecord[] = [];
+  const delivered: string[] = [];
   let foreignNames = 0;
   let unreadable = 0;
   let staging = 0;
@@ -405,6 +477,14 @@ export function listAttentionRecords(
     // it holds no name anybody reads, so it is invisible rather than a problem.
     if (isAttentionStagingName(name)) {
       staging += 1;
+      continue;
+    }
+    // A delivery receipt. Its content is never read - the file existing *is* the
+    // fact, which is why it is written empty and why a torn write cannot make it
+    // say the wrong thing.
+    const deliveredId = deliveredAttentionIdOf(name);
+    if (deliveredId !== null) {
+      delivered.push(deliveredId);
       continue;
     }
     if (!isAttentionFileName(name)) {
@@ -448,6 +528,7 @@ export function listAttentionRecords(
 
   return Object.freeze({
     records: Object.freeze(records),
+    delivered: Object.freeze(delivered),
     foreignNames,
     unreadable,
     staging,
@@ -484,11 +565,98 @@ export function removeAttentionRecord(
     return 'REMOVAL_FAILED';
   }
   if (!isContained(root, target)) return 'REMOVAL_FAILED';
+  let code: AttentionRemovalCode;
   try {
     rmSync(target, { force: false, recursive: false });
-    return 'REMOVED';
+    code = 'REMOVED';
   } catch (error: unknown) {
-    return safeErrnoCode(error) === 'ENOENT' ? 'ALREADY_GONE' : 'REMOVAL_FAILED';
+    code = safeErrnoCode(error) === 'ENOENT' ? 'ALREADY_GONE' : 'REMOVAL_FAILED';
+  }
+
+  // The receipt goes with the record, and it goes **after** it. A receipt
+  // outliving its record would be read by the next listing as "delivered", and
+  // if that condition then recurs it would re-use the same identity - so the
+  // re-raised item would be born already acknowledged and never sent. Removing
+  // the receipt first would have the harmless failure instead (a re-send), which
+  // is why the order is this way round and not the other.
+  //
+  // Its own outcome is deliberately not reported: this function answers about
+  // the record, and a caller counting resolutions must not be told a different
+  // number because a receipt was already gone.
+  if (code !== 'REMOVAL_FAILED') discardDeliveryReceipt(attentionId, provider);
+  return code;
+}
+
+/** Removes one delivery receipt, best effort. Never throws, never reports. */
+function discardDeliveryReceipt(attentionId: string, provider: PathProvider): void {
+  try {
+    const root = operatorAttentionRoot(provider);
+    const receipt = attentionDeliveryPath(attentionId, provider);
+    if (!isContained(root, receipt)) return;
+    rmSync(receipt, { force: true, recursive: false });
+  } catch {
+    // A receipt that will not go away costs one suppressed re-send of a
+    // condition that has already been resolved once. It is not worth failing a
+    // removal that succeeded.
+  }
+}
+
+/** Every way marking one item delivered can end. A closed set. */
+export const ATTENTION_DELIVERY_CODES = [
+  /** The receipt was created by this call. */
+  'MARKED',
+  /**
+   * A receipt was already there. Not a failure: two processes that both
+   * delivered the same item are both right, and the fact is the same fact.
+   */
+  'ALREADY_MARKED',
+  /** No receipt exists and none could be created. The item stays undelivered. */
+  'MARK_FAILED',
+] as const;
+
+export type AttentionDeliveryCode = (typeof ATTENTION_DELIVERY_CODES)[number];
+
+/**
+ * Records that one item reached a configured endpoint and was acknowledged.
+ *
+ * Written **only** after a transport reported success, and that is the whole of
+ * what a receipt claims: an endpoint took it. It is not a claim that a person
+ * read it, and nothing in this build ever makes that claim.
+ *
+ * The file is empty, and empty is a design decision rather than laziness. The
+ * fact is carried by the name existing, so there is no content a torn write
+ * could corrupt into a different answer - which is the one failure mode a
+ * two-file scheme could otherwise have that the single-record scheme does not.
+ *
+ * Never throws: this is called from a scheduler loop whose answer about the
+ * repositories must not be rewritten by a receipt failing to be written. A
+ * failed mark costs one duplicate push on the next cycle, which is the direction
+ * to fail in - the alternative is an item recorded as delivered that was not.
+ */
+export function markAttentionDelivered(
+  attentionId: string,
+  provider: PathProvider = OS_PATH_PROVIDER,
+): AttentionDeliveryCode {
+  let root: string;
+  let target: string;
+  try {
+    root = operatorAttentionRoot(provider);
+    target = attentionDeliveryPath(attentionId, provider);
+  } catch {
+    return 'MARK_FAILED';
+  }
+  if (!isContained(root, target)) return 'MARK_FAILED';
+  const rootRefusal = ensureRoot(root);
+  if (rootRefusal !== null) return 'MARK_FAILED';
+
+  // `wx`, so two processes that delivered the same item do not both claim to
+  // have created the receipt - the same exclusive-create discipline the record
+  // itself uses, and for the same reason.
+  try {
+    closeSync(openSync(target, 'wx', 0o600));
+    return 'MARKED';
+  } catch (error: unknown) {
+    return safeErrnoCode(error) === 'EEXIST' ? 'ALREADY_MARKED' : 'MARK_FAILED';
   }
 }
 

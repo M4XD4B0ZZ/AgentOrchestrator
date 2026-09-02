@@ -24,6 +24,7 @@ import { registerDoctorCommand } from './doctor-command.js';
 import { registerLeaseCommand } from './lease-command.js';
 import { registerPublicationCommand } from './publication-command.js';
 import { registerReleaseCommand } from './release-command.js';
+import { registerAttentionCommand } from './attention-command.js';
 import { registerRepositoriesCommand } from './repositories-command.js';
 import { registerRunCommand } from './run-command.js';
 import { enforceSupportedRuntime } from './runtime-gate.js';
@@ -241,6 +242,7 @@ export function buildProgram(): Command {
   registerDeliveryCommand(program);
   registerPublicationCommand(program);
   registerRepositoriesCommand(program);
+  registerAttentionCommand(program);
 
   return program;
 }

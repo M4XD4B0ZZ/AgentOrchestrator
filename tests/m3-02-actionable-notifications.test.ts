@@ -73,9 +73,13 @@ import {
   removeAttentionRecord,
   writeAttentionRecord,
   type AttentionRecord,
+  type RepositoryAttentionRecord,
+  type TaskAttentionRecord,
 } from '../src/notify/attention-store.js';
+import { RUN_ATTENTION_ACTIONS } from '../src/core/run-attention.js';
 import {
   attentionIdFor,
+  repositoryAttentionIdFor,
   attentionStagingName,
   isAttentionFileName,
   operatorAttentionRoot,
@@ -283,7 +287,53 @@ describe('M3 slice 2 — the attention judgement', () => {
 
 /* ═══════════════════════ 2. the durable store ══════════════════════════════ */
 
-function record(overrides: Partial<AttentionRecord> = {}): AttentionRecord {
+/**
+ * What an assertion about "which items" names.
+ *
+ * A task item is its task id, which is what every assertion in this file meant
+ * before the record grew a second subject. A repository item is spelled out
+ * rather than filtered away, so a repository record appearing where only task
+ * records belong turns an assertion red instead of vanishing from it.
+ */
+function subjectLabel(record: AttentionRecord): string {
+  return record.subject === 'TASK' ? record.taskId : `REPOSITORY:${record.condition}`;
+}
+
+/**
+ * A repository-subject record, built the way the outbox builds one.
+ *
+ * The id comes from `repositoryAttentionIdFor` rather than from a literal, so a
+ * change to the identity derivation cannot leave this fixture agreeing with a
+ * store that has moved on — the same reason `record()` derives its own.
+ */
+function repositoryRecord(
+  overrides: Partial<RepositoryAttentionRecord> = {},
+): RepositoryAttentionRecord {
+  const base = {
+    repositoryRoot: 'C:\\repo',
+    condition: 'RECOVERY_UNSAFE' as const,
+    reason: 'REPOSITORY_LEASE_UNRESOLVED' as const,
+  };
+  const merged = { ...base, ...overrides };
+  return Object.freeze({
+    attentionVersion: 1 as const,
+    attentionId: repositoryAttentionIdFor({
+      repositoryRoot: merged.repositoryRoot,
+      condition: merged.condition,
+      reason: merged.reason,
+    }),
+    subject: 'REPOSITORY' as const,
+    repositoryId: 'fixture',
+    repositoryRoot: merged.repositoryRoot,
+    condition: merged.condition,
+    reason: merged.reason,
+    observedAt: NOW,
+    action: RUN_ATTENTION_ACTIONS[merged.reason],
+    ...overrides,
+  }) as RepositoryAttentionRecord;
+}
+
+function record(overrides: Partial<TaskAttentionRecord> = {}): AttentionRecord {
   const base = {
     repositoryRoot: 'C:\\repo',
     taskId: 'T-1',
@@ -301,6 +351,7 @@ function record(overrides: Partial<AttentionRecord> = {}): AttentionRecord {
       detail: merged.detail,
       stateEnteredAt: merged.stateEnteredAt,
     }),
+    subject: 'TASK' as const,
     repositoryId: 'fixture',
     repositoryRoot: merged.repositoryRoot,
     taskId: merged.taskId,
@@ -398,9 +449,26 @@ describe('M3 slice 2 — the durable outbox store', () => {
       .replace(/\/\*[\s\S]*?\*\//g, ' ')
       .replace(/(^|[^:])\/\/.*$/gm, '$1');
     expect(source).toContain('linkSync(staging, target)');
-    // Exactly one `openSync`, and its subject is the staging name.
-    expect([...source.matchAll(/openSync\(/g)]).toHaveLength(1);
-    expect(source).toContain("openSync(staging, 'wx'");
+    // Every `openSync` in the module, and what each one opens. Counting them was
+    // the first spelling and it measured the wrong thing: the property is "the
+    // record's own name is never opened", not "there is one open call". M4 added
+    // a second — the delivery receipt, which is a different file with its own
+    // name and its own exclusive create — and a count would have had to be
+    // bumped, which is the moment a pin stops being a measurement.
+    //
+    // So the subjects are enumerated instead. `staging` is the record's content
+    // under a name nothing reads; `target` inside `markAttentionDelivered` is the
+    // *receipt's* name, and a torn create there can only produce an empty file
+    // that already carries the whole fact. Neither is the record's own name.
+    const opened = [...source.matchAll(/openSync\((\w+),\s*'(\w+)'/g)].map(
+      (match) => `${match[1] ?? ''}:${match[2] ?? ''}`,
+    );
+    expect(opened).toEqual(['staging:wx', 'target:wx']);
+    // And the record's own name reaches exactly one write call in the module,
+    // which is the `link`. A `writeSync`, an `openSync` or a `writeFileSync` on
+    // it would be the defect this case exists to refuse.
+    expect(source).not.toContain('writeFileSync(target');
+    expect(source).not.toContain('writeSync(target');
   });
 
   it('leaves nothing behind on a successful write', () => {
@@ -428,7 +496,7 @@ describe('M3 slice 2 — the durable outbox store', () => {
     expect(listing.staging).toBe(1);
     expect(listing.foreignNames).toBe(0);
     expect(listing.unreadable).toBe(0);
-    expect(listing.records.map((entry) => entry.taskId)).toEqual(['OTHER']);
+    expect(listing.records.map(subjectLabel)).toEqual(['OTHER']);
 
     // And the condition the dead process never named is written by the next
     // pass, which is the direction this design fails in: a delay, not a loss.
@@ -528,7 +596,7 @@ describe('M3 slice 2 — settling the outbox against durable state', () => {
 
     expect(settlement.scan.statesRead).toBe(2);
     expect(settlement.raised).toHaveLength(1);
-    expect(settlement.raised[0]?.taskId).toBe('NEEDS-1');
+    expect(settlement.raised.map(subjectLabel)).toEqual(['NEEDS-1']);
     expect(settlement.alreadyOpen).toBe(0);
     expect(listAttentionRecords(provider).records).toHaveLength(1);
   });
@@ -712,7 +780,7 @@ describe('M3 slice 2 — settling the outbox against durable state', () => {
     const scan = scanAttention([{ repositoryId: 'fixture', repositoryRoot: root }], NOW);
     // `-` precedes `.` in a file-name sort while the id `T-1` also precedes
     // `T.9`; the comparator is asserted rather than the accident agreeing.
-    expect(scan.items.map((item) => item.record.taskId)).toEqual(['T-1', 'T.9']);
+    expect(scan.items.map((item) => subjectLabel(item.record))).toEqual(['T-1', 'T.9']);
   });
 
   it('survives a write the store refuses, without losing the condition', () => {
@@ -966,15 +1034,50 @@ describe('M3 slice 2 — announcing what was raised', () => {
     // that must not leave the machine. The declared id identifies the repository
     // on the wire, which is the rule `notify/notification.ts` already follows.
     expect(JSON.stringify(wire)).not.toContain('C:\\');
+    // Exhaustive rather than a `not.toContain` sweep, and the exhaustiveness is
+    // the instrument: a field added to the record and spread onto the payload
+    // turns this red before it can carry anything off the machine. M4 added two
+    // — `subject` and `condition` — and this is where they had to be admitted.
     expect(Object.keys(wire).sort()).toEqual([
       'action',
       'attentionId',
+      'condition',
       'detail',
       'reason',
       'reportedResetAt',
       'repositoryId',
       'state',
+      'subject',
       'taskId',
     ]);
+  });
+
+  it('puts no filesystem path on a repository item’s wire payload either', () => {
+    // The same rule, measured on the subject that did not exist when the rule
+    // was written. A repository item is *about* a repository, so the temptation
+    // to identify it by its root is stronger here than anywhere — and the root
+    // is exactly what may not leave the machine.
+    const wire = attentionPushFor(repositoryRecord());
+    expect(JSON.stringify(wire)).not.toContain('C:');
+    expect(Object.keys(wire).sort()).toEqual([
+      'action',
+      'attentionId',
+      'condition',
+      'detail',
+      'reason',
+      'reportedResetAt',
+      'repositoryId',
+      'state',
+      'subject',
+      'taskId',
+    ]);
+    // The task-shaped fields are present and null rather than absent, so one
+    // payload shape serves both subjects and a transport never has to branch.
+    expect(wire.taskId).toBeNull();
+    expect(wire.state).toBeNull();
+    expect(wire.detail).toBeNull();
+    expect(wire.reportedResetAt).toBeNull();
+    expect(wire.subject).toBe('REPOSITORY');
+    expect(wire.condition).toBe('RECOVERY_UNSAFE');
   });
 });

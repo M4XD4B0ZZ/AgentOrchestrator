@@ -90,9 +90,16 @@ What *is* implemented:
 ## Status, and where to start
 
 **Released for attended, supervised use on real projects.** The closing audit
-found no `ATTENDED_RELEASE_BLOCKER`; unattended operation stays unsupported until
-U1–U4 are resolved. See
+found no `ATTENDED_RELEASE_BLOCKER`. See
 [The closing audit](#the-closing-audit-attended-release-gate).
+
+**The four unattended blockers `U1`–`U4` are closed (M4, 2026-09-02),** each
+either repaired or — for `U4` — measured to have been closed already by work
+nobody had pointed an instrument at. What remains is stated by name rather than
+implied, in
+[The unattended completion slice](#the-unattended-completion-slice-m4). Read that
+section before running this unattended: the residuals are small, they are
+specific, and none of them is "we did not look".
 
 **Autonomous delivery (M1) is closed, `M1_PASS` for attended use, 2026-08-29.**
 The whole chain — writer, review rounds, remediation, a quota interruption and
@@ -3897,6 +3904,11 @@ and because the failure mode it describes — a command that cannot start is
   a product-contract decision about whether a selector may recover, not a bug
   fix, which is why it is recorded rather than done.
 
+  **Closed by M4.** The decision was taken: a selector may remove a lease it has
+  proven dead, and may still not become the subject of any decision that departs
+  from a durable record. `recoverStaleLease: true`, no new option, and the
+  refusal that remains is announced rather than silent. See `U1`.
+
 - **L-M3-F-2 — one repository's resolution failure ends the whole recurring
   invocation.** `registry/repository-registry.ts` returns on the first entry that
   fails to resolve and publishes nothing, so a refusal is total by design: a
@@ -3923,6 +3935,15 @@ and because the failure mode it describes — a command that cannot start is
   until the run terminates. This is the precise reason the durable outbox
   mitigates **U2** and does not touch **U3**, and the M3 final dogfood measured
   it: the repository-unresolvable injection raised nothing.
+
+  **Closed by M4, for the conditions a pass produces.** Every lifecycle outcome
+  and a driver that threw now reach the outbox as a repository-subject item, so
+  `STALE_LEASE_PRESENT`, `LEASE_ACQUISITION_REFUSED`, `RECOVERY_UNSAFE` and the
+  rest raise a durable record and are announced. Two of the five conditions this
+  entry names — `REPOSITORY_UNPLANNABLE` and `REPOSITORY_UNRESOLVABLE` — happen
+  **above** the coordinator, where no pass observation exists, and they are not
+  closed: they end the whole invocation with exit 2, which is loud in a different
+  way. See `U3`'s "what is left".
 
 - **L-M3-F-4 — the one quota record nothing can move is also the one nobody is
   told about.** `core/task-attention.ts` derives the item for
@@ -7922,6 +7943,14 @@ No ATTENDED_RELEASE_BLOCKER found.
 Unattended operation remains unsupported until U1–U4 are resolved.
 ```
 
+**That last line was true when the audit ran and is no longer.** `U1`–`U4` are
+closed by the M4 completion slice, and the audit's own text is kept exactly as it
+was — a record of what was found on 2026-08-16 is not something a later slice
+gets to edit. Each blocker below carries its own **Closed by M4** paragraph
+saying what changed, what was measured, and what is left; the summary of all four
+and the residuals is
+[The unattended completion slice](#the-unattended-completion-slice-m4).
+
 **The classification, recorded unchanged:**
 
 ```text
@@ -8008,6 +8037,29 @@ use** and are not to be read as follow-ups.
   and unattended operation stays unsupported: the pre-establishment window
   remains — naming it "the 76 ms window" would make a single observation into the
   bound the paragraph above says it is not — and U2–U4 are untouched.
+
+  **Closed by M4.** The sentence "a scheduler can now clear the ordinary crash
+  itself" was true of an *external* scheduler and false of this build's own,
+  which is what `L-M3-F-1` recorded: `run/repository-coordinator.ts` admitted
+  every repository with `recoverStaleLease: false`, so a recurring invocation
+  that met its own dead predecessor's lease refused that repository on every
+  cycle for as long as its budget lasted. It is now `true`, and the argument for
+  why that is not a widening of a selector's authority is that the three
+  permissions beside it each **depart from what a durable record says** — a
+  failed verification, a decision reserved for a human, a quota decision only a
+  human may spend — and stay `false`, while recovery departs from nothing: it
+  removes an object every instrument has just proven dead, and removes nothing at
+  all otherwise. There is still no `--recover-stale-lease` option on
+  `repositories`, deliberately, because self-recovery an operator has to remember
+  to switch on is not the property being bought.
+
+  **What is left, precisely.** The pre-establishment window is unchanged — an
+  owner killed between announcing a launch and the kernel confirming job
+  membership still leaves a lease this build will not remove. What changed is
+  what happens next: that refusal is no longer silent. It reaches the operator
+  outbox as a repository item naming `RECOVERY_UNSAFE` and the exact command that
+  reads it, which is the difference between a repository that is stuck and a
+  repository that is stuck *and unmentioned*.
 - **U2 (F-D2) — a failed notification is indistinguishable from a silent run.**
   One bounded attempt, ten seconds, no retry and no second channel. A dropped
   push prints `NOT DELIVERED (<code>)` to a console nobody is reading, and since
@@ -8016,6 +8068,30 @@ use** and are not to be read as follow-ups.
   returns to it — they started the run and are answerable for it.
   **Unattended:** the notifier would be the only signal, and a best-effort
   channel with no acknowledgement cannot be one.
+
+  **Closed by M4, and not by making the channel reliable.** The last sentence is
+  still true and is now beside the point, because the notifier is no longer the
+  only signal. A successful send writes a **delivery receipt** — a second
+  exclusive create beside the record, an empty file whose name carries the whole
+  fact — and what a pass announces is every open item *with no receipt* rather
+  than every item it just created. So a dropped push stops being permanent: it is
+  retried on the next cycle and the one after, for as long as the condition
+  stands, and an item that arrived is never sent twice.
+
+  The half that actually answers the audit's sentence is
+  `agent-loop attention`. It prints the open items and which of them nobody has
+  been told about, reads only, and works on a machine with no notification
+  configuration at all. Before it there was no observable difference on this
+  machine between "quiet because nothing is wrong" and "quiet because the
+  endpoint has been refusing since Tuesday" — a recurring invocation prints
+  nothing until it ends (`L-M3-02-10`). Now the unacknowledged set is a fact on
+  disk that anything can read.
+
+  **What is left, precisely.** A receipt says an *endpoint accepted the message*.
+  It is not, and this build never claims it is, evidence that a person read it.
+  An operator who configures no endpoint and never runs `agent-loop attention` is
+  still not told anything — the machine writes it down, and reading it is an act
+  somebody has to perform or schedule.
 - **U3 (F-D1, F-D4) — an exception, and every refusal above the runner, notify
   nobody.** A throw leaves `outcome` null, so there is no result to observe and
   nothing is sent; a lease refusal, an unusable input or an unresolvable block
@@ -8026,6 +8102,37 @@ use** and are not to be read as follow-ups.
   the first seconds while the operator is still standing there. **Unattended:**
   together with U2 this means the absence of a message proves nothing, which is
   the property unsupervised running would have to rest on.
+
+  **Closed by M4.** `core/run-attention.ts` judges a run's *own ending*, total
+  over every `LifecycleOutcome` plus `RUN_THREW`, and the outbox raises a
+  **repository-subject** record for each one that needs a person. The rule is one
+  rule rather than 31 opinions: a condition raises an item here **iff it leaves
+  no durable task state the task scan will judge for itself**. Both halves are
+  measured, so nothing that already reaches an operator through the task scan
+  arrives twice.
+
+  `RUN_THREW` is the throw given a name. `run/repository-coordinator.ts` already
+  turned a rejected driver into `threw: true` with a null lifecycle — correctly,
+  because a rejection escaping that loop would abandon its siblings unawaited —
+  and that null was the end of it. No exception *text* reaches a record; the
+  condition is a closed vocabulary member, and the item says plainly that the
+  console of an attended re-run is the only place the detail exists.
+
+  The case that settles whether this is real: an orchestrator killed while its
+  writer had files open leaves a dirty worktree, which produces
+  `RECONCILIATION_DIVERGED` — **not a task state at all**. The task stays
+  `IMPLEMENTING`, which the state table calls silent, correctly, because a
+  running task needs nobody. So the most ordinary crash there is used to stop all
+  work in a repository and raise nothing in any channel. Measured, and now it
+  raises an item.
+
+  **What is left, precisely.** Refusals *above the coordinator* raise no item,
+  because no pass observation exists for them: a registry that will not resolve
+  ends the whole invocation (`L-M3-F-2`), and `REGISTRY_UNUSABLE_AFTER_WAIT`
+  exits 2. That is a different shape from the blocker — the process **ends, with
+  a non-zero exit code**, which any supervisor observes — and it is recorded here
+  rather than closed, because closing it would need a record subject that is
+  neither a task nor a repository.
 - **U4 (F-B5, D-REM-001-7) — nothing continues an interrupted run, and no task id
   is ever freed.** The run id is spent (`startBlockRun` refuses it), the
   interrupted task may be left `ACTIVE` in the ledger, and `release` refuses any
@@ -8035,6 +8142,36 @@ use** and are not to be read as follow-ups.
   happened and which task was in flight; a human resumes the task itself or
   starts a new run id. **Unattended:** there is no retry an automation could
   perform.
+
+  **Closed by M4 — and closed by a measurement, not by a change.** Every sentence
+  above is about `block` runs: a spent run id, a ledger entry, a `release` that
+  refuses a task with durable state. **The recurring loop drives no blocks.** It
+  admits one task per repository through `driveLifecycle`, and what that path
+  does with an interruption had never been measured.
+
+  It continues it. A repository whose task was left in `IMPLEMENTING` with a real
+  worktree, a real branch and a real commit is admitted on the next cycle, the
+  lease is taken, the writing agent runs *in that task's own worktree*, and the
+  record moves — with no attendance flag and no operator input. The interrupted
+  attempt's commit is still an ancestor of `HEAD` afterwards, which is the
+  difference between continuing the work and starting over. The two refusals this
+  case would produce if a durable state were treated as an obstacle
+  (`TASK_NOT_STARTED`, `TASK_START_REFUSED`) and the one it would produce if the
+  grant did not reach a reconciled in-flight task
+  (`CONTINUATION_NOT_AUTHORISED`) are all asserted by name.
+
+  The closure is therefore a statement about behaviour that already existed, and
+  recording it that way round is the point: V3-08 built it, the closing audit did
+  not distinguish the block path from the lifecycle path, and an argument that it
+  works would have been worth nothing.
+
+  **What is left, precisely.** The block half stands exactly as written — a spent
+  run id is still spent, a ledger entry left `ACTIVE` is still there, and
+  `release` still refuses a task with a durable state (`A2`). None of it is an
+  unattended blocker, because `block` is an attended command and the unattended
+  surface does not use it. The second half of the original sentence — "no task id
+  is ever freed" — is unchanged and remains an operations limit: a completed task
+  leaves a worktree, a branch and a spent id, and cleaning them up is by hand.
 
 ### Found by the closing audit, carried rather than closed (A1–A6)
 
@@ -8152,6 +8289,120 @@ that would make A3 structural. A3 is a very small hardening fix — an equality
 check is cheap and makes the chain authority structural — and it belongs *after*
 the first regular use, not before it. Taking either one now would move the
 finish line again after a passed dogfood and a passed closing audit.
+
+## The unattended completion slice (M4)
+
+The closing audit recorded four `UNATTENDED_BLOCKER` items and said the thing
+they have in common: **the run's ending, and the machine's state after it, depend
+on a human being there.** This slice closes all four. It adds no feature, no
+milestone and no new surface beyond one read-only command; every change is
+against one of the four named conditions, and each closure says what is left.
+
+Measured in `tests/m4-01-unattended-completion.test.ts`, organised by blocker.
+
+### What changed, in one paragraph each
+
+- **`U1` — the lease a dead predecessor left.** The recurring selector admits
+  with `recoverStaleLease: true`. A lease this build can prove dead is cleared on
+  the next cycle with no operator input; a lease it cannot prove dead is left
+  exactly where it is and the repository is skipped, as before. The refusal is
+  now announced.
+- **`U2` — a dropped message was permanent.** A delivered item carries a durable
+  **receipt**, and a pass announces every open item without one. A failed send is
+  retried; a delivered one is never repeated. `agent-loop attention` prints the
+  open set and the unacknowledged subset, read-only, on a machine with no
+  notification configuration at all.
+- **`U3` — endings that told nobody.** `core/run-attention.ts` judges a run's own
+  ending — every `LifecycleOutcome`, plus `RUN_THREW` for a driver that rejected
+  — and the outbox raises a repository-subject record for each one that needs a
+  person. The rule: an item is raised **iff the condition leaves no durable task
+  state the task scan will judge for itself**, so nothing is announced twice.
+- **`U4` — nothing continued an interrupted run.** Measured false for the
+  unattended surface. The recurring loop drives no blocks; it admits one task per
+  repository, and an interrupted task is reconciled and driven on the next cycle
+  with the interrupted attempt's work intact. The block half of the original
+  sentence stands and is not an unattended blocker.
+
+### What is left, by name
+
+Stated here rather than left to be discovered, because a completion claim whose
+residuals are implicit is worth less than one that names them.
+
+1. **A lease the build cannot prove dead still needs a person.** The
+   pre-establishment window `U1` describes is unchanged. What changed is that the
+   repository now says so in the outbox instead of being silently skipped for as
+   long as the invocation lasts.
+2. **A receipt is not a human acknowledgement.** It records that an endpoint
+   accepted the message. An operator who configures no endpoint and never reads
+   `agent-loop attention` is still not told anything; the machine writes it down
+   and reading it is an act somebody has to perform or schedule.
+3. **Refusals above the coordinator raise no item.** A registry that will not
+   resolve ends the whole invocation (`L-M3-F-2`), and
+   `REGISTRY_UNUSABLE_AFTER_WAIT` exits 2. This is a different shape from the
+   blocker — the process *ends*, with a non-zero exit code, which any supervisor
+   observes — and closing it would need a record subject that is neither a task
+   nor a repository.
+4. **Finished work still has no product-side cleanup.** `A2` is unchanged: a
+   completed task leaves a worktree, a branch and a spent id. Operations, not
+   correctness.
+5. **No third dogfood has been run against this slice.** Everything above is
+   measured by the suite and by one build of the shipped artefact. Whether it
+   holds across days of real unattended operation on real projects is a thing
+   only a real unattended run can say, and none has been performed.
+
+Residual 5 is the one that decides how this section should be read. `U1`–`U4`
+were the four named obstacles, and they are closed; that is a different claim
+from "this has been run unattended for a week and behaved", and the two must not
+be allowed to sound alike.
+
+### The three decisions worth recording
+
+**A selector may remove a dead object, and may still not depart from a record.**
+The permission that moved is not the same kind of thing as the three beside it.
+`--remediate-verify-failure`, `--continue-human-decision` and
+`--continue-usage-limit` each overrule something durable — a verification the
+record calls failed, a decision reserved for a human, a quota decision only a
+human may spend — and they remain refused on every admission. Stale-lease
+recovery overrules nothing: `SAFE_TO_RECOVER` is the only verdict that reaches
+the removal, and the processes the launch register names are re-probed *at* the
+removal. There is deliberately no option for it, because self-recovery an
+operator has to remember to switch on is not the property being bought.
+
+**Delivery is a second file, not a field.** The outbox's whole concurrency design
+is that a record is created once by `link` and never rewritten — which is why
+"already recorded" and "somebody else recorded it" are the same answer with no
+lock and no lost update. A mutable `delivered` field would have put a
+read-then-write back into the one document that argument depends on. Two
+exclusive creates keep both facts and keep the argument. The receipt is removed
+*after* its record, never before: an orphan receipt would make a recurrence of
+the same condition — which re-uses the same identity — be born already
+acknowledged and never sent.
+
+**A repository item carries no instant, and that is what makes it safe to run
+every cycle.** A task identity carries `stateEnteredAt` so a re-entry is a new
+notification. A repository condition has no such instant, and putting `observedAt`
+there would give the same unchanged condition a fresh name on every pass — a file
+and a push per repository per cycle, for days. So the identity is
+`(repository, condition, reason)`: one record while the condition stands, removed
+when it clears, and announced again only if it recurs.
+
+### Two things this slice found rather than built
+
+**`U4`'s unattended half was already closed, and nobody had measured it.** The
+audit's sentence — "there is no retry an automation could perform" — is about
+`block` runs, and the unattended surface does not use them. V3-08 had built the
+continuation; the audit did not distinguish the two paths. The closure here is an
+instrument, not a repair, and it is recorded that way round on purpose.
+
+**A mutation campaign found the one line that mattered was unmeasured.** Five
+mutants were run. Four died. The fifth — `settlement.undelivered` back to
+`settlement.raised` in `repositories-command.ts`, which *is* the whole of the
+`U2` defect — survived the entire suite, because every `U2` case exercised
+`settleAttention` and `pushAttentionItems` directly and nothing exercised the
+line that joins them in production. It is closed by driving the real command
+twice, as two separate invocations, because "a later pass tries again" is a claim
+about a new process reading the store and calling one function twice would not
+have been one.
 
 ## The Windows launch boundary (V3 slice 1)
 

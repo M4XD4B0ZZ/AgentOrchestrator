@@ -117,6 +117,50 @@ export function attentionIdOf(name: string): string | null {
 }
 
 /**
+ * The suffix of a **delivery receipt** — this item reached a configured endpoint
+ * and the endpoint acknowledged it (`U2`, M4).
+ *
+ * A separate file beside the record rather than a field inside it, and the
+ * reason is the record's own design. A record is created once by `link` and is
+ * never rewritten: that is what makes "already recorded" and "somebody else
+ * recorded it" the same answer with no lock and no lost update. A mutable
+ * `delivered` field would put a read-then-write back into the one document the
+ * whole store's concurrency argument rests on being immutable.
+ *
+ * Two files, each created exclusively, keeps both facts and keeps the argument:
+ * the condition is one atomic create, the acknowledgement is another, and
+ * neither can half-happen.
+ *
+ * A **fourth** grammar in this directory, so the listing can still tell apart a
+ * record, a receipt, this build's own staging leftover, and a file somebody else
+ * put there. The id is a fixed-length hex digest, so `<id>.delivered` is
+ * unambiguous — no id can contain the separator, which is the property a
+ * `<id>.<kind>` name needs and does not always have.
+ */
+const ATTENTION_DELIVERY_NAME = new RegExp(
+  `^[0-9a-f]{${String(ATTENTION_ID_LENGTH)}}\\.delivered$`,
+);
+
+/** `true` for a delivery receipt name this build would itself have written. */
+export function isAttentionDeliveryName(name: string): boolean {
+  return ATTENTION_DELIVERY_NAME.test(name);
+}
+
+/** The id inside a delivery receipt name this build wrote, or `null`. */
+export function deliveredAttentionIdOf(name: string): string | null {
+  if (!isAttentionDeliveryName(name)) return null;
+  return name.slice(0, ATTENTION_ID_LENGTH);
+}
+
+/** The full path of one item's delivery receipt. Joins; touches no filesystem. */
+export function attentionDeliveryPath(
+  attentionId: string,
+  provider: PathProvider = OS_PATH_PROVIDER,
+): string {
+  return join(operatorAttentionRoot(provider), `${attentionId}.delivered`);
+}
+
+/**
  * The store root. A pure function of the OS user identity, and it creates
  * nothing.
  *
@@ -204,6 +248,71 @@ export function attentionIdFor(identity: AttentionIdentity): string {
     identity.detail === null ? '\u0001none' : `\u0002${identity.detail}`,
     identity.stateEnteredAt,
   ];
+  return digestOf(fields);
+}
+
+/**
+ * The tag that opens a repository identity, and can open no task identity.
+ *
+ * It sits in the **first** slot, which is where a task identity carries its
+ * `repositoryRoot` — and a repository root is an absolute filesystem path, which
+ * this word is not and cannot be: it names no drive, no UNC share and no root,
+ * and every `repositoryRoot` reaching an identity has already been through
+ * `resolveRepository`, which canonicalises to an absolute path. So the two field
+ * lists are drawn from disjoint sets in their first position, and no task
+ * identity can digest to a repository one whatever its remaining fields hold.
+ *
+ * The alternative — adding a `subject` field to every identity — would read more
+ * plainly and would change **every task digest this build has ever written**,
+ * silently re-raising every open item in every operator's store once. Leaving
+ * the task field list untouched is why the tag is a leading field rather than a
+ * new one.
+ */
+const REPOSITORY_IDENTITY_TAG = 'repository';
+
+/**
+ * What one *repository-subject* notification is about (`U3`, `L-M3-F-3`).
+ *
+ * Three fields, and the absentee is as deliberate as the members:
+ *
+ *  - `repositoryRoot`, for the reason the task identity gives;
+ *  - `condition`, the exact lifecycle outcome, so a repository that moves from
+ *    one unrunnable condition to a different one raises a second item;
+ *  - `reason`, which is derived from the condition and is included anyway, so
+ *    that re-grouping a condition under a different action becomes a new item
+ *    rather than a silent change of advice under an existing name.
+ *
+ * There is **no instant**. A task identity carries `stateEnteredAt` so that a
+ * re-entry is a new notification; a repository condition has no such instant to
+ * carry, and putting `observedAt` there would give the same unchanged condition
+ * a fresh name on every cycle — which is exactly the notification spam this
+ * store exists to prevent, and at scheduler cadence it would be a file and a
+ * push per repository per cycle for days.
+ *
+ * The consequence is stated rather than hidden: while a condition holds it is
+ * one record and is announced once; when it clears the record is removed by the
+ * same settle that removes a resolved task item; and if it then recurs, the name
+ * is free again and it is announced again. That is the behaviour of an **open
+ * set**, which is what this store is and what makes it safe to reason about.
+ */
+export interface RepositoryAttentionIdentity {
+  readonly repositoryRoot: string;
+  readonly condition: string;
+  readonly reason: string;
+}
+
+/** The identity digest for one repository-subject notification. */
+export function repositoryAttentionIdFor(identity: RepositoryAttentionIdentity): string {
+  return digestOf([
+    REPOSITORY_IDENTITY_TAG,
+    identity.repositoryRoot,
+    identity.condition,
+    identity.reason,
+  ]);
+}
+
+/** The one hash both identities go through. Two callers, one construction. */
+function digestOf(fields: readonly string[]): string {
   return createHash('sha256')
     .update(fields.join(FIELD_SEPARATOR), 'utf8')
     .digest('hex')
