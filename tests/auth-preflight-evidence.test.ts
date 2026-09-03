@@ -168,6 +168,8 @@ describe('route 4: getting the real mint to produce evidence for a failure', () 
       errnoCode: null,
       stdoutTruncated: false,
       stderrTruncated: false,
+      stdoutBytesObserved: 0,
+      stderrBytesObserved: 0,
       stdinDelivery: 'NOT_REQUESTED',
       processTreeKilled: false,
     });

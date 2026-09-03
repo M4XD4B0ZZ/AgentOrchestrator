@@ -199,6 +199,8 @@ function commandResult(over: Partial<CommandResult> = {}): CommandResult {
     stderr: '',
     stdoutTruncated: false,
     stderrTruncated: false,
+    stdoutBytesObserved: 0,
+    stderrBytesObserved: 0,
     durationMs: 1,
     timedOut: false,
     treeKilled: false,

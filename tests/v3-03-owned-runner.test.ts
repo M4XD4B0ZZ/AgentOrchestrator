@@ -141,6 +141,10 @@ function ownedResult(over: Partial<OwnedCommandResult> = {}): OwnedCommandResult
     // opaque and only the boundary's own mint produces one. That is the point —
     // a fabricated `OwnedCommandResult` must not be able to reach the lease.
     containment: null,
+    // Zero, because this factory describes a run whose streams carried nothing.
+    // A case that cares about volume states its own numbers (M6).
+    stdoutBytesObserved: 0,
+    stderrBytesObserved: 0,
     display: 'x',
     file: 'x',
     args: [],

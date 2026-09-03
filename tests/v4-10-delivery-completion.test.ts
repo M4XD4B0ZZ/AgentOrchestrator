@@ -3727,6 +3727,7 @@ describe('a stuck lease outranks whatever the conclusion came to', () => {
                 stdout: '',
                 stderr: '',
                 outputTruncated: false,
+                outputBytesObserved: 0,
                 failureCode: null,
                 errnoCode: null,
                 durationMs: 1,

@@ -335,6 +335,8 @@ function commandResult(over: Record<string, unknown> = {}) {
     stderr: '',
     stdoutTruncated: false,
     stderrTruncated: false,
+    stdoutBytesObserved: 0,
+    stderrBytesObserved: 0,
     durationMs: 1,
     timedOut: false,
     ...over,

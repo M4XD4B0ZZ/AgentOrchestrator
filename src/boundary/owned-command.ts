@@ -788,11 +788,17 @@ class BoundedSink {
   private readonly chunks: Buffer[] = [];
   private size = 0;
   private cutOff = false;
+  private seen = 0;
 
   constructor(private readonly limit: number) {}
 
   /** Appends a chunk; returns `true` the first time the limit is exceeded. */
   append(chunk: Buffer): boolean {
+    // Counted first, and for **every** chunk including the discarded ones. See
+    // the twin in `doctor/exec.ts` for why this sits above the `cutOff` guard
+    // and why it is `Buffer.byteLength` rather than `.length` (M6).
+    this.seen += Buffer.byteLength(chunk);
+
     if (this.cutOff) return false;
 
     const remaining = this.limit - this.size;
@@ -812,6 +818,11 @@ class BoundedSink {
 
   get truncated(): boolean {
     return this.cutOff;
+  }
+
+  /** Total bytes seen on this stream, retained **and** discarded (M6). */
+  get observed(): number {
+    return this.seen;
   }
 
   text(): string {
@@ -865,6 +876,41 @@ export interface OwnedCommandOptions {
   readonly timeoutMs?: number;
   readonly maxStdoutBytes?: number;
   readonly maxStderrBytes?: number;
+  /**
+   * Whether exceeding a stream's byte budget also **terminates** the target.
+   * Defaults to `true`, which is what this module has always done (M6).
+   *
+   * ── Two policies that were one, and why they are now two ──────────────────
+   *
+   * The budget above is *bounded observation*: it caps how much of a stream
+   * this process holds in memory, and {@link BoundedSink} enforces it by
+   * discarding everything past the cap while the handler keeps draining. That
+   * is a property of AO's memory use and it is never switched off.
+   *
+   * Terminating the target when the cap is reached is a *different* policy. It
+   * exists so a runaway program cannot keep this process reading forever, and
+   * for an ordinary command it is the right answer.
+   *
+   * For a **verification** command it is the wrong answer, and this was
+   * measured rather than argued: Zera's canonical gate exits 0 and emits
+   * 62.8 MiB on stderr, so under the coupled policy AO killed a *passing* gate
+   * and reported `OUTPUT_LIMIT_STDERR` — an ending rather than a verdict. Every
+   * retry produced the same ending, so no task in that repository could ever
+   * reach `READY_FOR_PR`, and the closer a task came to succeeding the less
+   * classifiable it became.
+   *
+   * With this `false`, the sink still stops retaining at the cap and still
+   * reports {@link OwnedCommandResult.stdoutTruncated} — what changes is only
+   * that the target is allowed to reach its own exit code, which is the thing
+   * a verdict is made of. Nothing else moves: the timeout still bounds the
+   * call, the job object still owns the tree, and a failing gate still exits
+   * non-zero and is still a failure. Truncation cannot turn a failure into a
+   * success, because truncation does not touch the exit code.
+   *
+   * Deliberately a boolean and not an "output policy" object: there is exactly
+   * one distinction to express and a vocabulary would invite a second.
+   */
+  readonly terminateOnOutputLimit?: boolean;
   /**
    * How long the boundary is given to end after it has been asked to.
    *
@@ -953,6 +999,19 @@ export interface OwnedCommandResult extends OwnedCommandClassification {
   readonly stderr: string;
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
+  /**
+   * Total bytes the target wrote to each stream, retained **and** discarded.
+   *
+   * Not bounded by the byte budget: {@link stdoutTruncated} says the excerpt is
+   * a prefix, and this says how big the thing it is a prefix of actually was.
+   * A caller that no longer terminates on the limit needs both to describe what
+   * happened, and "62.8 MiB observed, 8 MiB retained" is a sentence an operator
+   * can act on where "truncated: true" alone is not (M6).
+   *
+   * Zero on every path where nothing ran.
+   */
+  readonly stdoutBytesObserved: number;
+  readonly stderrBytesObserved: number;
   readonly stdinDelivery: StdinDelivery;
   readonly helperPid: number | null;
   readonly childPid: number | null;
@@ -1108,6 +1167,8 @@ export async function runOwnedCommand(
       stderr: '',
       stdoutTruncated: false,
       stderrTruncated: false,
+      stdoutBytesObserved: 0,
+      stderrBytesObserved: 0,
       // Nothing was launched, so nothing received a payload — and the request
       // that named one is exactly the request being refused.
       stdinDelivery: (options?.stdin === undefined ? 'NOT_REQUESTED' : 'FAILED') as StdinDelivery,
@@ -1257,6 +1318,8 @@ export async function runOwnedCommand(
       stderr: '',
       stdoutTruncated: false,
       stderrTruncated: false,
+      stdoutBytesObserved: 0,
+      stderrBytesObserved: 0,
       // Through the classifier rather than by hand, which is the pattern an
       // earlier round removed from the streams-unavailable branch and left
       // here: hand-rolled, this line could be mutated to `NOT_REQUESTED` — "no
@@ -1322,7 +1385,15 @@ export async function runOwnedCommand(
   const stderr = new BoundedSink(usable(options.maxStderrBytes, DEFAULT_OWNED_MAX_OUTPUT_BYTES));
   let requestTermination: ((reason: Exclude<OwnedTermination, 'NONE'>) => void) | undefined;
   let pendingLimit: 'LIMIT_STDOUT' | 'LIMIT_STDERR' | undefined;
+  // `!== false`, so an absent option and an explicit `true` behave identically
+  // and every existing call site is untouched. Only a caller that says `false`
+  // out loud gets the decoupled behaviour (M6).
+  const terminateOnLimit = options.terminateOnOutputLimit !== false;
   const limitReached = (reason: 'LIMIT_STDOUT' | 'LIMIT_STDERR'): void => {
+    // The whole of the decoupling. The sink has already stopped retaining and
+    // is already discarding; returning here simply lets the target finish and
+    // report its own exit code. See `terminateOnOutputLimit`.
+    if (!terminateOnLimit) return;
     if (requestTermination !== undefined) requestTermination(reason);
     else if (pendingLimit === undefined) pendingLimit = reason;
   };
@@ -1403,6 +1474,8 @@ export async function runOwnedCommand(
         stderr: '',
         stdoutTruncated: false,
         stderrTruncated: false,
+        stdoutBytesObserved: 0,
+        stderrBytesObserved: 0,
         // Nothing was ever written into a helper that never established.
         stdinDelivery: classifyStdinDelivery({
           requested: stdinRequested,
@@ -1546,6 +1619,8 @@ export async function runOwnedCommand(
         stderr: '',
         stdoutTruncated: false,
         stderrTruncated: false,
+        stdoutBytesObserved: 0,
+        stderrBytesObserved: 0,
         // Decided by the classifier rather than by hand, and the answer is
         // the stronger word: this branch returns before the stdin writer below
         // exists, so it *knows* not one byte was handed over.
@@ -1668,6 +1743,8 @@ export async function runOwnedCommand(
         stderr: stderr.text(),
         stdoutTruncated: stdout.truncated,
         stderrTruncated: stderr.truncated,
+        stdoutBytesObserved: stdout.observed,
+        stderrBytesObserved: stderr.observed,
         stdinDelivery: classifyStdinDelivery({
           requested: stdinRequested,
           established: true,
@@ -1711,6 +1788,8 @@ export async function runOwnedCommand(
         stderr: stderr.text(),
         stdoutTruncated: stdout.truncated,
         stderrTruncated: stderr.truncated,
+        stdoutBytesObserved: stdout.observed,
+        stderrBytesObserved: stderr.observed,
         stdinDelivery: classifyStdinDelivery({
           requested: stdinRequested,
           established: true,
@@ -1812,6 +1891,8 @@ export async function runOwnedCommand(
       stderr: stderr.text(),
       stdoutTruncated: stdout.truncated,
       stderrTruncated: stderr.truncated,
+      stdoutBytesObserved: stdout.observed,
+      stderrBytesObserved: stderr.observed,
       stdinDelivery: classifyStdinDelivery({
         requested: stdinRequested,
         established: true,

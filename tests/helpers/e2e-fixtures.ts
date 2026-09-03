@@ -325,6 +325,7 @@ export function recordedVerify(
       stdout: '',
       stderr: '',
       outputTruncated: false,
+      outputBytesObserved: 0,
       failureCode: null,
       errnoCode: null,
       durationMs: 1,

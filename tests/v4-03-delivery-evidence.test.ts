@@ -232,6 +232,8 @@ function commandResult(over: Partial<CommandResult>): CommandResult {
     errnoCode: null,
     stdoutTruncated: false,
     stderrTruncated: false,
+    stdoutBytesObserved: 0,
+    stderrBytesObserved: 0,
     stdinDelivery: 'NOT_REQUESTED',
     processTreeKilled: false,
     ...over,

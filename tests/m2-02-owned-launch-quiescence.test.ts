@@ -770,6 +770,8 @@ describe('the execution seam accounts for every launch it starts', () => {
       errnoCode: null,
       stdoutTruncated: false,
       stderrTruncated: false,
+      stdoutBytesObserved: 0,
+      stderrBytesObserved: 0,
       stdinDelivery: 'NOT_REQUESTED',
       processTreeKilled: false,
     } as unknown as CommandResult;
@@ -889,6 +891,8 @@ describe('the execution seam accounts for every launch it starts', () => {
             stderr: '',
             stdoutTruncated: false,
             stderrTruncated: false,
+            stdoutBytesObserved: 0,
+            stderrBytesObserved: 0,
             failureCode: 'BOUNDARY_LOST' as const,
             targetStarted: 'UNKNOWN' as const,
             termination: 'NONE' as const,

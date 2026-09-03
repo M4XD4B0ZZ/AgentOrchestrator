@@ -272,6 +272,7 @@ function agentResult(attestation: ContainmentAttestation | null): AgentCommandRe
     stdout: '',
     stderr: '',
     outputTruncated: false,
+    outputBytesObserved: 0,
     failureCode: null,
     errnoCode: null,
     durationMs: 1,

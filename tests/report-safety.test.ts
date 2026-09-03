@@ -134,6 +134,8 @@ vi.mock('../src/doctor/exec.js', async (importOriginal) => {
         errnoCode: null,
         stdoutTruncated: false,
         stderrTruncated: false,
+        stdoutBytesObserved: 0,
+        stderrBytesObserved: 0,
         stdinDelivery: 'NOT_REQUESTED',
         processTreeKilled: false,
       };

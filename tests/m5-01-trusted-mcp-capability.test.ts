@@ -542,6 +542,7 @@ describe('the granted writer vector', () => {
             stdout: '',
             stderr: '',
             outputTruncated: false,
+            outputBytesObserved: 0,
             failureCode: null,
             errnoCode: null,
             durationMs: 1,
