@@ -40,18 +40,18 @@
  * replay is a separate, real-repository act recorded outside the suite.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { runCommand, type CommandResult } from '../src/doctor/exec.js';
+import { isShellInertArgument, runCommand, type CommandResult } from '../src/doctor/exec.js';
 import {
   runVerificationCommand,
   toVerificationCommandResult,
   VERIFICATION_COMMAND_MAX_OUTPUT_BYTES,
 } from '../src/verify/verify-command.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 
 /* ═══════════════════════ the noisy children ═════════════════════════════ */
 
@@ -79,12 +79,27 @@ const NOISY_SOURCE = [
 
 const temporaryDirectories: string[] = [];
 
-/** Writes one child script and returns its path. Cleaned up in `afterAll`. */
+/**
+ * Writes one child script and returns its path. Cleaned up in `afterAll`.
+ *
+ * `makeCanonicalTempDir` and not `mkdtempSync(tmpdir())`, and this file learned
+ * that from CI rather than from reading: a GitHub Actions Windows runner reports
+ * `C:\Users\RUNNER~1\AppData\Local\Temp`, an 8.3 alias, and `SAFE_ARG_PATTERN`
+ * deliberately excludes `~`. The first version of this file used the raw call,
+ * passed on a developer machine whose temp path has no alias, and failed nine of
+ * its own cases on both CI runners with
+ * `Refusing to spawn a diagnostic process with argument "...RUNNER~1..."`.
+ *
+ * The helper exists for exactly this and says so in its own header. The
+ * assertion below keeps the lesson local, so a future edit that reaches for
+ * `mkdtempSync` again fails here rather than on a runner.
+ */
 function scriptFile(name: string, source: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'ao-m6-'));
+  const dir = makeCanonicalTempDir('ao-m6-');
   temporaryDirectories.push(dir);
   const file = join(dir, name);
   writeFileSync(file, source, 'utf8');
+  expect(isShellInertArgument(file)).toBe(true);
   return file;
 }
 
