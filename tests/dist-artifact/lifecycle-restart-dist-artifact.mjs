@@ -482,6 +482,15 @@ async function drive(repository, options) {
       now: () => new Date().toISOString(),
       git: runGitCommand,
       authPreflight: async () => null,
+      // The fixture repository declares `codegraph: OPTIONAL`, so `NOT_REQUIRED`
+      // is the truthful answer rather than a convenient one — nothing is asked
+      // for and nothing is granted. It is needed at all because M5's gate sits
+      // *before* `startTask`, which is the placement that stops a refused
+      // capability from leaving a worktree behind; this harness is about the
+      // lease phase and passes straight through it.
+      //
+      // This file is JavaScript, so no compiler was going to say so. CI did.
+      mcpPreflight: async () => ({ state: 'NOT_REQUIRED' }),
     },
   );
 }
