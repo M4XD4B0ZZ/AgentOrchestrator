@@ -257,6 +257,7 @@ function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDepe
     authorisedWorktreePath: join(root, 'worktree'),
     verification: VERIFICATION,
     lease: leaseAuthorityAt(root),
+    writerMcp: null,
     observe: settledObserver,
     git: healthyGit(),
     brief: {

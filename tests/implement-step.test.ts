@@ -111,6 +111,7 @@ function stepDeps(
     verification: repository.verification,
     brief: readExecutionBrief(repository, current.state.taskId, current.state.worktreePath),
     lease: leaseAuthorityFor(repository),
+    writerMcp: null,
     ...overrides,
   };
 }
@@ -489,7 +490,7 @@ describe('a task created by production code now runs', () => {
     // budget stops it at VERIFYING so this case stays about V2-04's link
     // rather than re-testing the verify/review loop.
     const run = await runTask(
-      {
+      { writerMcp: null,
         repository,
         taskId: 'V2-04',
         continuationGrant: 'ATTENDED' as const,

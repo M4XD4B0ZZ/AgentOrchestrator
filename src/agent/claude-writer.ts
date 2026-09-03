@@ -193,7 +193,12 @@ import {
  * The channel becomes explicit and AO-controlled instead of ambient. Paths
  * only, never contents.
  */
-export const CLAUDE_WRITER_ARGS: readonly string[] = Object.freeze([
+/**
+ * Everything before the tool list. Split out so the granted vector can be
+ * composed without re-spelling it, and so {@link CLAUDE_WRITER_ARGS} keeps
+ * being the literal thing the pins assert.
+ */
+const WRITER_HEAD: readonly string[] = Object.freeze([
   '--print',
   '--output-format',
   'stream-json',
@@ -203,6 +208,15 @@ export const CLAUDE_WRITER_ARGS: readonly string[] = Object.freeze([
   '--strict-mcp-config',
   '--permission-mode',
   'acceptEdits',
+]);
+
+/**
+ * The built-in tool list, and it stays last.
+ *
+ * `--tools` is variadic, so it must come last or be followed by a `-`-prefixed
+ * token. Everything a capability grant adds is spliced in *before* it.
+ */
+const WRITER_TOOLS: readonly string[] = Object.freeze([
   '--tools',
   'Read',
   'Edit',
@@ -210,6 +224,75 @@ export const CLAUDE_WRITER_ARGS: readonly string[] = Object.freeze([
   'Glob',
   'Grep',
 ]);
+
+/**
+ * The vector when **no** capability is granted — the whole of what this build
+ * shipped before M5, unchanged token for token.
+ */
+export const CLAUDE_WRITER_ARGS: readonly string[] = Object.freeze([
+  ...WRITER_HEAD,
+  ...WRITER_TOOLS,
+]);
+
+/**
+ * What a resolved capability grant contributes to the writer's argv.
+ *
+ * Both members are AO-owned by construction: `mcpConfigPath` is a file this
+ * process wrote from the operator's registry, and `allowedTools` are names that
+ * registry already forced through {@link MCP_TOOL_NAME_PATTERN}. Neither can
+ * originate in a repository — see `config/mcp-capability-registry.ts` for why
+ * that is the whole safety argument.
+ */
+export interface WriterMcpGrant {
+  /** Absolute path to the JSON this process wrote. Never a repository path. */
+  readonly mcpConfigPath: string;
+  /** The exact tool names the writer may call. Never a pattern, never a built-in. */
+  readonly allowedTools: readonly string[];
+}
+
+/**
+ * The writer's argv, with or without a granted MCP capability.
+ *
+ * ── Why `--allowedTools` and not `--tools` ─────────────────────────────────
+ *
+ * Measured, in four arms, against CLI 2.1.259 and the shipped head above:
+ *
+ * ```text
+ * (shipped)                          mcp_servers []            call NO_TOOL
+ * + --mcp-config                     codegraph connected       call DENIED
+ * + --mcp-config, tool in --tools    codegraph connected       call DENIED
+ * + --mcp-config, --allowedTools     codegraph connected       call OK
+ * ```
+ *
+ * The third arm is the trap this comment exists for: naming the MCP tool in
+ * `--tools` puts it in the session's `init.tools` list and the call is still
+ * refused. A reader of the help text ("Specify the list of available tools")
+ * or of the `init` message would have shipped that arm as working. Exposure is
+ * not permission; `--allowedTools` is the permission.
+ *
+ * The fourth arm also wrote a real file, which is the control that matters for
+ * the other direction: introducing an allow-list does **not** displace
+ * `--permission-mode acceptEdits` for the built-in tools, so the grant costs
+ * the writer none of its existing write authority.
+ *
+ * `--strict-mcp-config` stays in every arm. The operator of this machine has
+ * four other MCP servers registered, and `init.mcp_servers` named only
+ * `codegraph` in each arm that had a grant — so the grant adds exactly one
+ * server rather than opening the door.
+ *
+ * The argument order below is the measured one, not a tidied one.
+ */
+export function claudeWriterArgs(grant: WriterMcpGrant | null): readonly string[] {
+  if (grant === null) return CLAUDE_WRITER_ARGS;
+  return Object.freeze([
+    ...WRITER_HEAD,
+    '--mcp-config',
+    grant.mcpConfigPath,
+    '--allowedTools',
+    ...grant.allowedTools,
+    ...WRITER_TOOLS,
+  ]);
+}
 
 /** What a caller must supply to run the writer once. */
 export interface ClaudeWriterRequest {
@@ -230,6 +313,22 @@ export interface ClaudeWriterRequest {
   readonly round: number;
   /** The instructions, delivered on stdin. Never an argument. */
   readonly payload: string;
+  /**
+   * The MCP capability this invocation resolved, or `null` for none.
+   *
+   * Required and not optional, deliberately, for the reason
+   * {@link ClaudeWriterOptions.agent} gives about the runner: a new call site
+   * that simply forgets the field would otherwise get whichever authority the
+   * default happened to be. Here the compiler makes the caller state which of
+   * the two vectors it means.
+   *
+   * It is a resolved value carried in, never something read here — the same
+   * arrangement `loop-step.ts` uses for the verification policy, and for the
+   * same reason: what a writing agent is permitted to do is decided once, at
+   * the top of the invocation, from the operator's registry, and cannot be
+   * re-decided further down by anything a repository can influence.
+   */
+  readonly mcp: WriterMcpGrant | null;
 }
 
 export interface ClaudeWriterOptions {
@@ -331,7 +430,27 @@ export async function runClaudeWriter(
     });
   }
 
-  const result = await run('claude', CLAUDE_WRITER_ARGS, request.worktreePath, request.payload);
+  // The vector is assembled here and then checked as a whole, rather than
+  // trusted because its two halves were checked apart. `CLAUDE_WRITER_ARGS` is
+  // a frozen literal and needs no check; a grant contributes a path this
+  // process wrote and names the registry validated, and both still travel
+  // through this boundary as argv. Re-establishing the property at the spawn
+  // is the same rule the worktree path above is held to: a producer's promise
+  // is not evidence at the point of use.
+  const args = claudeWriterArgs(request.mcp);
+  if (!args.every(isShellInertArgument)) {
+    return failed(base, 'AGENT_ARGUMENT_REFUSED', {
+      outcome: 'REFUSED_UNSAFE_ARGUMENT',
+      exitCode: null,
+      signal: null,
+      outputTruncated: false,
+      failureCode: null,
+      errnoCode: null,
+      durationMs: 0,
+    });
+  }
+
+  const result = await run('claude', args, request.worktreePath, request.payload);
   const process = agentProcessEvidence(result);
   // The excerpt is a redacted *prefix*, and since V3-11 the first four thousand
   // characters of stdout are the `init` message rather than anything about how

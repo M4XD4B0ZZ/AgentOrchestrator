@@ -18,6 +18,7 @@
  * cannot see.
  */
 
+import { noMcpPreflight, noMcpPreflightFactory } from './helpers/mcp-capability.js';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -1556,6 +1557,7 @@ async function runBlock(
       now: tickingClock(),
       git: runGitCommand,
       authPreflight: authPreflightPasses,
+      mcpPreflight: noMcpPreflight,
       agent: seams.agent,
       verify: seams.verify,
       ...overrides,
@@ -1607,7 +1609,7 @@ describe('the attended block runner', () => {
         planning: planningOf(fixture),
         blockBaseCommit: headOf(fixture.root),
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: tickingClock(),
         git: runGitCommand,
         authPreflight: authPreflightPasses,
@@ -1676,7 +1678,7 @@ describe('the attended block runner', () => {
         planning: frozen,
         blockBaseCommit: headOf(fixture.root),
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: tickingClock(),
         git: runGitCommand,
         authPreflight: authPreflightPasses,
@@ -1728,7 +1730,7 @@ describe('the attended block runner', () => {
         planning: planningOf(fixture),
         blockBaseCommit: headOf(fixture.root),
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: tickingClock(),
         git: runGitCommand,
         authPreflight: authPreflightPasses,
@@ -1759,7 +1761,7 @@ describe('the invocation absorbs the driver budget rather than ending on it', ()
         planning: planningOf(fixture),
         blockBaseCommit: headOf(fixture.root),
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: tickingClock(),
         git: runGitCommand,
         authPreflight: authPreflightPasses,
@@ -1839,7 +1841,7 @@ describe('the invocation absorbs the driver budget rather than ending on it', ()
         planning: planningOf(fixture),
         blockBaseCommit: headOf(fixture.root),
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: tickingClock(),
         git: sampling,
         authPreflight: authPreflightPasses,
@@ -1898,7 +1900,7 @@ describe('a run that may have stopped being the writer writes nothing at all', (
         planning: planningOf(fixture),
         blockBaseCommit: headOf(fixture.root),
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: tickingClock(),
         git: runGitCommand,
         authPreflight: authPreflightPasses,
@@ -1982,7 +1984,7 @@ describe('the invocation acts on the plan as it was when it opened', () => {
         planning: snapshot,
         blockBaseCommit: headOf(fixture.root),
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: tickingClock(),
         git: runGitCommand,
         authPreflight: authPreflightPasses,
@@ -2086,6 +2088,7 @@ async function runWithHookAfterFirstTask(
       now: tickingClock(),
       git: runGitCommand,
       authPreflight: authPreflightPasses,
+      mcpPreflight: noMcpPreflight,
       agent: agent.runner,
       verify: recordedVerify().runner,
       ...overrides,
@@ -2291,7 +2294,7 @@ describe('each class-2 condition ends the run under its own name', () => {
         planning,
         blockBaseCommit: headOf(fixture.root),
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: tickingClock(),
         git: runGitCommand,
         authPreflight: authPreflightPasses,

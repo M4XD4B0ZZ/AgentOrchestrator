@@ -82,6 +82,7 @@ import {
   type TaskStateName,
 } from '../core/states.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
+import type { WriterMcpGrant } from '../agent/claude-writer.js';
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
 import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
@@ -514,6 +515,22 @@ export interface RunRequest {
    * and neither substitutes for the other.
    */
   readonly authEvidence: AuthPreflightEvidence | null;
+  /**
+   * The MCP capability this invocation proved, or `null` for none (M5).
+   *
+   * `null` is the honest value in two different situations, and this build does
+   * not need to tell them apart here because the *caller* already has: a
+   * repository that requires no capability, and a repository whose required
+   * capability could not be proven. The second one never reaches this field —
+   * `lifecycle-driver.ts` refuses the run before a task is started, because a
+   * repository that declared it needs a capability must not get a writing agent
+   * without it. So `null` arriving here always means "none was required".
+   *
+   * Required and not optional, like {@link leaseEvidence} and unlike an
+   * ordinary flag: a caller that omitted it would hand the writer whichever
+   * authority the default happened to be.
+   */
+  readonly writerMcp: WriterMcpGrant | null;
   /**
    * Proof that this invocation holds the repository's execution lease.
    *
@@ -1215,6 +1232,9 @@ export async function runTask(
       now: deps.now(),
       authorisedWorktreePath,
       verification: repository.verification,
+      // Handed down, never resolved here. See `LoopDependencies.writerMcp`:
+      // authority is decided once at the top of the invocation.
+      writerMcp: request.writerMcp,
       // Read fresh each iteration rather than once per run: a task file can be
       // corrected between steps, and a driver holding a stale answer would
       // park a task a human has already fixed. Reading it is not authoring it
@@ -1510,6 +1530,7 @@ export async function runNextTask(
       taskId: task.id,
       continuationGrant: request.continuationGrant,
       authEvidence: request.authEvidence,
+      writerMcp: request.writerMcp,
       lease: request.lease,
       maxSteps: request.maxSteps,
     },

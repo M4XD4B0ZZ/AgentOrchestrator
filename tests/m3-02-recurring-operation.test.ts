@@ -20,6 +20,7 @@
  * `tests/dist-artifact/recurring-operation-dist-artifact.mjs`.
  */
 
+import { noMcpPreflightPerCycle } from './helpers/mcp-capability.js';
 import { rmSync } from 'node:fs';
 
 import { Command } from 'commander';
@@ -132,7 +133,7 @@ function harness(options: {
     settleCancel = resolve;
   });
 
-  const deps: SchedulerDependencies = {
+  const deps: SchedulerDependencies = { mcpPreflight: noMcpPreflightPerCycle,
     now: () => new Date(clock).toISOString(),
     git: runGitCommand,
     authPreflight: () => async (): Promise<AuthPreflightEvidence | null> => provenAuthEvidence(),

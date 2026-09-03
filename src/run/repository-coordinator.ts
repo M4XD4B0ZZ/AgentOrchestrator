@@ -95,6 +95,7 @@ import {
   createOwnedLaunchDomain,
   runInOwnedLaunchDomain,
 } from '../boundary/owned-launch-accounting.js';
+import type { McpPreflightFactory } from '../agent/mcp-capability-preflight.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import { comparePathIdentity } from '../core/path-identity.js';
 import {
@@ -263,6 +264,17 @@ export interface CrossRepositoryRunDependencies {
    * the capacity.
    */
   readonly authPreflight: () => Promise<AuthPreflightEvidence | null>;
+  /**
+   * How each admitted repository obtains its MCP capability proof (M5).
+   *
+   * A factory and not a single memo, unlike {@link authPreflight} directly
+   * above, and the asymmetry is the point: auth is a statement about the
+   * machine, so one answer serves every repository, while a required capability
+   * is a statement about a repository and two enlisted ones can legitimately
+   * differ. The production factory still memoises per distinct requirement, so
+   * repositories that ask for the same thing share one probe.
+   */
+  readonly mcpPreflight: McpPreflightFactory;
   /** Execution seams, forwarded to every lifecycle. */
   readonly agent?: AgentRunner;
   readonly verify?: VerificationRunner;
@@ -676,6 +688,7 @@ function admit(
         now: deps.now,
         git: deps.git,
         authPreflight: deps.authPreflight,
+        mcpPreflight: deps.mcpPreflight(repository.capabilities),
         ...(deps.agent !== undefined ? { agent: deps.agent } : {}),
         ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
       },

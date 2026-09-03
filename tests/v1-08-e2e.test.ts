@@ -85,6 +85,9 @@ function request(started: StartedTask, overrides: Record<string, unknown> = {}) 
     taskId: started.taskId,
     continuationGrant: 'ATTENDED' as const,
     authEvidence: provenAuthEvidence(),
+    // These fixtures declare `codegraph: OPTIONAL`, so no capability is
+    // requested and the writer runs on the vector this build always shipped.
+    writerMcp: null,
     // Real, and re-proved by the driver on every iteration.
     lease: leaseFor(started.repository),
     maxSteps: 8,
@@ -1154,6 +1157,7 @@ describe('selection reads the repository\'s own task files', () => {
         repository: started.repository,
         continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
+        writerMcp: null,
         lease: leaseFor(started.repository),
         maxSteps: 8,
       },
@@ -1172,6 +1176,7 @@ describe('selection reads the repository\'s own task files', () => {
         repository: started.repository,
         continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
+        writerMcp: null,
         lease: leaseFor(started.repository),
         maxSteps: 8,
       },

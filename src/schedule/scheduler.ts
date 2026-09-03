@@ -134,6 +134,7 @@
  * dependency's own comment.
  */
 
+import type { McpPreflightFactory } from '../agent/mcp-capability-preflight.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import type { RegisteredRepository } from '../registry/repository-registry.js';
 import { MAX_CONCURRENT_REPOSITORIES } from '../registry/repository-registry.js';
@@ -466,6 +467,15 @@ export interface SchedulerDependencies {
    */
   readonly authPreflight: () => () => Promise<AuthPreflightEvidence | null>;
   /**
+   * A **fresh** capability-preflight factory per cycle (M5).
+   *
+   * Shaped like {@link authPreflight} — a factory of memos, not a memo — for
+   * the same reason and with the same consequence: a granted MCP server that
+   * stopped answering while this invocation slept is re-proven after the wake
+   * rather than carried across it on an artefact minted hours earlier.
+   */
+  readonly mcpPreflight: () => McpPreflightFactory;
+  /**
    * Reads and resolves the registry again, after a wait.
    *
    * A seam rather than a direct call so that this module performs no path
@@ -664,6 +674,8 @@ export async function driveScheduler(
         // not reused, and this is the line that makes "post-wake auth is fresh"
         // true rather than intended.
         authPreflight: deps.authPreflight(),
+        // A **new** factory for this cycle, for the reason directly above.
+        mcpPreflight: deps.mcpPreflight(),
         ...(deps.agent !== undefined ? { agent: deps.agent } : {}),
         ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
       },

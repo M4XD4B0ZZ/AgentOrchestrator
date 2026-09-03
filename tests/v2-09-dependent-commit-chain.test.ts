@@ -6,6 +6,7 @@
  * table and each carries the defect it proves that a cheaper test cannot.
  */
 
+import { noMcpPreflight } from './helpers/mcp-capability.js';
 import { existsSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
@@ -921,7 +922,7 @@ async function runChainedBlock(
       planning: planningOf(repository),
       blockBaseCommit: options.blockBaseCommit ?? headOf(repository.root),
     },
-    {
+    { mcpPreflight: noMcpPreflight,
       now: tickingClock(),
       git: options.git ?? runGitCommand,
       authPreflight: authPreflightPasses,
@@ -1218,7 +1219,7 @@ describe('a chained task keeps the scope it was started under, after its run is 
         planning: planningOf(repository),
         blockBaseCommit: blockBase,
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: tickingClock(),
         git: runGitCommand,
         authPreflight: authPreflightPasses,
@@ -1249,7 +1250,7 @@ describe('a chained task keeps the scope it was started under, after its run is 
     if (!continuationLease.ok) throw new Error(`no lease: ${continuationLease.code}`);
 
     const continued = await runTask(
-      {
+      { writerMcp: null,
         repository,
         taskId: 'B-001',
         continuationGrant: 'ATTENDED' as const,

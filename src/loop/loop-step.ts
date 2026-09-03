@@ -104,7 +104,11 @@
  * because a round that was interrupted was not completed.
  */
 
-import { runClaudeWriter, type ClaudeWriterFailed } from '../agent/claude-writer.js';
+import {
+  runClaudeWriter,
+  type ClaudeWriterFailed,
+  type WriterMcpGrant,
+} from '../agent/claude-writer.js';
 import {
   codexReviewResumePoint,
   runCodexReviewer,
@@ -308,6 +312,21 @@ export interface LoopDependencies extends AdvanceOptions {
   readonly authorisedWorktreePath: string;
   /** The repository's resolved verification policy. Never the raw profile. */
   readonly verification: ResolvedVerificationPolicy;
+  /**
+   * The MCP capability this invocation proved, or `null` for none (M5).
+   *
+   * Carried in as a value for the same reason {@link LoopDependencies.verification}
+   * is: what a writing agent is permitted to do is decided once, at the top of
+   * the invocation, from the operator's own registry and a live preflight — and
+   * it must not be re-decidable further down by anything a repository can
+   * influence. A step that read it here would be a second opinion about
+   * authority, sitting inside the module the authority is exercised in.
+   *
+   * Required and not optional: a caller that omitted it would silently hand the
+   * writer whichever authority the default happened to be, and the compiler is
+   * the right place to catch that.
+   */
+  readonly writerMcp: WriterMcpGrant | null;
   /**
    * The repository's own account of the task, read by `task-brief.ts`.
    *
@@ -1782,7 +1801,13 @@ export async function runRemediateStep(
   if (before.blocked !== null) return before.blocked;
 
   const writer = await runClaudeWriter(
-    { worktreePath: authorisedWorktreePath, phase: 'REMEDIATE', round, payload: brief.payload },
+    {
+      worktreePath: authorisedWorktreePath,
+      phase: 'REMEDIATE',
+      round,
+      payload: brief.payload,
+      mcp: deps.writerMcp,
+    },
     { agent: leasedAgent(deps) },
   );
 
@@ -2041,6 +2066,7 @@ export async function runImplementStep(
       phase: 'IMPLEMENT',
       round,
       payload: buildImplementPayload(brief.brief, round),
+      mcp: deps.writerMcp,
     },
     { agent: leasedAgent(deps) },
   );

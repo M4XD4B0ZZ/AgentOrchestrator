@@ -95,6 +95,7 @@
 
 import type { LeaseReleaseResult } from '../lease/execution-lease.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
+import type { McpPreflightFactory } from '../agent/mcp-capability-preflight.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import {
   driveLifecycle,
@@ -264,7 +265,7 @@ export interface UnattendedResumeRequest {
 }
 
 export interface UnattendedResumeDependencies
-  extends Omit<LifecycleDependencies, 'authPreflight'> {
+  extends Omit<LifecycleDependencies, 'authPreflight' | 'mcpPreflight'> {
   /**
    * A **factory** for the auth preflight, called once per lifecycle epoch.
    *
@@ -277,6 +278,14 @@ export interface UnattendedResumeDependencies
    * the post-wake epoch pays for a real preflight.
    */
   readonly authPreflight: () => () => Promise<AuthPreflightEvidence | null>;
+  /**
+   * A **factory** for the capability preflight, on exactly the terms above.
+   *
+   * The reasoning transfers without change: a granted MCP server that answered
+   * before a six-hour wait is not evidence that it answers after one, and the
+   * epoch boundary is where that memo is reset (M5).
+   */
+  readonly mcpPreflight: () => McpPreflightFactory;
   /**
    * Resolves the repository again, after the wait. `null` when it cannot be.
    *
@@ -542,7 +551,15 @@ export async function driveUnattendedAutomaticResume(
       maxSteps: request.maxSteps,
       maxInvocations: request.maxInvocations,
     },
-    { ...deps, authPreflight: deps.authPreflight() },
+    // Both factories are applied together: an epoch that re-proves auth and
+    // carries a stale capability answer across the same sleep would be half a
+    // freshness guarantee (M5). The capability factory is applied to *this*
+    // epoch's repository reading, never to the other one's.
+    {
+      ...deps,
+      authPreflight: deps.authPreflight(),
+      mcpPreflight: deps.mcpPreflight()(request.repository.capabilities),
+    },
   );
   epochs.push(first);
 
@@ -580,7 +597,16 @@ export async function driveUnattendedAutomaticResume(
     // A **new** once-only preflight. The first epoch's is not reused, and this
     // is the line that makes "post-wake auth is fresh" true rather than
     // intended.
-    { ...deps, authPreflight: deps.authPreflight() },
+    // Both factories are applied together: an epoch that re-proves auth and
+    // carries a stale capability answer across the same sleep would be half a
+    // freshness guarantee (M5). Applied to the repository resolved AFTER the
+    // wait, for the reason that resolution exists: the requirement itself is a
+    // reading taken at a moment, and the profile may have changed.
+    {
+      ...deps,
+      authPreflight: deps.authPreflight(),
+      mcpPreflight: deps.mcpPreflight()(repository.capabilities),
+    },
   );
   epochs.push(second);
 

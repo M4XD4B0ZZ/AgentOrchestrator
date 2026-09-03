@@ -596,6 +596,7 @@ describe('no productive writer path runs without the lease', () => {
         taskId: TASK_ID,
         continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
+        writerMcp: null,
         lease: forged,
         maxSteps: 4,
       },
@@ -703,6 +704,7 @@ describe('no productive writer path runs without the lease', () => {
         taskId: TASK_ID,
         continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
+        writerMcp: null,
         lease: foreign,
         maxSteps: 4,
       },
@@ -763,6 +765,7 @@ describe('a lease acquired minutes ago is not a lease held now', () => {
         taskId: TASK_ID,
         continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
+        writerMcp: null,
         lease: evidence,
         maxSteps: 4,
       },
@@ -903,6 +906,7 @@ describe('no durable transition happens after the lease is lost', () => {
         taskId: TASK_ID,
         continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
+        writerMcp: null,
         lease: evidence,
         maxSteps: 4,
       },
@@ -1399,6 +1403,7 @@ describe('a mutation never happens on a lease proved somewhere earlier', () => {
         taskId: TASK_ID,
         continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
+        writerMcp: null,
         lease: evidence,
         maxSteps: 6,
       },
@@ -1631,6 +1636,7 @@ describe('the agent seam refuses to start a process without the lease', () => {
         now: tickingClock()(),
         authorisedWorktreePath: current.state.worktreePath,
         verification: fixture.repository.verification,
+        writerMcp: null,
         brief: readExecutionBrief(fixture.repository, TASK_ID, current.state.worktreePath),
         lease: authority,
       });
@@ -1649,6 +1655,7 @@ describe('the agent seam refuses to start a process without the lease', () => {
       now: tickingClock()(),
       authorisedWorktreePath: current.state.worktreePath,
       verification: fixture.repository.verification,
+      writerMcp: null,
       brief: readExecutionBrief(fixture.repository, TASK_ID, current.state.worktreePath),
       lease: authority,
       agent: async () => {
@@ -1827,6 +1834,7 @@ describe('every seam that starts a process is fenced, not just the writer', () =
       now: tickingClock()(),
       authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
       verification: fixture.repository.verification,
+      writerMcp: null,
       brief: readExecutionBrief(
         fixture.repository,
         TASK_ID,
@@ -1887,6 +1895,7 @@ describe('every seam that starts a process is fenced, not just the writer', () =
         taskId: TASK_ID,
         continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
+        writerMcp: null,
         lease: evidence,
         // One step, which `WORKTREE_READY` satisfies without starting anything.
         maxSteps: 1,
@@ -1947,6 +1956,7 @@ describe('a step started directly is fenced exactly like one the loop drives', (
       now: tickingClock()(),
       authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
       verification: fixture.repository.verification,
+      writerMcp: null,
       brief: readExecutionBrief(
         fixture.repository,
         TASK_ID,
@@ -2000,6 +2010,7 @@ describe('a step started directly is fenced exactly like one the loop drives', (
       now: tickingClock()(),
       authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
       verification: fixture.repository.verification,
+      writerMcp: null,
       brief: readExecutionBrief(
         fixture.repository,
         TASK_ID,
@@ -2074,6 +2085,7 @@ describe('a step whose establishment mark could not be withdrawn starts nothing 
       now: tickingClock()(),
       authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
       verification: fixture.repository.verification,
+      writerMcp: null,
       brief: readExecutionBrief(
         fixture.repository,
         TASK_ID,
@@ -2734,6 +2746,18 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'agent', 'agent-command.ts'),
         join('src', 'agent', 'claude-writer.ts'),
         join('src', 'agent', 'codex-reviewer.ts'),
+        // M5, and it starts a probe — so it is also in the measured group
+        // below. The argument is the one `auth-preflight.ts` beside it already
+        // makes: a preflight is not a productive agent spawn. It runs under the
+        // lease its caller holds, it is given `--tools ""` so it holds no tool
+        // at all, and it asks whether a capability answers rather than doing
+        // any work with it.
+        join('src', 'agent', 'mcp-capability-preflight.ts'),
+        // M5, and it starts nothing — it is deliberately absent from the
+        // measured group below. It imports `isShellInertArgument` alone, which
+        // `exec.ts` exports precisely so a caller that DERIVES an argument can
+        // refuse it before a spawn instead of keeping a copy that drifts.
+        join('src', 'config', 'mcp-capability-registry.ts'),
         join('src', 'auth', 'auth-preflight.ts'),
         join('src', 'boundary', 'owned-command.ts'),
         join('src', 'deliver', 'git-head-publisher.ts'),
@@ -2772,6 +2796,7 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     expect(startsAProcess).toEqual(
       [
         join('src', 'agent', 'agent-command.ts'),
+        join('src', 'agent', 'mcp-capability-preflight.ts'),
         join('src', 'auth', 'auth-preflight.ts'),
         join('src', 'boundary', 'owned-command.ts'),
         join('src', 'deliver', 'git-head-publisher.ts'),
@@ -3418,6 +3443,7 @@ describe('a gate is proved by what it stops, when the outcome no longer differs'
         taskId: TASK_ID,
         continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
+        writerMcp: null,
         lease: evidence,
         maxSteps: 4,
       },

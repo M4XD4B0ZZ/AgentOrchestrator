@@ -30,6 +30,13 @@
  * When a later slice can prove tool reachability, it earns a *second* status of
  * its own; it does not redefine this one.
  *
+ * **That slice is M5 and the promise was kept.**
+ * `agent/mcp-capability-preflight.ts` answers reachability, from a separate
+ * source (the operator's grant registry) against a separate question (does the
+ * writer's own session announce the tool). Nothing below changed: a repository
+ * that resolves here can still be refused there, and the two refusals have
+ * different codes because they are different facts.
+ *
  * `UNKNOWN` exists so that "could not be determined" is representable rather
  * than rounded to either answer, and it never satisfies a requirement. Only
  * `INDEX_PRESENT` does.

@@ -1,6 +1,11 @@
 import type { Command } from 'commander';
 
 import type { AgentRunner } from '../agent/agent-command.js';
+import {
+  mcpPreflightFactory,
+  type McpCapabilityOutcome,
+} from '../agent/mcp-capability-preflight.js';
+import type { RepositoryCapability } from '../repo/capabilities.js';
 import { runAuthPreflight } from '../auth/auth-preflight.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import { formatSafeError } from '../core/safe-error.js';
@@ -348,6 +353,16 @@ export const DEFAULT_MAX_INVOCATIONS = 1;
  */
 export interface RunCommandSeams {
   readonly authPreflight?: () => Promise<AuthPreflightEvidence | null>;
+  /**
+   * The MCP capability proof, as a seam (M5).
+   *
+   * Production passes nothing and the real preflight starts a real `claude`.
+   * A test supplies its own, because the alternative is a suite that spends
+   * subscription quota to find out what it already arranged.
+   */
+  readonly mcpPreflight?: (
+    required: readonly RepositoryCapability[],
+  ) => Promise<McpCapabilityOutcome>;
   readonly agent?: AgentRunner;
   readonly verify?: VerificationRunner;
 }
@@ -510,6 +525,9 @@ async function executeAttended(
       // subscription CLIs start once however many invocations follow, and a
       // failure stays a failure.
       authPreflight: onceOnlyPreflight(seams.authPreflight),
+      // The repository is fixed for this invocation, so the factory is applied
+      // once here and the memo it returns serves every lifecycle invocation.
+      mcpPreflight: mcpPreflightFactory(process.env, seams.mcpPreflight)(repository.capabilities),
       ...(seams.agent !== undefined ? { agent: seams.agent } : {}),
       ...(seams.verify !== undefined ? { verify: seams.verify } : {}),
     },
@@ -560,6 +578,9 @@ async function executeUnattendedAutoResume(
       now: () => new Date().toISOString(),
       git: runGitCommand,
       authPreflight: () => onceOnlyPreflight(seams.authPreflight),
+      // A fresh factory per attempt, for the reason the resolver below is
+      // re-run: after a wait, an artefact minted hours ago is not evidence.
+      mcpPreflight: () => mcpPreflightFactory(process.env, seams.mcpPreflight),
       // Resolved again from the path the operator named, never from the object
       // the first attempt used. A `ResolvedRepository` is a reading taken at a
       // moment, and after a wait that moment is hours old.

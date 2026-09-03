@@ -47,6 +47,7 @@
  * spend subscription quota; every other seam is the product's own.
  */
 
+import { noMcpPreflight } from './helpers/mcp-capability.js';
 import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
@@ -165,7 +166,7 @@ async function scenario(
       maxInvocations: 1,
       ...overrides,
     }),
-    deps: () => ({
+    deps: () => ({ mcpPreflight: noMcpPreflight,
       now: tickingClock(),
       git: runGitCommand,
       // Memoised, exactly like `onceOnlyPreflight`: one artefact for the whole
@@ -924,7 +925,7 @@ describe('a workspace left by a crashed start is adopted and then driven', () =>
         maxSteps: 2,
         maxInvocations: 2,
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: tickingClock(),
         git: runGitCommand,
         authPreflight: async () => provenAuthEvidence(),

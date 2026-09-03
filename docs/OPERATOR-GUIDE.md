@@ -383,6 +383,91 @@ nie gedruckt.
 
 ---
 
+## 5a. Vertrauenswürdige MCP-Capabilities (M5)
+
+Manche Projekte verlangen verbindlich ein bestimmtes MCP-Werkzeug für
+Coding-Aufgaben. Zeras `AGENTS.md` tut das für CodeGraph und sagt: ist der Server
+nicht da, **STOP, keine Datei ändern.**
+
+Der Writer läuft mit `--strict-mcp-config` und hat deshalb von sich aus **kein**
+MCP. Ohne diesen Abschnitt könnte AO ein solches Projekt nie bearbeiten.
+
+### Die Datei
+
+```text
+%USERPROFILE%\.agent-orchestrator\mcp-capabilities.yaml
+```
+
+```yaml
+schemaVersion: 1
+capabilities:
+  codegraph:
+    command: codegraph
+    args: [serve, --mcp]
+    tool: mcp__codegraph__codegraph_explore
+```
+
+**Fehlt die Datei, ist nichts freigegeben.** Das ist anders als bei
+`notify.yaml`, und der Unterschied ist die ganze Sicherheitsaussage: eine fehlende
+Benachrichtigung heißt „aus", weil ein Notifier nicht entscheiden darf, ob
+gearbeitet wird. Eine fehlende Freigabe heißt **nicht freigegeben**, weil sie
+entscheidet, welche Autorität ein schreibender Agent hält.
+
+### Was ein Repository darf, und was nicht
+
+```text
+darf:        capabilities: { codegraph: REQUIRED }   — einen Namen nennen
+darf nicht:  command, args, env, Servername, .mcp.json
+```
+
+Das Repository nennt **ein Wort**, und das Wort wird gegen einen geschlossenen
+Satz geprüft. Die eigene `.mcp.json` eines Projekts wird nie gelesen — Zeras
+liegt im Git und definiert Supabase und GitHub mit Tokens.
+
+Drei Refusals, die man kennen sollte:
+
+| Im YAML | Code |
+| --- | --- |
+| ein Name außerhalb des geschlossenen Satzes | `CAPABILITY_NAME_UNKNOWN` |
+| `env:` unter einer Capability | `REGISTRY_CONTRACT_VIOLATION` |
+| `tool: "Bash(git *)"` oder jeder Name ohne `mcp__server__tool` | `TOOL_NAME_REFUSED` |
+
+Der dritte ist der wichtigste. `--allowedTools` nimmt **Muster**, und sein
+eigener Hilfetext gibt `Bash(git *)` als Beispiel. Ohne die Grammatik wäre eine
+Capability-Freigabe ein Weg zu Shell-Zugriff.
+
+### Was beim Lauf passiert
+
+```text
+Profil sagt REQUIRED
+  → AO liest die Operator-Freigabe            → nicht da?  REFUSED, kein Writer
+  → AO startet einen Prüf-Prozess ohne Werkzeuge
+  → liest dessen init-Meldung                 → nicht connected?  REFUSED
+  → das freigegebene Werkzeug fehlt?          → REFUSED
+  → sonst: Writer bekommt Read/Edit/Write/Glob/Grep + genau dieses eine Werkzeug
+```
+
+Der Prüf-Prozess läuft mit `--tools ""`, hält also selbst gar kein Werkzeug und
+kann nichts ändern. **Der Exit-Code wird nicht gelesen:** ein Server, dessen
+Kommando nicht existiert, endet ebenfalls mit 0. Gemessen, nicht vermutet.
+
+Scheitert es, endet der Lauf mit `REQUIRED_CAPABILITY_UNPROVEN`, es wird kein
+Agent gestartet, und der Zustand landet in der Operator-Attention.
+
+### Was sich dadurch **nicht** ändert
+
+```text
+--strict-mcp-config   bleibt
+kein Bash             bleibt
+kein --add-dir        bleibt
+acceptEdits           bleibt
+```
+
+Freigegeben wird genau ein Server und genau die benannten Werkzeuge. Alle
+anderen MCP-Server des Operators bleiben draußen.
+
+---
+
 ## 6. Ein Projekt für AgentOrchestrator vorbereiten
 
 Ein Projekt braucht eine AO-Projektion:
@@ -1722,19 +1807,26 @@ Working Tree aktuell ist, dass ein MCP-Server konfiguriert ist, oder dass
 nicht die Agent-Session und kann das Tool nicht aufrufen — jede Behauptung
 darüber wäre ein erfundenes PASS.
 
-**Ebene 2 — Task-Body, nicht automatisierbar.** Deshalb muss der Task-Kontext den
-Rest weiterhin selbst anweisen:
+**Ebene 2 — die Capability selbst, seit M5 erzwungen.** Der Absatz oben stand
+hier, bis der Build die Erreichbarkeit selbst beweisen konnte. Er sagte, das sei
+„nicht automatisierbar" und gehöre in jede Task-Datei. Beides ist seit M5 falsch,
+und es steht so ausdrücklich hier, weil eine Anleitung, die eine geschlossene
+Lücke offen nennt, einen Operator Arbeit machen lässt, die der Build schon tut.
 
-```text
-1. CodeGraph Status/Connectivity prüfen.
-2. Eine minimale Repository-Abfrage durchführen, z. B. codegraph_explore.
-3. Wenn CodeGraph nicht funktioniert: STOP.
-4. Nicht ohne CodeGraph weiterimplementieren.
-```
+Was jetzt gilt: erklärt ein Profil `codegraph: REQUIRED`, dann beweist AO **vor**
+dem Writer, dass die Capability vom Operator freigegeben ist und dass sie
+antwortet — und der Writer bekommt genau dieses eine MCP-Werkzeug. Ist sie nicht
+beweisbar, startet kein Writer und der Lauf endet mit
+`REQUIRED_CAPABILITY_UNPROVEN`. Siehe [Abschnitt 5a](#5a-vertrauenswürdige-mcp-capabilities-m5).
 
-Das gehört in jede Zera-Task-Datei, bis der Build Tool-Erreichbarkeit selbst
-beweisen kann. Dann bekommt sie einen *eigenen* zweiten Status — sie definiert
-`INDEX_PRESENT` nicht um.
+`INDEX_PRESENT` ist davon unberührt: es bleibt die Aussage über das Verzeichnis
+und beantwortet weiterhin nicht, ob ein Werkzeug erreichbar ist. Das sind zwei
+Fragen und seit M5 zwei Antworten.
+
+**Was weiterhin in die Task-Datei gehört**, weil kein Build es beweisen kann: dass
+der schreibende Agent das Werkzeug auch *benutzt*. AO stellt es bereit; ob eine
+Abfrage vor der ersten Änderung stattfindet, ist eine Anweisung an den Agenten
+und Sache von `AGENTS.md` und des Task-Bodys.
 
 ---
 

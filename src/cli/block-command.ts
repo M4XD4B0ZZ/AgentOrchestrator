@@ -59,6 +59,11 @@
 import type { Command } from 'commander';
 
 import type { AgentRunner } from '../agent/agent-command.js';
+import {
+  mcpPreflightFactory,
+  type McpCapabilityOutcome,
+} from '../agent/mcp-capability-preflight.js';
+import type { RepositoryCapability } from '../repo/capabilities.js';
 import { independenceIsEstablished } from '../block/block-conclusion.js';
 import { projectBlockDependencies } from '../block/block-dependencies.js';
 import { defineBlock } from '../block/block-definition.js';
@@ -127,6 +132,16 @@ interface BlockOptions {
  */
 export interface BlockCommandSeams {
   readonly authPreflight?: () => Promise<AuthPreflightEvidence | null>;
+  /**
+   * The MCP capability proof, as a seam (M5).
+   *
+   * Production passes nothing and the real preflight starts a real `claude`.
+   * A test supplies its own, because the alternative is a suite that spends
+   * subscription quota to find out what it already arranged.
+   */
+  readonly mcpPreflight?: (
+    required: readonly RepositoryCapability[],
+  ) => Promise<McpCapabilityOutcome>;
   readonly agent?: AgentRunner;
   readonly verify?: VerificationRunner;
   /**
@@ -356,6 +371,9 @@ async function runBlockUnderLease(
       now: () => new Date().toISOString(),
       git: runGitCommand,
       authPreflight: onceOnlyPreflight(seams.authPreflight),
+      // One factory for this block run. The repository is fixed here, so the
+      // factory is applied at once and the memo it returns covers every task.
+      mcpPreflight: mcpPreflightFactory(process.env, seams.mcpPreflight)(repository.capabilities),
       ...(seams.agent !== undefined ? { agent: seams.agent } : {}),
       ...(seams.verify !== undefined ? { verify: seams.verify } : {}),
     },
