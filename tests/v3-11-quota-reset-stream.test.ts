@@ -532,7 +532,7 @@ describe('the writer boundary carries the instant, and only from a usable proces
 
   it('records the instant on the block evidence a refusal produces', async () => {
     const outcome = await runClaudeWriter(
-      { worktreePath: WORKTREE, phase: 'IMPLEMENT', round: 1, payload: 'do it' },
+      { mcp: null, worktreePath: WORKTREE, phase: 'IMPLEMENT', round: 1, payload: 'do it' },
       {
         agent: scriptedAgent(
           agentCommandResult({ exitCode: 1, stdout: refusalStream([rejectedRateLimit(RESETS_AT)]) }),
@@ -557,7 +557,7 @@ describe('the writer boundary carries the instant, and only from a usable proces
     ['a stream that hit its byte budget', { outcome: 'UNAVAILABLE' as const, outputTruncated: true }],
   ])('refuses to read a valid instant out of %s', async (_label, overrides) => {
     const outcome = await runClaudeWriter(
-      { worktreePath: WORKTREE, phase: 'IMPLEMENT', round: 1, payload: 'do it' },
+      { mcp: null, worktreePath: WORKTREE, phase: 'IMPLEMENT', round: 1, payload: 'do it' },
       {
         agent: scriptedAgent(
           agentCommandResult({
@@ -639,7 +639,7 @@ describe('the instant the reader derives is a value the state contract accepts',
 describe('a failed run still tells an operator what the agent said', () => {
   it('excerpts the terminal result rather than the init message', async () => {
     const outcome = await runClaudeWriter(
-      { worktreePath: WORKTREE, phase: 'IMPLEMENT', round: 1, payload: 'do it' },
+      { mcp: null, worktreePath: WORKTREE, phase: 'IMPLEMENT', round: 1, payload: 'do it' },
       {
         agent: scriptedAgent(
           agentCommandResult({
@@ -664,7 +664,7 @@ describe('a failed run still tells an operator what the agent said', () => {
     // A cut stream: the head is the evidence, because there is nothing else.
     const lines = claudeResultStream().split('\n').filter((line) => line.trim().length > 0);
     const outcome = await runClaudeWriter(
-      { worktreePath: WORKTREE, phase: 'IMPLEMENT', round: 1, payload: 'do it' },
+      { mcp: null, worktreePath: WORKTREE, phase: 'IMPLEMENT', round: 1, payload: 'do it' },
       {
         agent: scriptedAgent(
           agentCommandResult({ exitCode: 1, stdout: `${lines.slice(0, -1).join('\n')}\n` }),
@@ -973,6 +973,7 @@ function stepDeps(
     verification: repository.verification,
     brief: readExecutionBrief(repository, TASK_ID, current.state.worktreePath),
     lease: leaseAuthorityFor(repository),
+    writerMcp: null,
     ...overrides,
   };
 }

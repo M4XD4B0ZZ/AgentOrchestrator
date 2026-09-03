@@ -71,7 +71,7 @@ describe('NEW-2: an agent is never started against a relative worktree path', ()
     const agent = spyAgent();
 
     const outcome = await runClaudeWriter(
-      { worktreePath, phase: 'REMEDIATE', round: 1, payload: 'fix it' },
+      { mcp: null, worktreePath, phase: 'REMEDIATE', round: 1, payload: 'fix it' },
       { agent: agent.runner },
     );
 
@@ -136,7 +136,7 @@ describe('NEW-2: an agent is never started against a relative worktree path', ()
     const absolute = join(repoRoot(), 'worktree');
 
     const outcome = await runClaudeWriter(
-      { worktreePath: absolute, phase: 'REMEDIATE', round: 1, payload: 'fix it' },
+      { mcp: null, worktreePath: absolute, phase: 'REMEDIATE', round: 1, payload: 'fix it' },
       { agent },
     );
 

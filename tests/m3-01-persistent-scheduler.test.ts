@@ -29,6 +29,7 @@
  * same builder.
  */
 
+import { noMcpPreflightPerCycle } from './helpers/mcp-capability.js';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -301,7 +302,7 @@ function harness(options: {
     settleCancel = resolve;
   });
 
-  const deps: SchedulerDependencies = {
+  const deps: SchedulerDependencies = { mcpPreflight: noMcpPreflightPerCycle,
     now: () => new Date(clock).toISOString(),
     git: runGitCommand,
     authPreflight: () => {
@@ -929,7 +930,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
         repositories: [entry],
         wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
-      {
+      { mcpPreflight: noMcpPreflightPerCycle,
         now: () => new Date(clock).toISOString(),
         git: runGitCommand,
         authPreflight: () => async () => provenAuthEvidence(),
@@ -1056,7 +1057,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
         repositories: [entry],
         wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
-      {
+      { mcpPreflight: noMcpPreflightPerCycle,
         now: () => new Date(clock).toISOString(),
         git: runGitCommand,
         authPreflight: () => async () => provenAuthEvidence(),
@@ -1115,7 +1116,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
         // must stop rather than re-planning a third time.
         wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 2, idlePollMs: null },
       }),
-      {
+      { mcpPreflight: noMcpPreflightPerCycle,
         now: () => new Date(clock).toISOString(),
         git: runGitCommand,
         authPreflight: () => async () => provenAuthEvidence(),
@@ -1165,7 +1166,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
         repositories: [entry],
         wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
-      {
+      { mcpPreflight: noMcpPreflightPerCycle,
         now: () => new Date(clock).toISOString(),
         git: runGitCommand,
         authPreflight: () => async () => provenAuthEvidence(),
@@ -1203,7 +1204,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
         repositories: [entry],
         wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8, idlePollMs: null },
       }),
-      {
+      { mcpPreflight: noMcpPreflightPerCycle,
         now: () => NOW,
         git: runGitCommand,
         authPreflight: () => async () => provenAuthEvidence(),
@@ -1730,7 +1731,7 @@ describe('M3 slice 1 — the CLI refuses before anything is resolved', () => {
       let drove = false;
       const result = await driveScheduler(
         request({ repositories: [entry], wait }),
-        {
+        { mcpPreflight: noMcpPreflightPerCycle,
           now: () => NOW,
           git: runGitCommand,
           authPreflight: () => async () => provenAuthEvidence(),

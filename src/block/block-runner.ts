@@ -116,6 +116,8 @@
  */
 
 import type { AgentRunner } from '../agent/agent-command.js';
+import type { WriterMcpGrant } from '../agent/claude-writer.js';
+import type { McpCapabilityOutcome } from '../agent/mcp-capability-preflight.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
 import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
@@ -321,6 +323,13 @@ export interface AttendedBlockDependencies {
    * memoising seam. Returning `null` is a gate refusal for the whole run.
    */
   readonly authPreflight: () => Promise<AuthPreflightEvidence | null>;
+  /**
+   * Proves every MCP capability the repository requires, or refuses (M5).
+   *
+   * Shaped like {@link authPreflight} and memoised by the caller for the same
+   * reason: it starts a real process, and one block run drives many tasks.
+   */
+  readonly mcpPreflight: () => Promise<McpCapabilityOutcome>;
   readonly agent?: AgentRunner;
   readonly verify?: VerificationRunner;
   /**
@@ -359,6 +368,18 @@ export async function runAttendedBlock(
   const evidence = await deps.authPreflight();
   if (evidence === null) return state.gateRefused('AUTH_PREFLIGHT_FAILED');
 
+  // The third gate, on the same terms as the two above: a statement about the
+  // machine, not a task outcome, so it refuses through the report before
+  // anything durable is opened. A repository that declares an MCP capability
+  // REQUIRED does not get a writing agent that lacks it here either -- the
+  // block path and the recurring path are two callers of one rule, not two
+  // rules (M5).
+  const capability = await deps.mcpPreflight();
+  if (capability.state === 'REFUSED') {
+    return state.gateRefused(`REQUIRED_CAPABILITY_UNPROVEN: ${capability.code}`);
+  }
+  const writerMcp = capability.state === 'PROVEN' ? capability.grant : null;
+
   const opened = openRun(request, deps.now, ledgerOptions);
   if (opened.kind !== 'OPEN') return state.from(opened);
 
@@ -391,7 +412,15 @@ export async function runAttendedBlock(
       return state.stop(current, endReasonFor(current.ledger.tasks), ledgerOptions);
     }
 
-    const driven = await driveOneTask(next, current, request, deps, ledgerOptions, evidence);
+    const driven = await driveOneTask(
+      next,
+      current,
+      request,
+      deps,
+      ledgerOptions,
+      evidence,
+      writerMcp,
+    );
     // Recorded before the exit is taken, so a run that ends on this task still
     // reports what the driver said about it and what it cost.
     state.record(next.taskId, driven.runOutcome, driven.steps);
@@ -799,6 +828,7 @@ async function driveOneTask(
   deps: AttendedBlockDependencies,
   options: BlockProgressOptions,
   evidence: AuthPreflightEvidence,
+  writerMcp: WriterMcpGrant | null,
 ): Promise<DrivenStep> {
   const { repository, lease, maxStepsPerTask } = request;
   const taskId = choice.taskId;
@@ -886,6 +916,7 @@ async function driveOneTask(
         // authorised, so nothing here authors a prompt.
         continuationGrant: 'ATTENDED',
         authEvidence: evidence,
+        writerMcp,
         lease,
         maxSteps: maxStepsPerTask,
       },

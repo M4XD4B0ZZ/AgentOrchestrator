@@ -206,6 +206,7 @@ function stepDeps(
     verification: repository.verification,
     brief: readExecutionBrief(repository, TASK_ID, current.state.worktreePath),
     lease: leaseAuthorityFor(repository),
+    writerMcp: null,
     ...overrides,
   };
 }

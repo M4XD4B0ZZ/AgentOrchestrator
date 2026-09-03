@@ -1603,6 +1603,11 @@ The name was corrected before the first consumer existed, so nothing had to be
 migrated. When a later slice can actually prove tool reachability, it earns a
 second status of its own; it does not redefine this one.
 
+**That slice is M5**, and it kept the promise: `INDEX_PRESENT` is unchanged, and
+the reachability answer is a separate one produced by a separate module against a
+separate question. See
+[The trusted MCP capability (M5)](#the-trusted-mcp-capability-m5).
+
 So `REQUIRED` in a profile means **this repository must carry a local CodeGraph
 index**, which is what the resolver can check. `UNKNOWN` never satisfies it —
 "could not be determined" is representable rather than rounded to either answer —
@@ -8403,6 +8408,128 @@ line that joins them in production. It is closed by driving the real command
 twice, as two separate invocations, because "a later pass tries again" is a claim
 about a new process reading the store and calling one function twice would not
 have been one.
+
+## The trusted MCP capability (M5)
+
+A repository may declare that it *needs* a named MCP capability, and only this
+machine's operator may say what that capability is. One capability exists —
+`codegraph` — and the slice adds no other surface.
+
+### The defect, and why it was not a bug
+
+Zera/HealthApp's `AGENTS.md` carries a binding rule: a coding task must make a
+real CodeGraph MCP call before it edits anything, and if the server is
+unavailable it must **stop**. Test tasks are explicitly outside its
+documentation-only exception.
+
+`CLAUDE_WRITER_ARGS` carries `--strict-mcp-config`, which this repository chose
+deliberately and measured: without it the writer held *the operator's* MCP tools
+and attempted one. So the writer holds no MCP tool at all — and a repository with
+that rule could never be orchestrated. Neither side is wrong. The gap was that
+AgentOrchestrator had no way for an operator to say "this one is approved here",
+and a product meant to be the central orchestrator across real projects cannot
+have that gap.
+
+### Four arms, and the third is why reading was not enough
+
+Measured against CLI 2.1.259, each arm the shipped writer head plus one change:
+
+| added | `init.mcp_servers` | tool in `init.tools` | the call | a file write |
+| --- | --- | --- | --- | --- |
+| *(nothing — as shipped)* | `[]` | no | `NO_TOOL` | — |
+| `--mcp-config` | `codegraph: connected` | yes | **DENIED** | — |
+| `--mcp-config`, tool named in `--tools` | `codegraph: connected` | yes | **DENIED** | OK |
+| `--mcp-config`, `--allowedTools` | `codegraph: connected` | yes | **OK** | OK |
+
+The third arm is the trap. Naming the MCP tool in `--tools` puts it in the
+session's own announcement and the call is still refused — so a fix written from
+the CLI's help text ("Specify the list of available tools"), or from the `init`
+message, would have shipped broken. Exposure is not permission.
+
+The fourth arm's file write is the control in the other direction: introducing an
+allow-list does **not** displace `--permission-mode acceptEdits` for the built-in
+tools, so a grant costs the writer none of its existing authority.
+
+A fifth measurement decided the environment: the granted server reaches
+`connected` under exactly the block `agent:claude` already supplies, plus the
+Windows back-fill. Adding `APPDATA` and `LOCALAPPDATA` changed nothing, so
+**nothing was added** — the standard that removed them from `auth:claude`.
+
+### The shape
+
+| Part | Where |
+| --- | --- |
+| The operator's grant | `<user profile>/.agent-orchestrator/mcp-capabilities.yaml` |
+| Reading and validating it | `src/config/mcp-capability-registry.ts` |
+| Proving it answers | `src/agent/mcp-capability-preflight.ts` |
+| The writer's argv | `claudeWriterArgs` in `src/agent/claude-writer.ts` |
+| The refusal | `REQUIRED_CAPABILITY_UNPROVEN` (`src/run/lifecycle-driver.ts`) |
+| The suite | `tests/m5-01-trusted-mcp-capability.test.ts` |
+
+A repository contributes **one word** — `capabilities: { codegraph: REQUIRED }` —
+checked against the closed `REPOSITORY_CAPABILITIES` set before it is looked up.
+It cannot supply a command, an argument, an environment, a server name or a
+configuration file. Zera's own `.mcp.json` is tracked in Git and defines three
+servers, two of which take credentials from the environment; it is never read.
+
+### The three checks that carry the argument
+
+**A grant has no `env` member.** Not omitted — unrepresentable. The document
+contract is `.strict()` at both levels, so a grant carrying an environment is
+`REGISTRY_CONTRACT_VIOLATION`. A grant that could carry environment values would
+be a way to hand a spawned program the operator's credentials.
+
+**A tool name must match `^mcp__[a-z0-9_]+__[a-z0-9_]+$`.** This is the
+load-bearing check. `--allowedTools` takes *patterns* and its own help gives
+`Bash(git *)` as the example, so without the grammar a capability grant is a
+route to shell authority. No accepted value can name a built-in tool.
+
+**The exit code is not the evidence.** A server whose command does not exist
+yields `status: "failed"`, `tools: []` — and exit code 0, exactly like the
+healthy run. The check is positive: the named server must be `connected` *and*
+the granted tool must appear by name.
+
+### Fail closed, before the writer
+
+The preflight sits where the auth preflight sits — after auth, before the first
+drive, on every path that is about to execute. It runs with `--tools ""`, so it
+holds no `Read`, no `Write` and no `Edit` and cannot modify a repository even in
+principle. A repository that requires a capability and cannot prove it gets
+`REQUIRED_CAPABILITY_UNPROVEN`, no agent is started, the lease is given back, and
+the condition is raised to the operator outbox — it leaves no durable task state,
+which is exactly when `core/run-attention.ts` raises a repository-subject item.
+
+The memo is per *requirement*, not per repository, because what it measures is a
+property of the operator's registry and of this machine. Two repositories that
+both require `codegraph` share one probe. Across a wait it is a fresh factory, on
+the same terms as auth: a server that answered before a six-hour sleep is not
+evidence that it answers after one.
+
+### What this slice deliberately is not
+
+It is not a plugin platform. `REPOSITORY_CAPABILITIES` stays a closed
+one-member set; there is no way to install a server, no way for a repository to
+name one, no shell, no `--add-dir`, and `--strict-mcp-config` stays. It changed
+no target repository's governance: Zera's `AGENTS.md` is untouched.
+
+### What is left, by name
+
+1. **The granted server's containment is expected and not measured.** The MCP
+   server is started by the writer's own CLI, which AO starts through the
+   Windows launch boundary, so the kernel should place it in the same job and
+   take it with the tree. That follows from how `JOBLIST` placement works and it
+   has **not** been observed for this server: no harness here starts a real
+   owned writer with a granted capability and then asks what happened to the
+   server process. Until one does, "it is contained" is a reasoned expectation,
+   which is not the standard the rest of this section is held to.
+2. **That the writer *uses* the capability is not provable here.** AO can prove
+   the tool is present and callable. Whether the agent actually queries before
+   editing is an instruction to the agent, and it stays where it already lives —
+   in the target repository's `AGENTS.md` and in the task body.
+3. **One capability, one machine's measurements.** Everything above was measured
+   against CLI 2.1.259 on Windows with one server. A second capability, or a
+   server whose tools are named differently, is a new measurement and not an
+   inference from this one.
 
 ## The Windows launch boundary (V3 slice 1)
 

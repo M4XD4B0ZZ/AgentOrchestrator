@@ -150,6 +150,13 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       '  It runs once per attempt -- an ordinary run makes one, and a run that waited for a quota\n' +
       '  reset proves auth again afterwards rather than trusting the artefact it minted before --\n' +
       '  and a failure is never retried inside an attempt. Log the agent CLIs in and invoke again.',
+    REQUIRED_CAPABILITY_UNPROVEN:
+      'This repository declares an MCP capability REQUIRED, and this invocation could not prove\n' +
+      '  it. Nothing was driven, deliberately: a repository whose own rules make a tool mandatory\n' +
+      '  for coding work must not be handed a writing agent that lacks it. The reason code above\n' +
+      '  says which half failed -- the operator has not granted the capability in\n' +
+      '  <user profile>/.agent-orchestrator/mcp-capabilities.yaml, or the granted server did not\n' +
+      '  answer. Grant or repair it and invoke again.',
     COMPLETED:
       'The task reached READY_FOR_PR. Terminal: a human opens the pull request from here.',
     TASK_ABORTED: 'The task was already ABORTED. Nothing was run.',

@@ -20,7 +20,7 @@ import { join } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { CLAUDE_WRITER_ARGS } from '../src/agent/claude-writer.js';
+import { CLAUDE_WRITER_ARGS, claudeWriterArgs } from '../src/agent/claude-writer.js';
 import { readClaudeResultStream } from '../src/agent/internal/claude-result-stream.js';
 import { renderRunResult } from '../src/cli/render-attended-run.js';
 import { isShellInertArgument } from '../src/doctor/exec.js';
@@ -130,6 +130,14 @@ describe('the writer is configured hermetically and can actually edit', () => {
     expect(tools).not.toContain('PowerShell');
   });
 
+  // The ceiling has had two shapes since M5: with a capability granted and
+  // without. Every absence asserted above is asserted for BOTH in
+  // `m5-01-trusted-mcp-capability.test.ts`, because a ceiling that held for one
+  // producer and not the other would be no ceiling at all.
+  it('is what the argv builder produces when nothing is granted', () => {
+    expect(claudeWriterArgs(null)).toEqual([...CLAUDE_WRITER_ARGS]);
+  });
+
   it('bounds MCP authority, which --tools does not', () => {
     // Measured: without this flag the writer held the operator's MCP tools and
     // attempted mcp__claude_ai_Gmail__list_labels.
@@ -198,6 +206,7 @@ function request(started: StartedTask) {
     taskId: started.taskId,
     continuationGrant: 'ATTENDED' as const,
     authEvidence: provenAuthEvidence(),
+    writerMcp: null,
     lease: leaseFor(started.repository),
     maxSteps: 8,
   };
@@ -743,7 +752,7 @@ describe('the reviewer is told what the task requires', () => {
     const current = seedState(started, { state: 'REVIEWING', reviewRound: 0 });
     const agent = recordedAgent({ codex: () => reviewResult(passingReview()) });
 
-    await runReviewStep(current, {
+    await runReviewStep(current, { writerMcp: null,
       now: '2026-08-16T10:00:00.000Z',
       authorisedWorktreePath: started.workspace.worktreePath,
       verification: started.repository.verification,
@@ -832,7 +841,7 @@ describe('the reviewer is told what the task requires', () => {
     const current = seedState(started, { state: 'REVIEWING', reviewRound: 0 });
     const agent = recordedAgent({});
 
-    const step = await runReviewStep(current, {
+    const step = await runReviewStep(current, { writerMcp: null,
       now: '2026-08-16T10:00:00.000Z',
       authorisedWorktreePath: started.workspace.worktreePath,
       verification: started.repository.verification,
@@ -1078,6 +1087,7 @@ describe('a writer pass with no measured effect is not a success', () => {
       brief: readExecutionBrief(started.repository, started.taskId, started.workspace.worktreePath),
       git: runGitCommand,
       agent: agent.runner,
+      writerMcp: null,
       lease: { repository: started.repository, evidence: leaseFor(started.repository) },
     };
   }

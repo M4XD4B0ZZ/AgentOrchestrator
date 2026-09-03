@@ -134,6 +134,7 @@
  */
 
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
+import type { McpCapabilityOutcome } from '../agent/mcp-capability-preflight.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import {
   acquireRepositoryExecutionLease,
@@ -210,6 +211,17 @@ export const LIFECYCLE_OUTCOMES = [
   'TASK_START_REFUSED',
   /** The auth preflight produced no evidence. Nothing was driven. */
   'AUTH_PREFLIGHT_FAILED',
+  /**
+   * The repository requires an MCP capability that this invocation could not
+   * prove — not granted by the operator, or granted and not answering (M5).
+   *
+   * Nothing was driven, and that is the point rather than a side effect. A
+   * repository whose own governance makes a tool mandatory for coding work must
+   * not be handed a writing agent that lacks it: the agent would either obey
+   * its repository and refuse to write, or ignore it. Both are worse than a
+   * refusal that says which capability was missing.
+   */
+  'REQUIRED_CAPABILITY_UNPROVEN',
 
   /* --- the run, passed through ------------------------------------------- */
   'COMPLETED',
@@ -485,6 +497,18 @@ export interface LifecycleDependencies {
    * the real CLIs twice to answer a question already answered.
    */
   readonly authPreflight: () => Promise<AuthPreflightEvidence | null>;
+  /**
+   * Proves every MCP capability the repository requires, or refuses (M5).
+   *
+   * Shaped like {@link authPreflight} and memoised by the caller for the same
+   * reason: it starts a real process, and a lifecycle that drives several
+   * invocations must not start one per invocation.
+   *
+   * It is a dependency rather than a call into `agent/mcp-capability-preflight.ts`
+   * because the capability a repository requires is read from the resolved
+   * repository, and this layer is not where that is decided.
+   */
+  readonly mcpPreflight: () => Promise<McpCapabilityOutcome>;
   /** Execution seams, forwarded to the run driver. */
   readonly agent?: AgentRunner;
   readonly verify?: VerificationRunner;
@@ -792,6 +816,27 @@ async function driveUnderLease(
     // nothing here to continue"; anything else is a record that exists and
     // cannot be used, which is a different errand for an operator.
     if (mayStartTask(request.continuationGrant)) {
+      // **Before** `startTask`, and that placement is the whole of the M5
+      // fail-closed claim rather than a detail of it.
+      //
+      // The gate below in the loop would already stop the writer, and stopping
+      // the writer is not enough: `startTask` creates a worktree, creates a
+      // branch and writes the first durable state a task ever has. A repository
+      // that declared it needs a capability nobody granted would collect all
+      // three on every pass, for as long as an unattended invocation lasts, for
+      // work that can never be driven. "Refuses before it modifies anything" has
+      // to mean the repository, not just the agent.
+      //
+      // It costs nothing extra: the dependency is memoised by the caller, so
+      // this call and the one in the loop are one probe. It is inside the
+      // `mayStartTask` branch for the same reason the start refusal is —
+      // `AUTOMATIC_RESUME_ONLY` starts nothing, so it has nothing to protect
+      // here, and the loop's gate covers it before it drives.
+      const startCapability = await deps.mcpPreflight();
+      if (startCapability.state === 'REFUSED') {
+        return finish('REQUIRED_CAPABILITY_UNPROVEN', [startCapability.code]);
+      }
+
       start = await startTask(
         { repository, taskId },
         { git: deps.git, now: deps.now, authPreflight: deps.authPreflight, lease: evidence },
@@ -845,11 +890,25 @@ async function driveUnderLease(
       const authEvidence = await deps.authPreflight();
       if (authEvidence === null) return finish('AUTH_PREFLIGHT_FAILED');
 
+      // After auth and before the first drive, for the reason auth is here: it
+      // is a requirement of *executing*, and this is every path that is about
+      // to execute. Memoised by the caller, so later invocations pay nothing.
+      //
+      // Fail-closed and stated as such: a refusal ends the lifecycle without a
+      // writer having been started, so a repository that requires a capability
+      // never gets an agent that lacks it.
+      const capability = await deps.mcpPreflight();
+      if (capability.state === 'REFUSED') {
+        return finish('REQUIRED_CAPABILITY_UNPROVEN', [capability.code]);
+      }
+      const writerMcp = capability.state === 'PROVEN' ? capability.grant : null;
+
       invocations += 1;
       const run = await runTask(
         {
           repository,
           taskId,
+          writerMcp,
           continuationGrant: request.continuationGrant,
           // **Offered once, across every invocation of this lifecycle.**
           //

@@ -171,6 +171,11 @@ import {
 } from '../registry/repository-registry.js';
 import { formatSafeError } from '../core/safe-error.js';
 import type { AgentRunner } from '../agent/agent-command.js';
+import {
+  mcpPreflightFactory,
+  type McpCapabilityOutcome,
+} from '../agent/mcp-capability-preflight.js';
+import type { RepositoryCapability } from '../repo/capabilities.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import { runGitCommand } from '../worktree/git-command.js';
@@ -369,6 +374,16 @@ export interface RepositoriesCommandSeams {
   readonly pathProvider?: PathProvider;
   /** Forwarded to the scheduler, and only reached under `--attended`. */
   readonly authPreflight?: () => Promise<AuthPreflightEvidence | null>;
+  /**
+   * The MCP capability proof, as a seam (M5).
+   *
+   * Production passes nothing and the real preflight starts a real `claude`.
+   * A test supplies its own, because the alternative is a suite that spends
+   * subscription quota to find out what it already arranged.
+   */
+  readonly mcpPreflight?: (
+    required: readonly RepositoryCapability[],
+  ) => Promise<McpCapabilityOutcome>;
   readonly agent?: AgentRunner;
   readonly verify?: VerificationRunner;
   /**
@@ -568,6 +583,10 @@ export async function reportRepositories(
     {
       now: () => new Date().toISOString(),
       git: runGitCommand,
+      // A fresh capability-preflight factory per cycle, on the same terms as
+      // the auth factory below: a granted MCP server that stopped answering
+      // while this invocation slept is re-proven after the wake.
+      mcpPreflight: () => mcpPreflightFactory(process.env, seams.mcpPreflight),
       // A **factory**, so each cycle gets its own memo. One preflight for every
       // repository within a cycle: `onceOnlyPreflight` memoises it, so the
       // subscription CLIs start once however many repositories follow.

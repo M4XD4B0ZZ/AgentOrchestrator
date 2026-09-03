@@ -62,6 +62,7 @@ function request(overrides: Partial<ClaudeWriterRequest> = {}): ClaudeWriterRequ
     phase: 'IMPLEMENT',
     round: 1,
     payload: 'implement the task',
+    mcp: null,
     ...overrides,
   };
 }

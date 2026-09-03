@@ -366,6 +366,8 @@ const EXPECTED_LIFECYCLE_EXIT_CODES: Readonly<Record<string, number>> = Object.f
 
   // This run was refused or achieved nothing; nothing durable is wrong.
   AUTH_PREFLIGHT_FAILED: 3,
+  // A person has to grant or repair the capability; retrying cannot.
+  REQUIRED_CAPABILITY_UNPROVEN: 3,
   STATE_CONFLICT: 4,
   STATE_NOT_RECORDED: 4,
   CONTINUATION_NOT_AUTHORISED: 4,

@@ -42,6 +42,7 @@
  * against the shipped artefact, and this file does not pretend to.
  */
 
+import { noMcpPreflight, noMcpPreflightFactory } from './helpers/mcp-capability.js';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -283,6 +284,7 @@ const DEPS = {
   git: runGitCommand,
   authPreflight: async (): Promise<ReturnType<typeof provenAuthEvidence>> =>
     provenAuthEvidence(),
+  mcpPreflight: noMcpPreflightFactory,
 };
 
 /* ═══════════ 1. U1 — the recurring loop looks at a stale lease ════════════ */

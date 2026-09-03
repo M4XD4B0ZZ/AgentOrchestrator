@@ -47,6 +47,7 @@
  * the real subscription CLIs, and is stated as a limit rather than faked.
  */
 
+import { noMcpPreflight, noMcpPreflightPerCycle } from './helpers/mcp-capability.js';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -336,7 +337,7 @@ async function scenario(
       wait: { wait: true, maxWaitMs: 300_000 },
       ...overrides,
     }),
-    deps: (sleep) => ({
+    deps: (sleep) => ({ mcpPreflight: noMcpPreflightPerCycle,
       now: clock.now,
       git: runGitCommand,
       authPreflight: preflight.factory,
@@ -349,7 +350,7 @@ async function scenario(
       agent: agent.runner,
       verify: verify.runner,
     }),
-    lifecycleDeps: () => ({
+    lifecycleDeps: () => ({ mcpPreflight: noMcpPreflight,
       now: clock.now,
       git: runGitCommand,
       authPreflight: preflight.factory(),
@@ -593,7 +594,7 @@ describe('AUTOMATIC_RESUME_ONLY runs one thing and refuses everything else', () 
       const verify = recordedVerify();
 
       const run = await runTask(
-        {
+        { writerMcp: null,
           repository: started.repository,
           taskId: TASK_ID,
           continuationGrant: 'AUTOMATIC_RESUME_ONLY',
@@ -624,7 +625,7 @@ describe('AUTOMATIC_RESUME_ONLY runs one thing and refuses everything else', () 
     seedDeliveredState(started, { state: 'VERIFYING' });
 
     const run = await runTask(
-      {
+      { writerMcp: null,
         repository: started.repository,
         taskId: TASK_ID,
         continuationGrant: 'AUTOMATIC_RESUME_ONLY',
@@ -655,7 +656,7 @@ describe('AUTOMATIC_RESUME_ONLY runs one thing and refuses everything else', () 
     const agent = recordedAgent({});
 
     const run = await runTask(
-      {
+      { writerMcp: null,
         repository: started.repository,
         taskId: TASK_ID,
         continuationGrant: 'AUTOMATIC_RESUME_ONLY',
@@ -702,7 +703,7 @@ describe('the lifecycle boundary refuses to start a task under the automatic gra
         maxSteps: 8,
         maxInvocations: 2,
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: advancingClock().now,
         git: runGitCommand,
         authPreflight: preflight.factory(),
@@ -757,7 +758,7 @@ describe('the lifecycle boundary refuses to start a task under the automatic gra
         maxSteps: 1,
         maxInvocations: 1,
       },
-      {
+      { mcpPreflight: noMcpPreflight,
         now: advancingClock().now,
         git: runGitCommand,
         authPreflight: preflight.factory(),

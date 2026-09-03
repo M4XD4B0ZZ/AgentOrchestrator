@@ -456,6 +456,7 @@ function deps(
     // A gate nobody else shares. The production instance is process-wide by
     // design, and a suite that used it would be measuring its own earlier cases.
     reviewerProviderGate: createReviewerProviderGate(),
+    writerMcp: null,
     ...overrides,
   };
 }
@@ -1019,7 +1020,7 @@ describe('§7c the binding production actually uses', () => {
 
       // Built here rather than through `deps()`, because `deps()` injects a
       // gate and the whole point of this case is the field being **absent**.
-      const step = await runReviewStep(current, {
+      const step = await runReviewStep(current, { writerMcp: null,
         now: REFUSED_AT,
         authorisedWorktreePath: current.state.worktreePath,
         verification: repository.verification,

@@ -224,6 +224,8 @@ const START_TASK_EXIT_CODES = Object.freeze({
   EXECUTION_LEASE_LOST: EXIT_RUN_NEEDS_OPERATOR,
   // An operator must act before anything may run.
   AUTH_PREFLIGHT_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+  // A person has to grant or repair the capability; no amount of retrying will.
+  REQUIRED_CAPABILITY_UNPROVEN: EXIT_RUN_NEEDS_OPERATOR,
   WORKSPACE_COLLISION: EXIT_RUN_NEEDS_OPERATOR,
   WORKSPACE_REFUSED: EXIT_RUN_NEEDS_OPERATOR,
   STATE_UNUSABLE: EXIT_RUN_NEEDS_OPERATOR,
@@ -403,6 +405,8 @@ const LIFECYCLE_EXIT_CODES = Object.freeze({
   // condition `run --attended` has always reported, and an operator's answer to
   // it did not change because an outer loop asked the question.
   AUTH_PREFLIGHT_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+  // A person has to grant or repair the capability; no amount of retrying will.
+  REQUIRED_CAPABILITY_UNPROVEN: EXIT_RUN_NEEDS_OPERATOR,
 
   // This run was refused or achieved nothing; nothing durable is wrong.
   STATE_CONFLICT: EXIT_RUN_REFUSED,

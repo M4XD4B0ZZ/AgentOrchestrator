@@ -39,6 +39,7 @@
  *    makes the other reading mean something.
  */
 
+import { noMcpPreflight, noMcpPreflightFactory } from './helpers/mcp-capability.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -506,7 +507,7 @@ describe('M2 slice 5 — the same repository never overlaps itself', () => {
 
     const run = driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
 
     // Program order, not elapsed time: T1 is inside the seam and held there, and
@@ -535,7 +536,7 @@ describe('M2 slice 5 — the same repository never overlaps itself', () => {
     const seam = recordingDrive({ answer: () => answer() });
     const result = await driveRepositories(
       { repositories, maxConcurrentRepositories: 4, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
     expect(seam.peak()).toBe(1);
     expect(result.maxObservedConcurrency).toBe(1);
@@ -550,7 +551,7 @@ describe('M2 slice 5 — the same repository never overlaps itself', () => {
     });
     const result = await driveRepositories(
       { repositories, maxConcurrentRepositories: 4, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
     expect(seam.peak()).toBe(1);
     // A throw is not an outcome. It is reported as one and graded as a defect.
@@ -570,7 +571,7 @@ describe('M2 slice 5 — the same repository never overlaps itself', () => {
     const seam = recordingDrive({ hold: async () => held.wait });
     const run = driveRepositories(
       { repositories, maxConcurrentRepositories: 3, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
     await waitFor(() => seam.started.length >= 1);
     await settleMicrotasks();
@@ -600,6 +601,8 @@ describe('M2 slice 5 — the same repository never overlaps itself', () => {
         await held.wait;
         return null;
       },
+      // Never reached: this case never gets past the auth gate above.
+      mcpPreflight: noMcpPreflight,
     };
 
     const firstRun = driveLifecycle(
@@ -637,7 +640,7 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
 
     const run = driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
 
     // Both are inside the seam, and neither has been allowed to leave. This is
@@ -668,7 +671,7 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
 
     const run = await driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      {
+      { mcpPreflight: noMcpPreflightFactory,
         now: (): string => new Date().toISOString(),
         git: runGitCommand,
         // Reached under a held lease — that is what makes this the window. The
@@ -819,7 +822,7 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
 
     await driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 3, maxInvocations: 2 },
-      { ...BASE_DEPS, driveLifecycle: drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: drive },
     );
 
     expect(seen.map((entry) => `${entry.root}::${entry.taskId}`).sort()).toEqual(
@@ -895,7 +898,7 @@ describe('M2 slice 5 — global concurrency is bounded and admission is determin
 
     const run = driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
 
     await waitFor(() => seam.live.size >= 2);
@@ -924,7 +927,7 @@ describe('M2 slice 5 — global concurrency is bounded and admission is determin
       const seam = recordingDrive();
       const result = await driveRepositories(
         { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-        { ...BASE_DEPS, driveLifecycle: seam.drive },
+        { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
       );
       orders.push(result.admissions.map((entry) => `${entry.repositoryId}::${entry.taskId}`));
     }
@@ -959,7 +962,7 @@ describe('M2 slice 5 — global concurrency is bounded and admission is determin
     });
     const run = driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
 
     await waitFor(() => seam.live.size >= 2);
@@ -993,7 +996,7 @@ describe('M2 slice 5 — global concurrency is bounded and admission is determin
     });
     const run = driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
 
     await waitFor(() => seam.started.length >= 3);
@@ -1031,7 +1034,7 @@ describe('M2 slice 5 — global concurrency is bounded and admission is determin
     const seam = recordingDrive();
     const result = await driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
 
     expect(result.admissions).toHaveLength(3);
@@ -1054,7 +1057,7 @@ describe('M2 slice 5 — global concurrency is bounded and admission is determin
         maxSteps: 1,
         maxInvocations: 1,
       },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
     expect(seam.peak()).toBe(1);
     expect(result.maxObservedConcurrency).toBe(1);
@@ -1077,7 +1080,7 @@ describe('M2 slice 5 — refusals and endings', () => {
     const seam = recordingDrive();
     const result = await driveRepositories(
       { repositories, maxConcurrentRepositories: capacity, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
     expect(result.outcome).toBe('CAPACITY_INVALID');
     expect(result.reasonCodes).toEqual(['MAX_CONCURRENT_REPOSITORIES_INVALID']);
@@ -1099,7 +1102,7 @@ describe('M2 slice 5 — refusals and endings', () => {
         maxSteps: 1,
         maxInvocations: 1,
       },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
     expect(result.outcome).toBe('RUN_COMPLETE');
     expect(result.capacity).toBe(MAX_CONCURRENT_REPOSITORIES);
@@ -1109,7 +1112,7 @@ describe('M2 slice 5 — refusals and endings', () => {
     const seam = recordingDrive();
     const result = await driveRepositories(
       { repositories: [], maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
     expect(result.outcome).toBe('NOTHING_ADMITTED');
     expect(result.planCode).toBe('NO_REPOSITORIES_REGISTERED');
@@ -1130,7 +1133,7 @@ describe('M2 slice 5 — refusals and endings', () => {
     const seam = recordingDrive();
     const result = await driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
     expect(result.outcome).toBe('NOTHING_ADMITTED');
     expect(result.planCode).toBe('ALL_TASKS_COMPLETE');
@@ -1149,7 +1152,7 @@ describe('M2 slice 5 — refusals and endings', () => {
 
     const run = driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      {
+      { mcpPreflight: noMcpPreflightFactory,
         ...BASE_DEPS,
         driveLifecycle: seam.drive,
         planAcrossRepositories: (): CrossRepositoryPlan => {
@@ -1187,7 +1190,7 @@ describe('M2 slice 5 — refusals and endings', () => {
     const seam = recordingDrive();
     const result = await driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      {
+      { mcpPreflight: noMcpPreflightFactory,
         ...BASE_DEPS,
         driveLifecycle: seam.drive,
         planAcrossRepositories: (): CrossRepositoryPlan =>
@@ -1214,7 +1217,7 @@ describe('M2 slice 5 — refusals and endings', () => {
     const seam = recordingDrive();
     const result = await driveRepositories(
       { repositories, maxConcurrentRepositories: 3, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive },
     );
     expect(result.admissions.map((entry) => entry.taskId)).toEqual(['T1', 'T2', 'T3', 'T4']);
     expect(new Set(seam.started).size).toBe(4);
@@ -1250,7 +1253,7 @@ describe('M2 slice 5 — refusals and endings', () => {
 
     const run = driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      {
+      { mcpPreflight: noMcpPreflightFactory,
         ...BASE_DEPS,
         driveLifecycle: seam.drive,
         planAcrossRepositories: (): CrossRepositoryPlan => {
@@ -1304,7 +1307,7 @@ describe('M2 slice 5 — refusals and endings', () => {
 
     const result = await driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: drive },
     );
 
     expect(result.outcome).toBe('RUN_COMPLETE');
@@ -1731,7 +1734,7 @@ describe('M2 slice 5 — the shared auth preflight is single-flight', () => {
 
     const run = driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      {
+      { mcpPreflight: noMcpPreflightFactory,
         now: (): string => new Date().toISOString(),
         git: runGitCommand,
         authPreflight: onceOnlyPreflight(async () => {
@@ -1775,7 +1778,7 @@ describe('M2 slice 5 — the coordinator establishes a domain per admission', ()
 
     const run = driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: drive },
     );
     await waitFor(() => domains.length >= 2, 10_000, 'both admissions to enter the driver');
     held.open();
@@ -1810,7 +1813,7 @@ describe('M2 slice 5 — the coordinator establishes a domain per admission', ()
 
     await driveRepositories(
       { repositories, maxConcurrentRepositories: 1, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: drive },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: drive },
     );
     expect(deep).not.toBeNull();
   });
@@ -1837,7 +1840,7 @@ describe('M2 slice 5 — the admission ceiling', () => {
 
     const result = await driveRepositories(
       { repositories, maxConcurrentRepositories: 1, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive, planAcrossRepositories: () => plan },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive, planAcrossRepositories: () => plan },
     );
 
     expect(result.outcome).toBe('ADMISSION_BUDGET_EXHAUSTED');
@@ -1877,7 +1880,7 @@ describe('M2 slice 5 — the admission ceiling', () => {
 
     const result = await driveRepositories(
       { repositories, maxConcurrentRepositories: 1, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive, planAcrossRepositories: () => plan },
+      { mcpPreflight: noMcpPreflightFactory, ...BASE_DEPS, driveLifecycle: seam.drive, planAcrossRepositories: () => plan },
     );
 
     expect(result.admissions).toHaveLength(MAX_COORDINATOR_ADMISSIONS);

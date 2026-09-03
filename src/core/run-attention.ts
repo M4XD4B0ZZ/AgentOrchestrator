@@ -221,6 +221,13 @@ const CONDITION_ATTENTION = Object.freeze({
   TASK_START_REFUSED: always('REPOSITORY_RUN_REFUSED'),
   TASK_NOT_STARTED: always('REPOSITORY_RUN_REFUSED'),
   AUTH_PREFLIGHT_FAILED: always('REPOSITORY_RUN_REFUSED'),
+  /**
+   * A required MCP capability was not proven, so the repository was refused
+   * before a task started (M5). It leaves no durable task state — nothing was
+   * driven — so the task scan will never judge it, and by this table's own rule
+   * that is exactly when a repository-subject item is raised.
+   */
+  REQUIRED_CAPABILITY_UNPROVEN: always('REPOSITORY_RUN_REFUSED'),
   CONTINUATION_NOT_AUTHORISED: always('REPOSITORY_RUN_REFUSED'),
   EXECUTION_UNAUTHORISED: always('REPOSITORY_RUN_REFUSED'),
   INVOCATION_BUDGET_INVALID: always('REPOSITORY_RUN_REFUSED'),

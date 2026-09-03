@@ -209,6 +209,7 @@ function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDepe
     authorisedWorktreePath: authorisedWorktree(root),
     verification: VERIFICATION,
     lease: leaseAuthorityAt(root),
+    writerMcp: null,
     observe: settledObserver,
     // The Git a healthy repository would be, for the same reason `observe`
     // is the observation a healthy `observeRuntime` would make: this root is

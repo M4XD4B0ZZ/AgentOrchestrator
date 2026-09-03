@@ -135,6 +135,7 @@ function deps(
     verification: repository.verification,
     brief: readExecutionBrief(repository, current.state.taskId, current.state.worktreePath),
     lease: leaseAuthorityFor(repository),
+    writerMcp: null,
     ...overrides,
   };
 }

@@ -423,6 +423,7 @@ function request(root: string, overrides: Partial<RunRequest> = {}): RunRequest 
     // Acquired for real: the driver re-proves it against the file every
     // iteration, so a fabricated artefact would stop the run on the first one.
     lease: leaseFor(repo),
+    writerMcp: null,
     maxSteps: 12,
     ...overrides,
   };
@@ -1880,6 +1881,7 @@ describe('task selection', () => {
         repository: resolved,
         continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
+        writerMcp: null,
         lease: leaseFor(resolved),
         maxSteps: 4,
       },
