@@ -128,6 +128,7 @@ describe('NEW-2: an agent is never started against a relative worktree path', ()
         }),
         stderr: '',
         outputTruncated: false,
+        outputBytesObserved: 0,
         failureCode: null,
         errnoCode: null,
         durationMs: 1,

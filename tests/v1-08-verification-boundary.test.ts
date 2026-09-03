@@ -158,25 +158,71 @@ describe('the production verification seam starts a real process', () => {
     expect(result.durationMs).toBe(0);
   });
 
-  it('terminates a command that floods its output budget, and reaches no verdict', async () => {
+  /**
+   * ── This case was inverted by M6, and the old sentence is quoted here ─────
+   *
+   * It used to read:
+   *
+   *   > Exceeding the budget is an *ending*, never a verdict — a run whose
+   *   > output was cut off cannot be read as having passed, whatever it exited
+   *   > with.
+   *
+   * That was measured false in a real target repository. Zera's canonical gate
+   * exits 0 and writes 62.8 MiB to stderr, so under that rule AO terminated a
+   * *passing* gate, recorded `OUTPUT_LIMIT_STDERR` with both excerpts empty —
+   * because what would have been recorded is exactly what overflowed — and did
+   * so on every retry, which made every task in that repository permanently
+   * unable to reach `READY_FOR_PR`.
+   *
+   * The old sentence conflated two policies. **Bounded observation** — how much
+   * this process holds in RAM — is unchanged and still enforced, and the
+   * assertions below check it. **Termination for verbosity** is a separate
+   * thing, right for an ordinary command and wrong for a gate, and
+   * `verify-command.ts` is the one caller in the build that switches it off.
+   *
+   * The fear behind the old sentence is answered by its sibling case below
+   * rather than by keeping the coupling: a truncated run cannot be *read as
+   * having passed* because the verdict is the exit code, and truncation does
+   * not touch the exit code. A failing flood still fails.
+   */
+  const FLOOD = (exitCode: number): string =>
+    [
+      'const chunk = "x".repeat(64 * 1024);',
+      'let written = 0;',
+      'const limit = 9 * 1024 * 1024;',
+      'while (written < limit) { process.stdout.write(chunk); written += chunk.length; }',
+      `process.exitCode = ${exitCode};`,
+    ].join('\n');
+
+  it('lets a command that floods its output budget reach its own exit code', async () => {
     const dir = scratch();
-    const path = script(
-      dir,
-      'flood.mjs',
-      [
-        'const chunk = "x".repeat(64 * 1024);',
-        'let written = 0;',
-        'const limit = 9 * 1024 * 1024;',
-        'while (written < limit) { process.stdout.write(chunk); written += chunk.length; }',
-        'process.exit(0);',
-      ].join('\n'),
-    );
+    const path = script(dir, 'flood-pass.mjs', FLOOD(0));
 
     const result = await runVerificationCommand('node', [path], dir);
 
-    // Exceeding the budget is an *ending*, never a verdict — a run whose output
-    // was cut off cannot be read as having passed, whatever it exited with.
-    expect(result.outcome).toBe('UNAVAILABLE');
+    // The line this slice exists for. Before M6: `UNAVAILABLE`.
+    expect(result.outcome).toBe('RAN');
+    expect(result.exitCode).toBe(0);
+    expect(result.failureCode).toBeNull();
+    // Bounded observation, untouched: the excerpt is a prefix and says so, and
+    // the count says what it is a prefix of.
+    expect(result.outputTruncated).toBe(true);
+    expect(result.outputBytesObserved).toBeGreaterThan(8 * 1024 * 1024);
+    expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThanOrEqual(8 * 1024 * 1024);
+  }, 60_000);
+
+  it('still fails a command that floods its output budget and exits non-zero', async () => {
+    const dir = scratch();
+    const path = script(dir, 'flood-fail.mjs', FLOOD(3));
+
+    const result = await runVerificationCommand('node', [path], dir);
+
+    // The direction that must not have moved, and the answer to the sentence
+    // this pair replaced: truncation is a fact about the excerpt, never about
+    // the verdict.
+    expect(result.outcome).toBe('RAN');
+    expect(result.exitCode).toBe(3);
+    expect(result.exitCode).not.toBe(0);
     expect(result.outputTruncated).toBe(true);
   }, 60_000);
 });

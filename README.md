@@ -8531,6 +8531,96 @@ no target repository's governance: Zera's `AGENTS.md` is untouched.
    server whose tools are named differently, is a new measurement and not an
    inference from this one.
 
+## A gate is judged by its exit code, not by how much it said (M6)
+
+Two policies shared one switch. Separating them is the whole slice.
+
+| policy | what it protects | after M6 |
+| --- | --- | --- |
+| bounded observation | how much of a stream this process holds in RAM | unchanged, always on |
+| termination on excess | a runaway program reading forever | still the default; off for a **gate** |
+
+### The defect, measured in a real target repository
+
+Zera/HealthApp's canonical gate — `npm ci` then `npm run verify`, 260 Jest files
+under `--runInBand` — **exits 0** and writes **62.8 MiB to stderr**, 7.5× the
+8 MiB verification budget and almost all of it the test suite's own
+`console.log`. Under the coupled policy AO terminated that passing gate:
+
+```text
+VERIFY  UNAVAILABLE  failure=OUTPUT_LIMIT_STDERR  148778 ms
+stdout: (nothing recorded)
+stderr: (nothing recorded)
+```
+
+Both excerpts empty, because what would have been recorded is exactly what
+overflowed. The escalation therefore reached a human carrying **no diagnostic at
+all**. And it was not a bad run to retry: every attempt overflows the same way,
+so **no task in that repository could ever reach `READY_FOR_PR`** — and the
+closer a task came to passing, the less classifiable it became. A task failing
+early at `format:check` yields a small readable refusal; a task passing
+everything yields an unreadable one.
+
+AO's behaviour was deliberate and fail-closed — an unknown outcome is never a
+completion, and it escalated rather than guessed. The bound was the right idea
+attached to the wrong second effect.
+
+### The change
+
+`terminateOnOutputLimit`, defaulting to `true`, on `owned-command.ts` and
+`exec.ts`. `limitReached` returns early when it is `false`; the sink has already
+stopped retaining and is already discarding, so the only difference is that the
+target reaches its own exit code. **Exactly one caller sets it** —
+`verify/verify-command.ts` — and a test asserts that by `git grep`.
+
+Beside it, `stdoutBytesObserved` / `stderrBytesObserved`: every byte seen,
+retained and discarded, counted with `Buffer.byteLength` **before** the cut-off
+guard. `truncated` says the excerpt is a prefix; these say what it is a prefix
+of. Without them an operator cannot tell a run that went slightly over from one
+that went 7.5× over.
+
+Untouched: the byte budget itself, the 30-minute timeout, the job object, the
+containment attestation and the owned-launch accounting.
+
+### The replays
+
+Against the shipped build, through the production runner.
+
+**The real Zera gate, passing:**
+
+```text
+outcome RAN │ exitCode 0 │ failureCode null │ truncated true
+observed 62,788,484 │ retained 8,388,986 │ budget 8,388,608 per stream
+heapUsed −57 KB │ 17.9 min
+```
+
+`failureCode: null` is the line that matters: before M6 it read
+`OUTPUT_LIMIT_STDERR`. Retention is the sum across both streams — 8,388,608 on
+stderr plus 378 on stdout — and neither stream exceeded its own budget.
+
+**A noisy failing gate, still failing:**
+
+```text
+outcome RAN │ exitCode 1 │ truncated true │ observed 12,582,912 │ retained 8,388,608
+```
+
+Truncation cannot turn a failure into a success, because the verdict is the exit
+code and truncation does not touch it.
+
+### What is left, by name
+
+1. **Zera's tests are genuinely loud.** 200,000 `console.log` calls producing
+   62.8 MiB is a defect of that repository, recorded there as its own backlog
+   item. It was deliberately **not** fixed to make this slice pass: a central
+   orchestrator must not be limited to repositories whose tests happen to be
+   quiet, especially when the repository verifies correctly outside AO.
+2. **A repository still cannot declare its own budget.** The profile contract
+   has no field for one. That was considered and rejected as the fix, because
+   raising a number moves the wall rather than removing it.
+3. **The observed byte counts stop at the in-memory result.** They are not
+   written into the durable verification record, whose schema is strict and
+   would need a migration. An operator sees them in a report, not in a file.
+
 ## The Windows launch boundary (V3 slice 1)
 
 **Delivered as an isolated component.** This is slice 1 of the sequence the ADR

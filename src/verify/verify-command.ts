@@ -103,6 +103,16 @@ export interface VerificationCommandResult {
   readonly stderr: string;
   /** Whether either stream hit its byte budget. Diagnostic only — see the module note. */
   readonly outputTruncated: boolean;
+  /**
+   * Total bytes the command wrote across both streams, retained and discarded.
+   *
+   * The companion to {@link outputTruncated}, and the reason it is worth
+   * carrying: since M6 a gate is no longer killed for exceeding the retention
+   * budget, so "truncated" on its own leaves an operator unable to tell a run
+   * that went slightly over from one that went 7.5x over. Zero where nothing
+   * ran.
+   */
+  readonly outputBytesObserved: number;
   readonly failureCode: CommandFailureCode | null;
   readonly errnoCode: string | null;
   readonly durationMs: number;
@@ -130,6 +140,7 @@ function unavailable(from: Partial<VerificationCommandResult> = {}): Verificatio
     stdout: '',
     stderr: '',
     outputTruncated: false,
+    outputBytesObserved: 0,
     failureCode: null,
     errnoCode: null,
     durationMs: 0,
@@ -144,6 +155,7 @@ const RESULT_REFUSED: VerificationCommandResult = Object.freeze({
   stdout: '',
   stderr: '',
   outputTruncated: false,
+  outputBytesObserved: 0,
   failureCode: null,
   errnoCode: null,
   durationMs: 0,
@@ -161,6 +173,7 @@ export function toVerificationCommandResult(result: CommandResult): Verification
       exitCode: result.exitCode,
       signal: result.signal,
       outputTruncated: result.stdoutTruncated || result.stderrTruncated,
+      outputBytesObserved: result.stdoutBytesObserved + result.stderrBytesObserved,
       failureCode: result.failureCode,
       errnoCode: result.errnoCode,
       durationMs: result.durationMs,
@@ -174,6 +187,7 @@ export function toVerificationCommandResult(result: CommandResult): Verification
     stdout: result.stdout,
     stderr: result.stderr,
     outputTruncated: result.stdoutTruncated || result.stderrTruncated,
+    outputBytesObserved: result.stdoutBytesObserved + result.stderrBytesObserved,
     failureCode: null,
     errnoCode: null,
     durationMs: result.durationMs,
@@ -202,6 +216,30 @@ export const runVerificationCommand: VerificationRunner = async (command, args, 
       timeoutMs: VERIFICATION_COMMAND_TIMEOUT_MS,
       maxStdoutBytes: VERIFICATION_COMMAND_MAX_OUTPUT_BYTES,
       maxStderrBytes: VERIFICATION_COMMAND_MAX_OUTPUT_BYTES,
+      // **The only place in this build that asks for this** (M6).
+      //
+      // The budget above is unchanged and still enforced: past it the sink
+      // retains nothing and reports the excerpt as truncated. What is switched
+      // off here is the second effect the budget used to carry, killing the
+      // command for being verbose -- which for a *gate* destroys the one thing
+      // a gate exists to produce.
+      //
+      // Measured, in a real target repository rather than argued: Zera's
+      // canonical `npm run verify` exits 0 and writes 62.8 MiB to stderr,
+      // 7.5x this budget and almost all of it the test suite's own
+      // `console.log`. Under the coupled policy AO terminated a passing gate
+      // and recorded `OUTPUT_LIMIT_STDERR` -- an ending, not a verdict -- with
+      // both excerpts empty, because what would have been recorded was exactly
+      // what overflowed. Every retry produced the same ending, so no task in
+      // that repository could reach `READY_FOR_PR`, and the closer a task came
+      // to passing the less classifiable it became.
+      //
+      // What still bounds this call: the 30-minute timeout above, the job
+      // object that owns the process tree, and the retention budget itself. A
+      // failing gate still exits non-zero and is still `BLOCKED_VERIFY` --
+      // truncation cannot turn a failure into a success, because the verdict is
+      // the exit code and truncation does not touch it.
+      terminateOnOutputLimit: false,
     });
   } catch (error) {
     // The one thrown condition `runCommand` documents. Translated into this

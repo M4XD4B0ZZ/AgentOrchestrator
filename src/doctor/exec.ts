@@ -344,6 +344,15 @@ export interface CommandResult {
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
   /**
+   * Total bytes the child wrote to each stream, retained **and** discarded.
+   *
+   * Unbounded by the byte budget on purpose: `stdoutTruncated` says the excerpt
+   * is a prefix and this says how large the whole stream was. Zero wherever
+   * nothing ran (M6).
+   */
+  readonly stdoutBytesObserved: number;
+  readonly stderrBytesObserved: number;
+  /**
    * What became of the payload on {@link RunOptions.stdin}.
    *
    * `NOT_REQUESTED` for every command that configures no payload, which is
@@ -451,6 +460,25 @@ export interface RunOptions {
   readonly maxStdoutBytes?: number;
   /** Hard byte budget for stderr. Defaults to {@link DEFAULT_MAX_OUTPUT_BYTES}. */
   readonly maxStderrBytes?: number;
+  /**
+   * Whether exceeding a stream's byte budget also **terminates** the child.
+   * Defaults to `true`, which is what this module has always done (M6).
+   *
+   * Bounded observation and termination-on-excess were one policy until M5's
+   * dogfood measured the cost: Zera's canonical gate exits 0 and writes 62.8 MiB
+   * to stderr, so the coupled policy killed a *passing* gate and reported
+   * `OUTPUT_LIMIT_STDERR` -- an ending rather than a verdict, on every retry
+   * forever. The budget is unchanged and still enforced; only the second effect
+   * is separable, and only `verify/verify-command.ts` separates it.
+   *
+   * With `false` the sink still stops retaining at the budget and still reports
+   * `stdoutTruncated`/`stderrTruncated`; the child is simply allowed to reach
+   * its own exit code, which is what a verdict is made of. The timeout still
+   * bounds the call and the process tree is still owned. A failing command
+   * still exits non-zero and is still a failure -- truncation cannot turn a
+   * failure into a success, because truncation does not touch the exit code.
+   */
+  readonly terminateOnOutputLimit?: boolean;
   /**
    * How long termination gets before it is reported as unconfirmed.
    *
@@ -766,11 +794,26 @@ class BoundedSink {
   private readonly chunks: Buffer[] = [];
   private size = 0;
   private cutOff = false;
+  private seen = 0;
 
   constructor(private readonly limit: number) {}
 
   /** Appends a chunk; returns `true` the first time the limit is exceeded. */
   append(chunk: Buffer): boolean {
+    // Counted first, and counted for **every** chunk — including the ones this
+    // sink is about to discard. `observed` is a fact about the stream;
+    // {@link truncated} and `size` are facts about what was kept. Placing this
+    // after the `cutOff` guard below would make `observed` stop at the limit
+    // and say nothing at all, which is the one number a caller that no longer
+    // terminates on the limit actually needs (M6).
+    //
+    // `Buffer.byteLength` rather than `chunk.length`: for a `Buffer` the two
+    // are the same, and this path is reached from stream handlers whose typing
+    // this module does not own. A string would make `.length` a character
+    // count, and a byte budget compared against characters is the mistake this
+    // repository has already made once elsewhere.
+    this.seen += Buffer.byteLength(chunk);
+
     if (this.cutOff) return false;
 
     const remaining = this.limit - this.size;
@@ -790,6 +833,16 @@ class BoundedSink {
 
   get truncated(): boolean {
     return this.cutOff;
+  }
+
+  /**
+   * Total bytes seen on this stream, retained **and** discarded.
+   *
+   * Never bounded by `limit`. That is the point: it is how a caller learns that
+   * a gate emitted 62.8 MiB while the excerpt it holds is the first 8.
+   */
+  get observed(): number {
+    return this.seen;
   }
 
   text(): string {
@@ -1165,6 +1218,8 @@ export function toCommandResultFields(
       errnoCode: null,
       stdoutTruncated: owned.stdoutTruncated,
       stderrTruncated: owned.stderrTruncated,
+      stdoutBytesObserved: owned.stdoutBytesObserved,
+      stderrBytesObserved: owned.stderrBytesObserved,
       stdinDelivery: owned.stdinDelivery,
       processTreeKilled: false,
     };
@@ -1201,6 +1256,8 @@ export function toCommandResultFields(
     // still a process that started, and `'UNKNOWN'` counts as `'YES'` here
     // exactly as the ADR requires.
     started: owned.established || owned.targetStarted !== 'NO',
+    stdoutBytesObserved: owned.stdoutBytesObserved,
+    stderrBytesObserved: owned.stderrBytesObserved,
     outcome: mappedOutcome,
     exitCode: owned.exitCode,
     // Windows has no signals, and the boundary reports the child's own exit
@@ -1281,6 +1338,8 @@ export async function runCommand(
       errnoCode: null,
       stdoutTruncated: false,
       stderrTruncated: false,
+      stdoutBytesObserved: 0,
+      stderrBytesObserved: 0,
       // Nothing was spawned, so no payload was handed to anything.
       stdinDelivery: options.stdin === undefined ? 'NOT_REQUESTED' : 'FAILED',
       processTreeKilled: false,
@@ -1298,6 +1357,8 @@ export async function runCommand(
       errnoCode: null,
       stdoutTruncated: false,
       stderrTruncated: false,
+      stdoutBytesObserved: 0,
+      stderrBytesObserved: 0,
       // Nothing was spawned, so no payload was handed to anything.
       stdinDelivery: options.stdin === undefined ? 'NOT_REQUESTED' : 'FAILED',
       processTreeKilled: false,
@@ -1342,6 +1403,8 @@ export async function runCommand(
       errnoCode: null,
       stdoutTruncated: false,
       stderrTruncated: false,
+      stdoutBytesObserved: 0,
+      stderrBytesObserved: 0,
       // Nothing was spawned, so no payload was handed to anything.
       stdinDelivery: options.stdin === undefined ? 'NOT_REQUESTED' : 'FAILED',
       processTreeKilled: false,
@@ -1417,6 +1480,13 @@ export async function runCommand(
         timeoutMs,
         maxStdoutBytes,
         maxStderrBytes,
+        // Forwarded verbatim rather than re-decided here. The Windows path is
+        // the one the verification gate actually takes, so a decoupling that
+        // lived only in the POSIX branch below would be a decoupling this
+        // machine never uses (M6).
+        ...(options.terminateOnOutputLimit === undefined
+          ? {}
+          : { terminateOnOutputLimit: options.terminateOnOutputLimit }),
         // The same option under the name that layer gives it. Both mean "how long
         // termination gets before it is reported as unconfirmed".
         terminationGraceMs: killGraceMs,
@@ -1517,6 +1587,8 @@ export async function runCommand(
           signal: null,
           stdout: '',
           stderr: '',
+          stdoutBytesObserved: 0,
+          stderrBytesObserved: 0,
           failureCode: notFound ? 'EXECUTABLE_NOT_FOUND' : 'SPAWN_FAILED',
           errnoCode,
           stdoutTruncated: false,
@@ -1623,6 +1695,8 @@ export async function runCommand(
         errnoCode: null,
         stdoutTruncated: stdout.truncated,
         stderrTruncated: stderr.truncated,
+        stdoutBytesObserved: stdout.observed,
+        stderrBytesObserved: stderr.observed,
         stdinDelivery,
         processTreeKilled: treeKilled,
       });
@@ -1672,6 +1746,8 @@ export async function runCommand(
             errnoCode: null,
             stdoutTruncated: stdout.truncated,
             stderrTruncated: stderr.truncated,
+            stdoutBytesObserved: stdout.observed,
+            stderrBytesObserved: stderr.observed,
             stdinDelivery,
             processTreeKilled: treeKilled,
           }),
@@ -1700,11 +1776,16 @@ export async function runCommand(
     const timer = setTimeout(() => terminate('TIMEOUT'), timeoutMs);
     timer.unref?.();
 
+    // `!== false`, so an absent option behaves exactly as before and only a
+    // caller that says `false` out loud gets the decoupled behaviour. The sink
+    // keeps draining and discarding either way; what this decides is solely
+    // whether the child is killed for being verbose (M6).
+    const terminateOnLimit = options.terminateOnOutputLimit !== false;
     child.stdout?.on('data', (chunk: Buffer) => {
-      if (stdout.append(chunk)) terminate('LIMIT_STDOUT');
+      if (stdout.append(chunk) && terminateOnLimit) terminate('LIMIT_STDOUT');
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      if (stderr.append(chunk)) terminate('LIMIT_STDERR');
+      if (stderr.append(chunk) && terminateOnLimit) terminate('LIMIT_STDERR');
     });
 
     child.on('error', (error: NodeJS.ErrnoException) => {
@@ -1721,6 +1802,8 @@ export async function runCommand(
           errnoCode: safeErrnoCode(error),
           stdoutTruncated: stdout.truncated,
           stderrTruncated: stderr.truncated,
+          stdoutBytesObserved: stdout.observed,
+          stderrBytesObserved: stderr.observed,
           stdinDelivery,
           processTreeKilled: false,
         }),

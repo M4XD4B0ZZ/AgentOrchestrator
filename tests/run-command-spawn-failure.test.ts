@@ -337,6 +337,8 @@ describe.skipIf(IS_WINDOWS)('deterministic synchronous spawn() throw', () => {
       errnoCode: 'UNKNOWN',
       stdoutTruncated: false,
       stderrTruncated: false,
+      stdoutBytesObserved: 0,
+      stderrBytesObserved: 0,
       processTreeKilled: false,
     });
     expect((result as unknown as { cause?: unknown }).cause).toBeUndefined();
