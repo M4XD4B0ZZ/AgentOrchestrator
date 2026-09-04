@@ -319,3 +319,59 @@ export function renderAttentionStore(listing: AttentionListing): string {
 
   return `${lines.join('\n')}\n\n`;
 }
+
+/* ══════════ readiness, printed before a recurring run goes quiet ══════════ */
+
+/**
+ * One sentence per notification-readiness state. Total; pinned by test.
+ *
+ * These are about the *future* and the push sentences above are about the past,
+ * which is why they are a second table rather than a reuse of the first. An
+ * operator reading `NOT_CONFIGURED` here has not yet missed anything; the same
+ * word in the push report means something already went unsent.
+ */
+export const NOTIFICATION_READINESS_SENTENCES = {
+  ARMED:
+    'a notification endpoint is configured, so anything that needs you during this run is sent ' +
+    'to it as soon as the pass that found it ends',
+  NOT_CONFIGURED:
+    'no notify.yaml exists under your orchestrator home, so nothing will be sent anywhere. ' +
+    'Items are still recorded and readable with `agent-loop attention`.',
+  CONFIG_UNUSABLE:
+    'a notification configuration exists and could not be used, so nothing will be sent ' +
+    'anywhere. Items are still recorded and readable with `agent-loop attention`.',
+} as const;
+
+export type NotificationReadiness = keyof typeof NOTIFICATION_READINESS_SENTENCES;
+
+/**
+ * What a waiting invocation prints **before** its first pass.
+ *
+ * The reason this exists is a promise the code made and did not keep. A
+ * recurring invocation prints nothing until it ends (`L-M3-02-10`), and the only
+ * place the notifier's state reached an operator was {@link renderAttention},
+ * written after the scheduler returned — so on a run that waits, "an operator
+ * with a broken notify.yaml is told while they are still standing there" was
+ * true of the *construction* and false of the *telling*. It was measured false:
+ * a run that began at 07:52 would not have said `NOT_CONFIGURED` until it ended.
+ *
+ * The refusal code is printed and nothing else is. `notify-config.ts` refuses a
+ * file without ever carrying the file, the path, the endpoint or the token into
+ * its refusal, and `NOTIFY_CONFIG_REFUSALS` is that closed vocabulary; printing
+ * the code is therefore printing a word from a fixed list, not a fragment of
+ * somebody's configuration.
+ */
+export function renderNotificationReadiness(notifier: {
+  readonly state: NotificationReadiness;
+  readonly configCode: string | null;
+}): string {
+  // The code is appended to the state rather than given its own row, so the one
+  // thing an operator scans for — the word after `Notifications` — is on one
+  // line whichever state they are in.
+  const value =
+    notifier.state === 'CONFIG_UNUSABLE' && notifier.configCode !== null
+      ? `${notifier.state}  ${notifier.configCode}`
+      : notifier.state;
+
+  return `${line('Notifications', value)}\n  ${NOTIFICATION_READINESS_SENTENCES[notifier.state]}\n`;
+}

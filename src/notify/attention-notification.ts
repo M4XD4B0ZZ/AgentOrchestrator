@@ -175,10 +175,15 @@ export interface AttentionNotifier {
 /**
  * Builds the notifier for this invocation, reading the operator's configuration.
  *
- * Called **before** the loop, so an operator with a broken configuration is told
- * while they are still standing there rather than by the message that never
- * arrives eight hours later — the placement `notification.ts` chose for the same
- * reason.
+ * Called **before** the loop — the placement `notification.ts` chose for the
+ * same reason.
+ *
+ * Being called early is not by itself being *told*, and this comment used to
+ * claim it was. A recurring invocation prints nothing until it ends, so a
+ * notifier built at minute zero and reported at hour eight told nobody anything
+ * while they were still standing there. What closes the gap is the caller:
+ * `cli/repositories-command.ts` writes `renderNotificationReadiness(...)` before
+ * it enters the loop, and this factory's state is what that line reads.
  *
  * The transport factory is an internal seam and grants nothing: an unconfigured
  * machine produces `NOT_CONFIGURED` whatever is passed here, because the state

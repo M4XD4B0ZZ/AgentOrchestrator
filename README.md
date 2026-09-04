@@ -7592,6 +7592,28 @@ file can set, so a target repository cannot place this file whatever it contains
 The state is decided **before** the run, above the lease line, because an
 operator who is about to walk away has to learn now that nothing will reach them.
 
+Deciding it early is not the same as saying it early, and for a long time only
+one of the two commands did both. `agent-loop block` printed the state the line
+after it built the notifier; the recurring `agent-loop repositories
+--wait-for-reset` built it just as early and then said nothing, because a
+recurring invocation prints nothing at all until it ends — so on a run that
+waited, "immediately" meant "when the run is over", which is the one moment the
+sentence above exists to rule out. It was measured false on a real overnight run.
+A waiting invocation now writes a `Notifications` line before its first pass:
+
+```text
+Notifications: ARMED
+  a notification endpoint is configured, so anything that needs you during this
+  run is sent to it as soon as the pass that found it ends
+```
+
+`NOT_CONFIGURED` and `CONFIG_UNUSABLE <closed code>` are the other two readings.
+The refusal code is the only thing printed beside the state — never the
+endpoint, never the topic, never the token — because that code is a word from
+`NOTIFY_CONFIG_REFUSALS` and the refusal never carried the file into itself. An
+invocation that did not ask to wait reads no configuration and prints no such
+line, which is the same promise it already kept about the store.
+
 ### Bounded egress
 
 `https://` to a host the operator chose; plain `http://` only to the literal

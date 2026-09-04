@@ -188,7 +188,11 @@ import {
 import type { PathProvider } from '../config/internal/path-provider.js';
 import { RUN_THREW, type RunCondition } from '../core/run-attention.js';
 import { settleAttention } from '../notify/attention-outbox.js';
-import { renderAttention, type AttentionReport } from './render-attention.js';
+import {
+  renderAttention,
+  renderNotificationReadiness,
+  type AttentionReport,
+} from './render-attention.js';
 import {
   driveScheduler,
   isUsableCycleBound,
@@ -499,9 +503,13 @@ export async function reportRepositories(
   // one the wake scan already keeps, and it is kept the same way — by not being
   // reached.
   //
-  // The notifier is built **before** the loop, so an operator with a broken
-  // notify.yaml is told while they are still standing there rather than eight
-  // hours later by the message that never arrives.
+  // The notifier is built **before** the loop, and — since this slice — its
+  // state is *printed* before the loop too. Building it early was never the
+  // promise; being told was. A recurring invocation prints nothing until it
+  // ends (`L-M3-02-10`), so until now an operator with a broken notify.yaml
+  // learned of it from the report at the end of an eight-hour run, which is
+  // exactly the "eight hours later" this comment claimed to prevent. It was
+  // measured false on a real overnight run before it was fixed.
   //
   // It lives in this file rather than in the scheduler because the scheduler is
   // pinned against knowing about notification at all, and the pin is right: what
@@ -512,8 +520,26 @@ export async function reportRepositories(
 
   const attentionReports: AttentionReport[] = [];
   const notifier = grant.wait.wait
-    ? (seams.attentionNotifier ?? createAttentionNotifier())
+    ? // The same home the store below is pointed at. The seam used to reach the
+      // outbox and not the configuration, so a test could put the records in a
+      // scratch directory while the notifier read the developer's own
+      // notify.yaml — two homes in one invocation, and a readiness line that
+      // described a machine nobody was testing. In production both are the OS
+      // provider, which is what passing nothing means.
+      (seams.attentionNotifier ?? createAttentionNotifier(seams.pathProvider))
     : null;
+
+  // The one write that happens before the loop, and only for a run that waits.
+  //
+  // It carries the registry head with it because that head is otherwise printed
+  // at the very end as well: an operator about to lose the console for hours
+  // gets the registry it resolved and the answer to "will anything reach me"
+  // together, and the final write below drops the head it has already had.
+  //
+  // A plain `repositories --attended` reaches none of this. `notifier` is null
+  // there, no configuration is read and this line is not written, so that
+  // invocation's output is unchanged down to the byte.
+  if (notifier !== null) write(`${head}\n${renderNotificationReadiness(notifier)}`);
 
   const observePass = async ({ run, repositories: driven }: PassObservation): Promise<void> => {
     if (notifier === null) return;
@@ -630,7 +656,11 @@ export async function reportRepositories(
   // them for something. `null` when there is nothing to ask — a run over
   // repositories that all needed nobody gains no section.
   const attention = renderAttention(attentionReports);
-  write(`${head}\n${renderScheduler(scheduled)}${attention ?? ''}\n`);
+  // The head, unless the readiness write above already printed it. `notifier` is
+  // non-null exactly when this invocation waited, so this is the same condition
+  // as that write and not a second judgement about it.
+  const heading = notifier === null ? `${head}\n` : '';
+  write(`${heading}${renderScheduler(scheduled)}${attention ?? ''}\n`);
   return exitCodeForScheduler(scheduled);
 }
 
