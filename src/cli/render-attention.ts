@@ -34,6 +34,7 @@
 
 import { USAGE_LIMIT_CONTINUATION_SENTENCES } from '../core/usage-limit-continuation.js';
 import type { AttentionPushResult } from '../notify/attention-notification.js';
+import type { NotifyConfigRefusal } from '../notify/notify-config.js';
 import type { AttentionSettlement } from '../notify/attention-outbox.js';
 import type { AttentionListing, AttentionRecord } from '../notify/attention-store.js';
 import { line } from './render-attended-run.js';
@@ -76,6 +77,26 @@ export const ATTENTION_PUSH_SENTENCES = {
     'Nothing reached the configured endpoint. The items above are recorded and discoverable ' +
     'with `agent-loop attention`, and are tried again on the next pass.',
 } as const;
+
+/**
+ * What a failed send across the whole run means. Pinned by test.
+ *
+ * It says "attempts" rather than "items" on purpose: one item refused on three
+ * cycles and accepted on the fourth is three failed attempts and no lost
+ * notification, and the sentence must not read as though something never
+ * arrived when the retry is exactly what this design relies on.
+ */
+export const DELIVERY_ACROSS_RUN_SENTENCE =
+  'Some attempts during this run did not reach the endpoint. An item that arrived later carries ' +
+  'a receipt and is not listed above; one that never arrived is still open above if its ' +
+  'condition still holds, and was removed with its record if the condition cleared — so a run ' +
+  'that ends here may have had something to say that nobody heard.';
+
+/** What the per-pass announcement bound means. Pinned by test. */
+export const DELIVERY_BOUND_SENTENCE =
+  'One pass offers a bounded number of items to the endpoint, so a large backlog goes out over ' +
+  'several passes. The remainder keeps its records and carries no receipt, and the next pass ' +
+  'offers it — unless this was the last pass, in which case nobody was told about it at all.';
 
 /**
  * One item, printed.
@@ -211,12 +232,45 @@ export function renderAttention(reports: readonly AttentionReport[]): string | n
   }
 
   const push = last.push;
-  rows.push(
-    '',
-    line('Delivery', push.outcome),
-    `  ${ATTENTION_PUSH_SENTENCES[push.outcome]}`,
-  );
-  if (push.failures.length > 0) rows.push(line('Send failures', push.failures.join(', ')));
+  rows.push('', line('Delivery', push.outcome), `  ${ATTENTION_PUSH_SENTENCES[push.outcome]}`);
+
+  // Failures are accumulated over every pass, and the outcome above is the last
+  // pass's. Both used to be read from `reports.at(-1)`, and that erased an
+  // outage completely: an endpoint down for a whole night failed on every cycle,
+  // then the last cycle found nothing left to send, so the report ended on
+  // `NOTHING_TO_SEND` — "Nothing new was raised, so nothing was sent." — with no
+  // failure row at all. If the conditions had cleared meanwhile their records
+  // were gone too, so `agent-loop attention` said nothing either, and the run
+  // that printed `Notifications: ARMED` at minute zero finished without one word
+  // contradicting it. A report that cannot contradict the promise made before
+  // the silence is worse than no report.
+  const attempted = reports.reduce((total, report) => total + report.push.attempted, 0);
+  const arrived = reports.reduce((total, report) => total + report.push.delivered, 0);
+  if (attempted > arrived) {
+    const codes = [...new Set(reports.flatMap((report) => [...report.push.failures]))].sort();
+    rows.push(
+      line('Failed sends', `${String(attempted - arrived)} of ${String(attempted)} this run`),
+      `  ${DELIVERY_ACROSS_RUN_SENTENCE}`,
+    );
+    if (codes.length > 0) rows.push(line('Send failures', codes.join(', ')));
+  }
+
+  // The backlog one pass could not offer. `settleAttention` bounds a single
+  // pass at `MAX_ANNOUNCED_ITEMS_PER_SETTLE` and records the true count beside
+  // it, saying of that count that "the bound must never make that number look
+  // smaller than it is" — and then no renderer printed it. Sixteen items pushed
+  // out of twenty read as `DELIVERED`, "Every item still awaiting delivery
+  // reached the configured endpoint", beside `Open : 20`. On any pass but the
+  // last the remainder goes out next time; on the last one it never does.
+  const backlog = last.settlement.undeliveredTotal;
+  const offered = last.settlement.undelivered.length;
+  if (backlog > offered) {
+    rows.push(
+      line('Not offered', `${String(backlog - offered)} of ${String(backlog)} awaiting delivery`),
+      `  ${DELIVERY_BOUND_SENTENCE}`,
+    );
+  }
+
   if (push.configCode !== null) rows.push(line('Config', push.configCode));
 
   rows.push('', ATTENTION_TRAILER, '');
@@ -318,4 +372,68 @@ export function renderAttentionStore(listing: AttentionListing): string {
   }
 
   return `${lines.join('\n')}\n\n`;
+}
+
+/* ══════════ readiness, printed before a recurring run goes quiet ══════════ */
+
+/**
+ * One sentence per notification-readiness state. Total; pinned by test.
+ *
+ * These are about the *future* and the push sentences above are about the past,
+ * which is why they are a second table rather than a reuse of the first. An
+ * operator reading `NOT_CONFIGURED` here has not yet missed anything; the same
+ * word in the push report means something already went unsent.
+ */
+export const NOTIFICATION_READINESS_SENTENCES = {
+  ARMED:
+    'a notification endpoint is configured, so anything that needs you during this run is sent ' +
+    'to it as soon as the pass that found it ends',
+  NOT_CONFIGURED:
+    'no notify.yaml exists under your orchestrator home, so nothing will be sent anywhere. ' +
+    'Items are still recorded and readable with `agent-loop attention`.',
+  CONFIG_UNUSABLE:
+    'a notification configuration exists and could not be used, so nothing will be sent ' +
+    'anywhere. Items are still recorded and readable with `agent-loop attention`.',
+} as const;
+
+export type NotificationReadiness = keyof typeof NOTIFICATION_READINESS_SENTENCES;
+
+/**
+ * What a waiting invocation prints **before** its first pass.
+ *
+ * The reason this exists is a promise the code made and did not keep. Until this
+ * function a recurring invocation printed nothing until it ended, and the only
+ * place the notifier's state reached an operator was {@link renderAttention},
+ * written after the scheduler returned — so on a run that waits, "an operator
+ * with a broken notify.yaml is told while they are still standing there" was
+ * true of the *construction* and false of the *telling*.
+ *
+ * "Told at the end" is the charitable reading of what it did, and it is not the
+ * whole of it. {@link renderAttention} returns `null` when nothing was open,
+ * raised, resolved, noted, refused, foreign or unreadable, so a run that needed
+ * nobody printed the state **never**; and `pushAttentionItems` answers
+ * `NOTHING_TO_SEND` before it looks at `notifier.state` at all, so even a
+ * rendered section said nothing about the configuration on a pass with no
+ * pending items. An operator could therefore run an unattended night against an
+ * unusable `notify.yaml` and be told nothing, at any point, by anything.
+ *
+ * The refusal code is printed and nothing else is. `notify-config.ts` refuses a
+ * file without ever carrying the file, the path, the endpoint or the token into
+ * its refusal, and `NOTIFY_CONFIG_REFUSALS` is that closed vocabulary; printing
+ * the code is therefore printing a word from a fixed list, not a fragment of
+ * somebody's configuration.
+ */
+export function renderNotificationReadiness(notifier: {
+  readonly state: NotificationReadiness;
+  readonly configCode: NotifyConfigRefusal | null;
+}): string {
+  // The code is appended to the state rather than given its own row, so the one
+  // thing an operator scans for — the word after `Notifications` — is on one
+  // line whichever state they are in.
+  const value =
+    notifier.state === 'CONFIG_UNUSABLE' && notifier.configCode !== null
+      ? `${notifier.state}  ${notifier.configCode}`
+      : notifier.state;
+
+  return `${line('Notifications', value)}\n  ${NOTIFICATION_READINESS_SENTENCES[notifier.state]}\n`;
 }
