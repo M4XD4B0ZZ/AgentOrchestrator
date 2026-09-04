@@ -58,6 +58,9 @@ export const CONCLUSION_SENTENCES: Readonly<Record<RunPlanConclusion, string>> =
     'No durable state exists for this task. Starting a task is not offered by this build.',
   TASK_COMPLETED: 'This task is finished (READY_FOR_PR) and is handed to a human from here.',
   TASK_ABORTED: 'This task was aborted. Nothing continues from an aborted task.',
+  TASK_OPERATOR_RESOLVED:
+    'An operator ended this task themselves. Nothing continues from it, and the record ' +
+    'claims nothing about the work: this orchestrator did not verify, review or deliver it.',
   RECONCILED_IN_FLIGHT:
     'The durable record agrees with observed reality. A human may continue this task.',
   TASK_PARKED: 'This task is durably parked in a blocking state and needs an operator.',

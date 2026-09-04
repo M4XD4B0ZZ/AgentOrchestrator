@@ -160,6 +160,9 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
     COMPLETED:
       'The task reached READY_FOR_PR. Terminal: a human opens the pull request from here.',
     TASK_ABORTED: 'The task was already ABORTED. Nothing was run.',
+    TASK_OPERATOR_RESOLVED:
+      'An operator had already ended this task themselves. Terminal, and it claims nothing \n' +
+      '  about the work: this orchestrator did not verify it, review it or deliver it.',
     BLOCKED_USAGE_LIMIT:
       'A subscription quota is exhausted. A pause rather than a failure, and this run stops on\n' +
       '  it. Waiting for the reset is a separate authority and is never implied by the block: it\n' +

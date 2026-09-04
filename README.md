@@ -964,10 +964,19 @@ Regular: `CREATED`, `REPOSITORY_RESOLVED`, `CONFIG_VALIDATED`, `AUTH_PREFLIGHT`,
 
 Blocking / terminal: `BLOCKED_AUTH`, `BLOCKED_USAGE_LIMIT`, `BLOCKED_VERIFY`,
 `SCOPE_VIOLATION`, `RESUME_STATE_DIVERGED`, `HUMAN_DECISION_REQUIRED`,
-`ABORTED`.
+`ABORTED`, `OPERATOR_RESOLVED`.
 
-`READY_FOR_PR` and `ABORTED` are **terminal** — they have no outgoing
-transitions. Every other state has at least one documented way out.
+`READY_FOR_PR`, `ABORTED` and `OPERATOR_RESOLVED` are **terminal** — they have no
+outgoing transitions. Every other state has at least one documented way out.
+
+`OPERATOR_RESOLVED` (M8) is the one an *operator* writes, with `agent-loop
+resolve --attended`, and only out of `HUMAN_DECISION_REQUIRED` or
+`BLOCKED_VERIFY` — the two states in which the loop stopped and asked them for a
+decision. It says a person ended the task and nothing else: not that the work was
+verified, reviewed, delivered or merged. What it overrode is recorded beside it,
+in `operatorResolution.closedFrom`, so a hand-ended task can never be read as a
+machine's conclusion, and no pull request is opened from it — delivery still
+gates on `READY_FOR_PR` alone.
 
 Which blocking states can be continued, and how, is declared in
 `src/core/resume-policy.ts`:
@@ -2871,7 +2880,11 @@ than as "no diagnostics".
 
 None of it is authority. It never says verification would fail now, never says
 remediation is authorised, never authorises a retry, and **its absence proves
-nothing** — nothing writes a record for a pass.
+nothing** — nothing adds an entry to this *failure history* for a pass. Since M8
+a pass has a durable record of its own (`verification-passes/<taskId>.json`),
+which is what lets a reviewer be told that verification passed on the commit the
+tree is at; the two stores answer different questions and neither absence is
+evidence about the other.
 
 ### What V1-06 is not
 
@@ -2924,7 +2937,7 @@ so exactly one write may be made per load.
 
 ### Terminal is judged before the world is
 
-A `READY_FOR_PR` or `ABORTED` task stops the run whatever Git says. It has no
+A `READY_FOR_PR`, `ABORTED` or `OPERATOR_RESOLVED` task stops the run whatever Git says. It has no
 outgoing transition, so nothing could run in any case — and asking anyway
 invites "your completed task diverged", which is noise about something nobody
 will continue. `classifyResume` orders itself the same way. The gate is reached
@@ -7895,9 +7908,13 @@ all of these are true:
 6. A tautological predecessor is refused by name, and the legal chain still
    starts.
 7. The reviewer receives body, truncation flag and round, proven by the
-   differential payload control; absence parks rather than degrading.
-8. The remediation hand-off survives the budget boundary, with the
-   byte-identical no-boundary variant green.
+   differential payload control; absence parks rather than degrading. Since M8
+   it also receives what this orchestrator measured about verification, in AO's
+   own voice and above the repository's text.
+8. The remediation hand-off survives the budget boundary, with the no-boundary
+   variant identical from the findings heading down — everything above it is the
+   M8 briefing, which carries measured facts and differs between runs by
+   construction.
 9. The no-effect controls are inverted rather than deleted, and the deliberate
    scope-violation and lease-loss cases stay green.
 10. **G5 residual closed.** The dogfood's literal CLI refusal strings match the
@@ -14010,6 +14027,150 @@ away. U4 is about `block` run ids, which this path does not use.
 
 See the decision record:
 [The final multi-project dogfood, and what it settles](docs/decisions/2026-09-02-adr-m3-final-unattended-dogfood.md).
+
+## What the agents are told, and how a task ends (M8)
+
+`RESOLVER-V3-054` is the task that produced this slice, and the whole of it is
+worth stating because every part of M8 is a consequence.
+
+It was a real task, in a real repository, driven by this build. It burned all
+three of its review rounds and escalated, on a finding the reviewer was right to
+raise every time: `verification.blocking-checks-not-passed`. **Verification had
+passed, twice.** Nothing recorded it — the verify step advanced to `REVIEWING`
+and dropped the report on the floor — so the only statement about verification
+anywhere was a sentence an earlier writer had left in a handoff file saying
+`verify` exited 1. That sentence was stale prose about a commit that no longer
+existed, it was a declared context source, and it was the best evidence in the
+tree. The writer could not correct it either: it holds `Read Edit Write Glob
+Grep` and no shell, so it could neither run the gate nor read its result.
+
+Three of the five findings that kept the task blocked demanded a command —
+`npm run verify`, `git status`, `codegraph init` — and the agent asked to close
+them could not run one. It said so, in its own handoff, and the loop escalated
+anyway.
+
+### Verification truth is evidence, never prose and never a state
+
+A pass now has a durable record of its own:
+`<runtime>/verification-passes/<taskId>.json`, one document per task,
+latest-wins, holding an instant, the commit it measured, the profile digest and
+one entry per passing phase. It is a **separate store** from the failure history
+and not a field on `TaskState`: the failure history is bounded at six entries and
+*refuses* the seventh rather than evicting, so spending it on passes would let a
+task that passed six times become one whose next genuine failure cannot be
+recorded.
+
+Nor can a pass be inferred from the workflow. `REVIEWING` is reachable from
+`HUMAN_DECISION_REQUIRED` and from `BLOCKED_USAGE_LIMIT` as well as from
+`VERIFYING`, and a resume clears the resume point — so a resumed review is
+byte-indistinguishable from one a passing verify step produced. "It is in
+`REVIEWING`, so it passed" was never derivable, and this build does not derive
+it.
+
+What a reader gets is a five-member statement, not a boolean, because the five
+send it to five different places: `PASSED_ON_THIS_TREE` (this commit, this
+profile), `FAILED_ON_THIS_TREE`, `PASSED_ELSEWHERE` (with which of the commit or
+the profile differed), `NOT_OBSERVABLE` (Git could not say what the tree is at)
+and `NOT_MEASURED`. A failure for the same commit outranks a pass unless the pass
+is *provably* newer; an unorderable pair resolves to the failure, because a build
+that reports good news it cannot prove is the latest word is the failure this
+slice exists to end.
+
+Worktree cleanliness is **reported and not part of the predicate**, and that is a
+deliberate departure: a passing gate routinely leaves untracked output behind,
+and demanding a clean tree would degrade the ordinary passing path to "not on
+this tree" — the incident reproduced by its own fix.
+
+### AO does not wait to be asked
+
+The writer still has no shell, and gains none. Instead every agent's briefing now
+opens with what this orchestrator measured for it: the verification statement,
+the CodeGraph index status of *its* worktree, and the paths this task's work has
+changed, as the scope guard measured them. No request channel, no marker
+protocol, no extra launch, no new argv token — the facts are ones the loop
+already produced for its own purposes, rendered into a briefing that was going to
+be sent anyway. Nothing in the block is foreign text, so nothing in it is fenced;
+the one part that comes from Git, the changed-path list, is made line-safe at the
+source.
+
+The block sits **above** the repository's own text in every payload, because the
+clamp cuts the tail and because the orchestrator's frame belongs above the
+repository's.
+
+### The capability is judged in the tree the agent opens
+
+`probeCodegraphCapability` was always path-parametric and its one caller always
+passed the canonical repository root. The writer works in a task worktree — a
+sibling directory — and `.codegraph/` is ignored through `.git/info/exclude`, a
+file in the **common** Git directory: every linked worktree inherits the rule and
+none inherits the directory. Measured on the machine this was written on: 0 of 12
+worktrees carried an index while the root did.
+
+The execution brief now carries the worktree's own verdict, and the three steps
+that consume a brief — context loading, implement, review — gate on it, not one
+of them, because `HUMAN_DECISION_REQUIRED → IMPLEMENTING` is a declared edge that
+a resume takes directly.
+
+That correction alone would make every `codegraph: REQUIRED` repository
+permanently unrunnable, so AO also **provisions** the index: once per invocation,
+in the worktree, only where the profile requires the capability, only when the
+index is absent, only when Git ignores the artefact in that tree, and only with a
+command the **operator** named in
+`<user profile>/.agent-orchestrator/mcp-capabilities.yaml`. Not the repository,
+which would be a repository choosing what this machine executes; and not the
+writing agent, which would let it mint the proof of the capability AO fails
+closed on. The effect is measured by probing the directory afterwards, never
+taken from an exit code.
+
+### An operator can end a task, and say so
+
+Before M8 nothing in `src/` wrote `ABORTED`, and `READY_FOR_PR` is deliberately
+withheld from `HUMAN_DECISION_REQUIRED` because approving work must go through a
+real review pass. A task an operator finished by hand therefore stayed blocked
+for ever, and its attention item stayed open for ever — which is what happened to
+`RESOLVER-V3-054` after its work had been delivered and merged.
+
+`agent-loop resolve --repository <path> --task <id> --attended` writes a third
+terminal state, `OPERATOR_RESOLVED`. It claims exactly one thing: a person ended
+this task. Not that the work was verified, reviewed, delivered or merged — AO
+cannot know any of those, and there is deliberately **no commit argument**,
+because `rev-parse --verify` exits 0 for any 40-hex string, the spelling that
+would peel to a commit cannot be spawned by this build at all, and AO does not
+fetch — so a guard built on one would refuse honest closures and admit fabricated
+ones.
+
+Four things keep it from being a force-complete switch: only two source states
+(`HUMAN_DECISION_REQUIRED` and `BLOCKED_VERIFY`, the two in which the loop
+stopped and asked); its own terminal state, invisible to the delivery machinery;
+provenance taken from the record rather than from an argument
+(`operatorResolution.closedFrom`), with the state and the provenance
+biconditional in the contract; and `--attended` plus an explicit `--task`.
+
+It is its own verb rather than a fourth flag on `run`, and that is measured
+rather than tidy: `run`'s ladder puts an auth preflight, an MCP capability
+preflight and a full reconciliation in front of every write, and each of those
+refuses in exactly the situation this command exists for — the login is broken,
+the repository requires a capability, or the worktree was removed once the work
+was delivered.
+
+The block ledger gained a matching disposition, `RESOLVED`, and that is not
+decoration either. `firstUnprovenClaim` re-proves **every** entry on any write
+that moves a disposition; a `BLOCKED` entry whose record has become terminal can
+never be proven again, and no other disposition would accept it. Without
+`RESOLVED`, one operator decision would have left every remaining task in that
+run unsettleable, unparkable and unabandonable. `COMPLETE` accepts it beside
+`SETTLED`, because a block whose tasks are all finished — some by this
+orchestrator, some by the person it escalated to — has nothing left to do.
+
+### What M8 does not do
+
+It starts no new kind of process for an agent, grants the writer no tool it did
+not have, and adds no automatic behaviour: the operator's decision is the only
+thing that writes `OPERATOR_RESOLVED`, and the only command AO gained the right
+to run is one the operator wrote down. A task ended this way opens no pull
+request. A dependent task still requires its predecessor `SETTLED` — an
+operator's word unblocks the ledger, not the next task's start — and that is
+stated here rather than discovered.
 
 ## Not implemented yet
 

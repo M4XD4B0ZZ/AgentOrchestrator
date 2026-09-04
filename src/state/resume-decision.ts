@@ -95,6 +95,8 @@ export const RESUME_CLASSIFICATIONS = [
   'TASK_COMPLETE',
   /** `ABORTED`: given up on, irreversibly. */
   'TASK_ABORTED',
+  /** `OPERATOR_RESOLVED`: an operator ended it themselves. Nothing to resume. */
+  'TASK_OPERATOR_RESOLVED',
   /** Persisted state and observed reality disagree, or reality is unreadable. */
   'STATE_DIVERGED',
   /** Blocking, and only an operator may continue it. */
@@ -187,6 +189,7 @@ function continuationFor(
   switch (classification) {
     case 'TASK_COMPLETE':
     case 'TASK_ABORTED':
+    case 'TASK_OPERATOR_RESOLVED':
       return 'TERMINAL';
     case 'STATE_DIVERGED':
     case 'AUTOMATIC_RESUME_REFUSED':
@@ -273,7 +276,16 @@ export function classifyResume(
 
   // --- 1. Terminal states are not resume questions ------------------------
   if (isTerminalState(state.state)) {
-    return decision(state.state === 'READY_FOR_PR' ? 'TASK_COMPLETE' : 'TASK_ABORTED', null, []);
+    // Written out rather than as a ternary over one comparison: a third terminal
+    // state falling into an `else` that says "aborted" is exactly the silent
+    // mislabelling this vocabulary exists to prevent.
+    const terminal =
+      state.state === 'READY_FOR_PR'
+        ? 'TASK_COMPLETE'
+        : state.state === 'OPERATOR_RESOLVED'
+          ? 'TASK_OPERATOR_RESOLVED'
+          : 'TASK_ABORTED';
+    return decision(terminal, null, []);
   }
 
   // --- 2. The record must match the world ---------------------------------

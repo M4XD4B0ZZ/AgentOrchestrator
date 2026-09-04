@@ -135,6 +135,34 @@ export const TASK_DISPOSITIONS = [
    * the block uncompletable rather than silently forgivable.
    */
   'ABANDONED',
+  /**
+   * Ended by an operator, on the strength of a task state that reached
+   * `OPERATOR_RESOLVED`.
+   *
+   * Terminal, evidence-backed, and deliberately neither `SETTLED` nor
+   * `ABANDONED`. `SETTLED` is this build's own claim that the work finished —
+   * proved against `READY_FOR_PR`, which demands a completed review round, a
+   * resolved commit and a clean checkpoint — and an operator's decision proves
+   * none of that. `ABANDONED` says the task was given up on, which is the
+   * opposite of what happened.
+   *
+   * ── Why it had to exist at all ─────────────────────────────────────────
+   *
+   * Without it, an operator ending a task outside the loop **bricks the whole
+   * ledger**. `firstUnprovenClaim` re-proves every entry on any write that moves
+   * a disposition, and a `BLOCKED` entry is proved by `getStateKind(record) ===
+   * 'BLOCKING'`. A record that has become terminal fails that for ever, and no
+   * other disposition would accept it — `settleBlockTask` requires
+   * `READY_FOR_PR`, `abandonBlockTask` requires `ABORTED`, `parkBlockTask`
+   * requires a blocking kind. One operator decision would then make every
+   * remaining task in that run unsettleable, unparkable and unabandonable.
+   *
+   * `COMPLETE` accepts it beside `SETTLED`, because a block whose tasks are all
+   * finished — some by this orchestrator, some by the person it escalated to —
+   * has nothing left to do, and refusing to say so would leave the run
+   * permanently incomplete for having asked a human and been answered.
+   */
+  'RESOLVED',
 ] as const;
 
 export type TaskDisposition = (typeof TASK_DISPOSITIONS)[number];
@@ -152,6 +180,7 @@ export const EVIDENCE_BACKED: ReadonlySet<TaskDisposition> = new Set<TaskDisposi
   'SETTLED',
   'BLOCKED',
   'ABANDONED',
+  'RESOLVED',
 ]);
 
 
@@ -437,7 +466,7 @@ export const BlockRunLedgerSchema = BlockRunLedgerObjectSchema.superRefine((valu
     if (!claimsOutcome && task.evidenceRevision !== null) {
       issue(
         ['tasks', index, 'evidenceRevision'],
-        'Only a SETTLED, BLOCKED or ABANDONED entry may carry evidence.',
+        'Only a SETTLED, BLOCKED, ABANDONED or RESOLVED entry may carry evidence.',
       );
     }
     // A result commit is a claim about finished work. Nothing else may carry
@@ -489,8 +518,10 @@ export const BlockRunLedgerSchema = BlockRunLedgerObjectSchema.superRefine((valu
   // entries themselves are supported is a question about the task records,
   // answered in `block-evidence.ts` before any of this is written.
   if (value.stopReason === 'COMPLETE' &&
-      value.tasks.some((task) => task.disposition !== 'SETTLED')) {
-    issue(['stopReason'], 'COMPLETE requires every task to be SETTLED.');
+      value.tasks.some(
+        (task) => task.disposition !== 'SETTLED' && task.disposition !== 'RESOLVED',
+      )) {
+    issue(['stopReason'], 'COMPLETE requires every task to be SETTLED or RESOLVED.');
   }
   if (value.stopReason === 'TASK_BLOCKED' &&
       !value.tasks.some((task) => task.disposition === 'BLOCKED')) {
@@ -774,9 +805,10 @@ const REPROVED_ON_MOVE: readonly ReprovedEntryField[] = Object.freeze(
  * The dispositions each disposition may move to.
  *
  * Read it as a one-way street. Every forward move is one the progress API can
- * justify from a task record; nothing moves back, and nothing leaves `SETTLED`
- * or `ABANDONED` — a task that has finished, or that has been given up on, has
- * a past that a later writer does not get to revise.
+ * justify from a task record; nothing moves back, and nothing leaves `SETTLED`,
+ * `ABANDONED` or `RESOLVED` — a task that has finished, that has been given up
+ * on, or that an operator has ended has a past that a later writer does not get
+ * to revise.
  *
  * `BLOCKED` is the one non-terminal outcome: a human resolves it and the task
  * either finishes or is abandoned. It deliberately does not lead back to
@@ -786,11 +818,14 @@ const REPROVED_ON_MOVE: readonly ReprovedEntryField[] = Object.freeze(
  */
 const LEGAL_SUCCESSION: Readonly<Record<TaskDisposition, readonly TaskDisposition[]>> =
   Object.freeze({
-    PLANNED: Object.freeze(['ACTIVE', 'SETTLED', 'BLOCKED', 'ABANDONED'] as const),
-    ACTIVE: Object.freeze(['SETTLED', 'BLOCKED', 'ABANDONED'] as const),
-    BLOCKED: Object.freeze(['SETTLED', 'ABANDONED'] as const),
+    PLANNED: Object.freeze(['ACTIVE', 'SETTLED', 'BLOCKED', 'ABANDONED', 'RESOLVED'] as const),
+    ACTIVE: Object.freeze(['SETTLED', 'BLOCKED', 'ABANDONED', 'RESOLVED'] as const),
+    BLOCKED: Object.freeze(['SETTLED', 'ABANDONED', 'RESOLVED'] as const),
     SETTLED: Object.freeze([] as const),
     ABANDONED: Object.freeze([] as const),
+    // Terminal like its two siblings. An operator's decision is not revised by a
+    // later writer any more than a settlement or an abandonment is.
+    RESOLVED: Object.freeze([] as const),
   });
 
 /**

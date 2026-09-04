@@ -1167,6 +1167,9 @@ describe('a run outcome decides what the ledger may be told', () => {
     // The task's own record proves an outcome.
     TASK_COMPLETED: 'SETTLE',
     TASK_ABORTED: 'ABANDON',
+    // Its own disposition. Grading it ABANDON would have the store refuse the
+    // write, because `abandonBlockTask` proves against `ABORTED` alone.
+    TASK_OPERATOR_RESOLVED: 'RESOLVE',
     BLOCKED_USAGE_LIMIT: 'PARK',
     BLOCKED_VERIFY: 'PARK',
     BLOCKED_AUTH: 'PARK',

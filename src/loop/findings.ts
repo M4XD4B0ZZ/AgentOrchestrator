@@ -33,6 +33,11 @@ import type { ExecutionBrief } from '../plan/task-brief.js';
 import type { TaskState } from '../core/task-state.js';
 import { clampPayload, MAX_AGENT_PAYLOAD_CHARS } from './payload-budget.js';
 import type { VerificationAttemptRecord } from '../verify/verification-attempt.js';
+import {
+  reviewerBriefingLines,
+  writerBriefingLines,
+  type OrchestratorBriefing,
+} from './orchestrator-briefing.js';
 
 /** The durable record shape, taken from the state contract rather than restated. */
 export type FindingRecord = TaskState['findingHistory'][number];
@@ -110,7 +115,11 @@ export function appendFindings(
  * Context sources appear as **paths**, never as contents — the same rule
  * `buildImplementPayload` follows, and for the same reason.
  */
-export function buildReviewPayload(brief: ExecutionBrief, round: number): string {
+export function buildReviewPayload(
+  brief: ExecutionBrief,
+  round: number,
+  briefing: OrchestratorBriefing,
+): string {
   const lines = [
     `Review the working tree of this repository against task ${brief.taskId}`,
     `(review round ${round}). You are read-only: do not modify any file.`,
@@ -120,6 +129,14 @@ export function buildReviewPayload(brief: ExecutionBrief, round: number): string
     '     absent, partial, or does not meet the stated criteria is a finding —',
     '     an empty change satisfies nothing.',
     '  2. does it introduce defects?',
+    '',
+    // Placed BEFORE the task body, and that position is load-bearing twice over.
+    // `clampPayload` cuts the TAIL, so a block appended after a maximal body
+    // would be the first thing truncated away — and the orchestrator's own frame
+    // belongs above the repository's text rather than below it. The block is a
+    // fixed handful of short lines with no repository-derived length in it, so
+    // it cannot crowd out the reply schema either.
+    ...reviewerBriefingLines(briefing),
     '',
     'TASK',
     brief.body,
@@ -186,17 +203,25 @@ function severityTally(findings: readonly { readonly severity: string }[]): stri
 /**
  * The instructions handed to the writer for a remediation pass, on stdin.
  *
- * Deterministic: the same findings in the same order produce the same bytes, so
- * a remediation prompt is reproducible from the evidence rather than being a
- * fresh composition each time. Bounded, because a review may carry 64 findings
- * and an agent payload is not allowed to grow without a ceiling.
+ * Deterministic in its inputs: the same findings in the same order, the same
+ * round and the same briefing produce the same bytes, so a remediation prompt is
+ * reproducible from the evidence rather than being a fresh composition each
+ * time. The briefing is **not** constant across invocations and the claim is
+ * narrowed to say so: it carries measured facts — the instant a verification was
+ * measured, the commit it measured, the paths the task has changed — so two runs
+ * that met different worktrees, or measured at different times, are briefed
+ * differently on purpose. Bounded, because a review may carry 64 findings and an
+ * agent payload is not allowed to grow without a ceiling.
  */
 export function buildRemediationPayload(
   findings: readonly ReviewFinding[],
   round: number,
+  briefing: OrchestratorBriefing,
 ): string {
   const lines = [
     `Address the findings reported by review round ${round}.`,
+    '',
+    ...writerBriefingLines(briefing),
     '',
     'Change only what is needed to resolve them. Do not broaden the task.',
     'The verification commands will be re-run afterwards, and the reviewer will',
@@ -247,12 +272,15 @@ export type ResumedRemediationBrief =
 export function buildResumedRemediationBrief(
   history: readonly FindingRecord[],
   round: number,
+  briefing: OrchestratorBriefing,
 ): ResumedRemediationBrief {
   const current = history.filter((record) => record.round === round);
   if (current.length === 0) return Object.freeze({ kind: 'NO_DURABLE_FINDINGS' as const });
 
   const lines = [
     `Address the findings reported by review round ${round}.`,
+    '',
+    ...writerBriefingLines(briefing),
     '',
     'This pass was resumed after an interruption. The reviewer\'s file paths and',
     'rule identifiers were held in memory only and did not survive, because they',
@@ -345,9 +373,12 @@ function phaseLine(phase: VerificationAttemptRecord['phases'][number]): string {
 export function buildVerificationRemediationPayload(
   attempt: VerificationAttemptRecord,
   round: number,
+  briefing: OrchestratorBriefing,
 ): string {
   const lines = [
     `Address the verification failure recorded for this task (round ${round}).`,
+    '',
+    ...writerBriefingLines(briefing),
     '',
     'This pass was entered on an explicit operator decision after this',
     "repository's own verification commands did not pass. The commands were NOT",

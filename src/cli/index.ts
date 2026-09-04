@@ -26,6 +26,7 @@ import { registerPublicationCommand } from './publication-command.js';
 import { registerReleaseCommand } from './release-command.js';
 import { registerAttentionCommand } from './attention-command.js';
 import { registerRepositoriesCommand } from './repositories-command.js';
+import { registerResolveCommand } from './resolve-command.js';
 import { registerRunCommand } from './run-command.js';
 import { enforceSupportedRuntime } from './runtime-gate.js';
 
@@ -41,6 +42,10 @@ const DESCRIPTION = [
   '  - attended execution of a block of independent tasks: `block --attended`',
   '  - `release --attended`: hand back a workspace a crashed start left behind,',
   '    and only one proven to be that task’s own untouched leftovers',
+  '  - `resolve --attended`: record that you have ended a task this orchestrator',
+  '    escalated to you. Terminal, and it claims nothing about the work — not',
+  '    that it was verified, reviewed, delivered or merged. Only a task in',
+  '    HUMAN_DECISION_REQUIRED or BLOCKED_VERIFY may be ended this way',
   '  - the repository execution lease: read-only `lease status` to inspect it,',
   '    and `lease recover` to remove one this build can prove is dead — the owner',
   '    gone, and every subprocess it started accounted for',
@@ -238,6 +243,7 @@ export function buildProgram(): Command {
   registerRunCommand(program);
   registerBlockCommand(program);
   registerReleaseCommand(program);
+  registerResolveCommand(program);
   registerLeaseCommand(program);
   registerDeliveryCommand(program);
   registerPublicationCommand(program);

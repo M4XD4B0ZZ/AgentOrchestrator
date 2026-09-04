@@ -45,6 +45,7 @@ export const BLOCKING_OR_TERMINAL_STATES = [
   'RESUME_STATE_DIVERGED',
   'HUMAN_DECISION_REQUIRED',
   'ABORTED',
+  'OPERATOR_RESOLVED',
 ] as const;
 
 export const ALL_STATES = [...REGULAR_STATES, ...BLOCKING_OR_TERMINAL_STATES] as const;
@@ -59,17 +60,37 @@ export type TaskStateName = (typeof ALL_STATES)[number];
  * - `READY_FOR_PR` — the task finished successfully; handing over to a human
  *   for the actual PR is out of scope for the orchestrator loop.
  * - `ABORTED`      — the task was given up on, deliberately and irreversibly.
+ * - `OPERATOR_RESOLVED` — an operator took the task out of this orchestrator's
+ *   hands, explicitly, from a state in which the loop had already stopped and
+ *   was waiting for them.
  *
- * Everything else, including every blocking state, has at least one documented
- * outgoing transition.
+ * ── Why the third one exists, and what it deliberately does not claim ──────
+ *
+ * Before it, a task that a human finished outside the loop had nowhere to go.
+ * `READY_FOR_PR` was refused from the other direction — the transition table
+ * withholds it from `HUMAN_DECISION_REQUIRED` because approving work must go
+ * through a real `REVIEWING` pass — and `ABORTED` means *given up on*, which
+ * `block/block-ledger.ts` reads as a surrender and which would make the task's
+ * block permanently uncompletable. So the task stayed blocked for ever, its
+ * attention item stayed open for ever, and the operator had no way to record
+ * the one thing they knew: that it was over.
+ *
+ * The name is the whole of the claim. `OPERATOR_RESOLVED` says a person ended
+ * this task on their own authority. It does **not** say the work was delivered,
+ * that verification passed, that the scope was clean, or that anything was
+ * merged — AO cannot verify any of those, and a state name that implied one
+ * would be the orchestrator asserting somebody else's word as its own
+ * measurement. What it overrode is recorded beside it, in
+ * `TaskState.operatorResolution.closedFrom`, so the decision can never be read
+ * as a machine's conclusion.
  */
-export const TERMINAL_STATES = ['READY_FOR_PR', 'ABORTED'] as const;
+export const TERMINAL_STATES = ['READY_FOR_PR', 'ABORTED', 'OPERATOR_RESOLVED'] as const;
 export type TerminalState = (typeof TERMINAL_STATES)[number];
 
 /**
  * States that represent "the task is stuck and something outside the normal
  * happy path has to happen". These are exactly the blocking/terminal states
- * minus `ABORTED` (which is an end, not a block).
+ * minus `ABORTED` and `OPERATOR_RESOLVED` — both of which are ends, not blocks.
  */
 export const BLOCKING_STATES = [
   'BLOCKED_AUTH',
@@ -92,7 +113,10 @@ export function isTaskStateName(value: unknown): value is TaskStateName {
   return typeof value === 'string' && ALL_SET.has(value);
 }
 
-/** `true` for states with no outgoing transitions (`READY_FOR_PR`, `ABORTED`). */
+/**
+ * `true` for states with no outgoing transitions (`READY_FOR_PR`, `ABORTED`,
+ * `OPERATOR_RESOLVED`).
+ */
 export function isTerminalState(state: TaskStateName): state is TerminalState {
   return TERMINAL_SET.has(state);
 }

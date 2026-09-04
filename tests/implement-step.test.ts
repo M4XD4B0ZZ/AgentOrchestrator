@@ -25,6 +25,7 @@ import {
   type LoopDependencies,
 } from '../src/loop/loop-step.js';
 import { buildImplementPayload } from '../src/loop/implement-payload.js';
+import { briefingFixture } from './helpers/briefing.js';
 import { MAX_AGENT_PAYLOAD_CHARS } from '../src/loop/payload-budget.js';
 import { readExecutionBrief } from '../src/plan/task-brief.js';
 import { startTask } from '../src/run/start-task.js';
@@ -416,7 +417,7 @@ describe('buildImplementPayload', () => {
     expect(brief.ok).toBe(true);
     if (!brief.ok) return;
 
-    const payload = buildImplementPayload(brief.brief, 1);
+    const payload = buildImplementPayload(brief.brief, 1, briefingFixture());
 
     expect(payload).toContain('README.md');
     expect(payload).not.toContain('CANARY-README-BODY');
@@ -430,8 +431,8 @@ describe('buildImplementPayload', () => {
     expect(brief.ok).toBe(true);
     if (!brief.ok) return;
 
-    const once = buildImplementPayload(brief.brief, 2);
-    expect(buildImplementPayload(brief.brief, 2)).toBe(once);
+    const once = buildImplementPayload(brief.brief, 2, briefingFixture());
+    expect(buildImplementPayload(brief.brief, 2, briefingFixture())).toBe(once);
     expect(once).toContain('pass 2');
     // At or under the budget, marker included — not "roughly". The earlier
     // form allowed a slack of 32 characters, which passed with the clamp
@@ -457,7 +458,7 @@ describe('buildImplementPayload', () => {
       })),
     };
 
-    const payload = buildImplementPayload(many, 1);
+    const payload = buildImplementPayload(many, 1, briefingFixture());
 
     expect(payload.length).toBe(MAX_AGENT_PAYLOAD_CHARS);
     expect(payload.endsWith('[truncated]')).toBe(true);
@@ -470,7 +471,7 @@ describe('buildImplementPayload', () => {
     expect(brief.ok).toBe(true);
     if (!brief.ok) return;
     expect(brief.brief.bodyTruncated).toBe(true);
-    expect(buildImplementPayload(brief.brief, 1)).toContain('truncated');
+    expect(buildImplementPayload(brief.brief, 1, briefingFixture())).toContain('truncated');
   });
 });
 

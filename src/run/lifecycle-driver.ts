@@ -226,6 +226,14 @@ export const LIFECYCLE_OUTCOMES = [
   /* --- the run, passed through ------------------------------------------- */
   'COMPLETED',
   'TASK_ABORTED',
+  /**
+   * The task's record was already terminal because an operator ended it.
+   *
+   * Distinct from `COMPLETED`, which is this build's claim that the loop drove
+   * the task to `READY_FOR_PR`, and from `TASK_ABORTED`, which says it was given
+   * up on. Both would misreport a decision a person made.
+   */
+  'TASK_OPERATOR_RESOLVED',
   'BLOCKED_USAGE_LIMIT',
   'BLOCKED_VERIFY',
   'BLOCKED_AUTH',
@@ -286,6 +294,7 @@ export type LifecycleOutcome = (typeof LIFECYCLE_OUTCOMES)[number];
  */
 export const LIFECYCLE_FOR_RUN = {
   TASK_COMPLETED: 'COMPLETED',
+  TASK_OPERATOR_RESOLVED: 'TASK_OPERATOR_RESOLVED',
   TASK_ABORTED: 'TASK_ABORTED',
   BLOCKED_USAGE_LIMIT: 'BLOCKED_USAGE_LIMIT',
   BLOCKED_VERIFY: 'BLOCKED_VERIFY',

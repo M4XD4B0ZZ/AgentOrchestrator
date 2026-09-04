@@ -189,6 +189,10 @@ const CONDITION_ATTENTION = Object.freeze({
   // `ABORTED`, which the state table calls silent because it is an end somebody
   // already chose.
   TASK_ABORTED: silent,
+  // Terminal, and closed by the person any item here would have been addressed
+  // to. Telling an operator about their own decision is the noise the state
+  // table already refuses for `ABORTED`.
+  TASK_OPERATOR_RESOLVED: silent,
   BLOCKED_USAGE_LIMIT: silent,
   BLOCKED_VERIFY: silent,
   BLOCKED_AUTH: silent,

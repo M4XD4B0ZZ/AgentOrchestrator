@@ -212,6 +212,54 @@ export function renderRunResult(result: RunResult): string {
       );
     }
   }
+  // What became of this run's attempt to file the *pass* it measured.
+  //
+  // Its own line, never the one above. That one is about explaining a failure,
+  // and printing its "did not write BLOCKED_VERIFY" sentence for a task that
+  // passed and advanced would send an operator hunting a failure that does not
+  // exist. A pass that could not be filed changes nothing about this run — the
+  // task advanced — and everything about the next one: the reviewer will be
+  // briefed "NOT MEASURED" for a tree that did pass, which is the condition
+  // `RESOLVER-V3-054` burned three review rounds on.
+  const pass = result.lastStep?.verificationPass ?? null;
+  if (pass !== null) {
+    if (pass.recorded) {
+      lines.push(line('Verify pass', `recorded  (${pass.code})`));
+      if (pass.path !== null) lines.push(`  ${pass.path}`);
+    } else {
+      lines.push(
+        line('Verify pass', `NOT recorded  (${pass.code})`),
+        '  Verification passed and the task advanced. The pass itself was not filed, so',
+        '  the next reviewer will be told this tree has not been measured.',
+      );
+    }
+  }
+  // What this run did about a capability the repository requires in the task's
+  // worktree, and only where there was something to do about it.
+  //
+  // The two silent outcomes are silent on purpose: a repository that does not
+  // require the capability, and a worktree that already carried an index, are
+  // both "nothing happened" and neither earns a line in an operator's report.
+  if (
+    result.capabilityProvision !== null &&
+    result.capabilityProvision.outcome !== 'NOT_REQUIRED' &&
+    result.capabilityProvision.outcome !== 'ALREADY_PRESENT'
+  ) {
+    lines.push(
+      line(
+        'CodeGraph index',
+        `${result.capabilityProvision.outcome}  (worktree: ${result.capabilityProvision.status})`,
+      ),
+    );
+    if (result.capabilityProvision.outcome === 'NO_OPERATOR_COMMAND') {
+      lines.push(
+        '  This repository requires a CodeGraph index and its task worktree has none. A',
+        '  worktree never inherits one, so nothing can satisfy the requirement until the',
+        '  operator names a preparation command under capabilities.codegraph.prepare in',
+        '  mcp-capabilities.yaml.',
+      );
+    }
+  }
   // Only when there were any. A clean run must not gain a noise line, and an
   // operator who never sees this line has been told something by its absence.
   //

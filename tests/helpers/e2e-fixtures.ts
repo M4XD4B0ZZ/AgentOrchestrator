@@ -170,11 +170,21 @@ export async function startTask(options: {
   readonly taskId: string;
   readonly profile?: string;
   readonly files?: Readonly<Record<string, string>>;
+  /**
+   * Whether the repository's **root** carries a CodeGraph index.
+   *
+   * A directory, which a `files` map cannot express, and the fixture creates it
+   * after the files and before the commit — so a `.gitignore` that names it
+   * (which M8's cases supply) leaves it untracked, exactly as a real machine
+   * has it: present at the root, absent from every worktree.
+   */
+  readonly codegraphIndex?: boolean;
 }): Promise<StartedTask> {
   const taskId = options.taskId;
   const root = createRepoFixture({
     defaultBranch: 'main',
     profile: options.profile ?? e2eProfile(),
+    ...(options.codegraphIndex === true ? { codegraphIndex: true } : {}),
     files: {
       // What a real repository AO drives has, and what `start-task.ts` refuses
       // to start a task without. These scenarios reach `prepareTaskWorkspace`

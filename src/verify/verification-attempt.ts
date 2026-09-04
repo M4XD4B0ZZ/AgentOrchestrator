@@ -41,9 +41,13 @@
  *     make another one permissible;
  *  5. **that the diagnostics are true.** They are a bounded, redacted, line-safe
  *     excerpt of a foreign process's own output. See below;
- *  6. **that its absence means anything.** A task with no record here has not
- *     been shown to verify. Nothing writes a record for a pass, and a store that
- *     could not be written is a store that was not written.
+ *  6. **that its absence means anything.** A task with no record *here* has not
+ *     been shown to have failed: nothing adds an entry to this history for a
+ *     pass, and a store that could not be written is a store that was not
+ *     written. Since M8 a pass is recorded — in its own store, one document per
+ *     task, `verify/verification-pass.ts` — and the two say different things:
+ *     this one answers "why did AO stop", that one answers "which commit did AO
+ *     measure as passing". Neither absence is evidence about the other.
  *
  * It **never mints authority and never decides a transition.** `loop/loop-step.ts`
  * decides; this is what it consults afterwards.

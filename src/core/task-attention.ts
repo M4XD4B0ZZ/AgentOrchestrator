@@ -184,7 +184,9 @@ export const ATTENTION_ACTIONS = Object.freeze({
   VERIFICATION_REMEDIATION_REQUIRED:
     'The repository’s verification commands failed and were not retried, because re-running ' +
     'them unchanged would fail again. Hand the recorded failure to the writing agent with ' +
-    '`agent-loop run --repository <path> --task <id> --attended --remediate-verify-failure`.',
+    '`agent-loop run --repository <path> --task <id> --attended --remediate-verify-failure`, ' +
+    'or end the task yourself with `agent-loop resolve --repository <path> --task <id> ' +
+    '--attended`.',
   SCOPE_REVIEW_REQUIRED:
     'An agent wrote outside the scope this repository declares. No flag in this build ' +
     'continues a scope violation, so the decision is yours: read the worktree the record ' +
@@ -197,7 +199,9 @@ export const ATTENTION_ACTIONS = Object.freeze({
     'The loop ran out of ways to proceed on its own and escalated. A review budget that ran ' +
     'out arrives here, and continuing does not refill it. Read what was recorded with ' +
     '`agent-loop run --repository <path> --task <id>`, then continue with `--attended ' +
-    '--continue-human-decision` or abandon the task.',
+    '--continue-human-decision`, or — if you have finished or dropped this task yourself — ' +
+    'end it with `agent-loop resolve --repository <path> --task <id> --attended`, which ' +
+    'records your decision and asserts nothing about the work.',
 }) satisfies Record<AttentionReason, string>;
 
 /**
@@ -242,6 +246,11 @@ const STATE_ATTENTION = Object.freeze({
   READY_FOR_PR: silent,
   // Terminal and deliberate. Telling somebody about a decision they made is noise.
   ABORTED: silent,
+  // Terminal, and closed by the very person the item was addressed to. Raising
+  // one here would tell an operator about their own decision — and it is this
+  // rule, not the command that writes the state, that makes the open item stop
+  // being derived: `attentionForTaskState` reads the record and nothing else.
+  OPERATOR_RESOLVED: silent,
   BLOCKED_AUTH: always('AGENT_LOGIN_REQUIRED'),
   BLOCKED_USAGE_LIMIT: Object.freeze({ kind: 'BY_QUOTA_READING' as const }),
   BLOCKED_VERIFY: always('VERIFICATION_REMEDIATION_REQUIRED'),

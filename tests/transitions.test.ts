@@ -316,6 +316,7 @@ describe('transition-table stability', () => {
         "BLOCKED_VERIFY -> REMEDIATING",
         "BLOCKED_VERIFY -> HUMAN_DECISION_REQUIRED",
         "BLOCKED_VERIFY -> ABORTED",
+        "BLOCKED_VERIFY -> OPERATOR_RESOLVED",
         "SCOPE_VIOLATION -> HUMAN_DECISION_REQUIRED",
         "SCOPE_VIOLATION -> ABORTED",
         "RESUME_STATE_DIVERGED -> HUMAN_DECISION_REQUIRED",
@@ -325,6 +326,7 @@ describe('transition-table stability', () => {
         "HUMAN_DECISION_REQUIRED -> REVIEWING",
         "HUMAN_DECISION_REQUIRED -> REMEDIATING",
         "HUMAN_DECISION_REQUIRED -> ABORTED",
+        "HUMAN_DECISION_REQUIRED -> OPERATOR_RESOLVED",
       ]
     `);
   });

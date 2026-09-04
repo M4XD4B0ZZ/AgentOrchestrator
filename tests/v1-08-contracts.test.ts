@@ -26,6 +26,7 @@ import {
   type LoopDependencies,
 } from '../src/loop/loop-step.js';
 import { buildResumedRemediationBrief } from '../src/loop/findings.js';
+import { briefingFixture } from './helpers/briefing.js';
 import { fingerprint, validCreatedState } from './fixtures.js';
 import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 import { mkdtempSync } from 'node:fs';
@@ -87,6 +88,9 @@ describe('the states the loop advertises are the states it dispatches', () => {
                   currentCommit: '1'.repeat(40),
                   worktreeCleanAtCheckpoint: true,
                 }
+              : {}),
+            ...(state === 'OPERATOR_RESOLVED'
+              ? { operatorResolution: { closedFrom: 'HUMAN_DECISION_REQUIRED' as const } }
               : {}),
             ...(state === 'BLOCKED_USAGE_LIMIT'
               ? { blockedAgent: 'claude' as const, resumeFrom: { phase: 'REMEDIATE' as const, round: 1 } }
@@ -163,6 +167,7 @@ describe('a resumed remediation brief has one line per durable finding', () => {
         fingerprint: fingerprint(index),
       })),
       1,
+      briefingFixture(),
     );
 
   it.each([1, 2, 8])('renders %i findings as exactly that many lines', (count) => {

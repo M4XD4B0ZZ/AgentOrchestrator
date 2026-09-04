@@ -22,6 +22,7 @@
  */
 
 import type { ExecutionBrief } from '../plan/task-brief.js';
+import { writerBriefingLines, type OrchestratorBriefing } from './orchestrator-briefing.js';
 import { clampPayload } from './payload-budget.js';
 
 /**
@@ -30,9 +31,19 @@ import { clampPayload } from './payload-budget.js';
  * `round` is the pass this work belongs to, carried so the prompt and the
  * resume point a failure records name the same number.
  */
-export function buildImplementPayload(brief: ExecutionBrief, round: number): string {
+export function buildImplementPayload(
+  brief: ExecutionBrief,
+  round: number,
+  briefing: OrchestratorBriefing,
+): string {
   const lines = [
     `Implement task ${brief.taskId} (pass ${round}).`,
+    '',
+    // Above the task body, because `clampPayload` cuts the tail: a block
+    // appended after a maximal body would be the first thing truncated away,
+    // and a writer that never sees it is a writer back to reading the tree's
+    // prose for facts this orchestrator has already measured.
+    ...writerBriefingLines(briefing),
     '',
     'Work only inside this worktree. Make the change the task describes, and',
     'nothing beyond it. The repository’s own verification commands will be run',

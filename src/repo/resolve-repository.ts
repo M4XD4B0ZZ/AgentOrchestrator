@@ -199,6 +199,19 @@ export interface ResolvedScopePolicy {
 }
 
 export interface ResolvedCapabilities {
+  /**
+   * The capability as it stands **in the repository's own checkout**, judged
+   * before any task was chosen.
+   *
+   * An admission fact, and authority for nothing a writing agent does. It is
+   * what keeps a repository nobody indexed out of a run at all, and it is asked
+   * at the only working copy that exists at resolution time. The tree an agent
+   * opens is a *task worktree* — a sibling directory created later, which does
+   * not inherit an ignored `.codegraph/` — so the verdict a writer's authority
+   * rests on is `ExecutionBrief.codegraph`, measured per task in that tree.
+   * Reading this `status` as though it described the agent's tree is the defect
+   * `RESOLVER-V3-054` was blocked by.
+   */
   readonly codegraph: CapabilityAssessment;
 }
 

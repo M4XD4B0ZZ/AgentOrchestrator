@@ -153,6 +153,55 @@ export const TaskStateSchema = TaskStateObjectSchema.superRefine((value, ctx) =>
     }
   }
 
+  // --- 3b. OPERATOR_RESOLVED carries its own provenance, and only it does --
+  //
+  // A biconditional, in both directions, and it is the whole of what keeps this
+  // state from being a force-complete switch. The state may not exist without
+  // naming the refusal it overrode, and the provenance may not be attached to
+  // any other state as decoration — a record carrying `operatorResolution` while
+  // claiming to be `READY_FOR_PR` would be a machine success wearing an
+  // operator's authority.
+  //
+  // What is deliberately NOT required here, and why: a resolved `currentCommit`,
+  // a clean checkpoint and a completed review round. Those are `READY_FOR_PR`'s
+  // demands because that state is this build's own claim that the work is
+  // finished and provable. This state claims only that a person ended the task,
+  // and requiring evidence of success would either force the operator to forge
+  // it or make the state unreachable in exactly the cases that need it most.
+  if (value.state === 'OPERATOR_RESOLVED') {
+    if (value.operatorResolution === null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['operatorResolution'],
+        message:
+          'OPERATOR_RESOLVED requires operatorResolution: the state must name the refusal an ' +
+          'operator overrode.',
+      });
+    }
+    if (value.resumeFrom !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resumeFrom'],
+        message: 'OPERATOR_RESOLVED is terminal and must not carry a pending resumeFrom.',
+      });
+    }
+    if (value.reportedResetAt !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['reportedResetAt'],
+        message: 'OPERATOR_RESOLVED is terminal and must not carry a pending quota reset time.',
+      });
+    }
+  } else if (value.operatorResolution !== null) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['operatorResolution'],
+      message:
+        `State ${value.state} must not carry operatorResolution: only OPERATOR_RESOLVED records ` +
+        'an operator ending the task.',
+    });
+  }
+
   // --- 4 + 5. blockedAgent may only appear in blocking states, and each
   //            blocking state has its own evidence requirements.
   const stateName = value.state;

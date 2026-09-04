@@ -25,6 +25,7 @@ import { readClaudeResultStream } from '../src/agent/internal/claude-result-stre
 import { renderRunResult } from '../src/cli/render-attended-run.js';
 import { isShellInertArgument } from '../src/doctor/exec.js';
 import { buildReviewPayload } from '../src/loop/findings.js';
+import { briefCapabilityFields, briefingFixture } from './helpers/briefing.js';
 import { runImplementStep, runReviewStep } from '../src/loop/loop-step.js';
 import { readExecutionBrief, type ExecutionBrief } from '../src/plan/task-brief.js';
 import { runTask, type RunResult } from '../src/run/run-driver.js';
@@ -179,6 +180,7 @@ function runResultWithDenials(denials: { count: number; tools: readonly string[]
     taskId: 'REM-001',
     state: 'READY_FOR_PR' as const,
     steps: 3,
+    capabilityProvision: null,
     reasonCodes: Object.freeze([]),
     remediatedVerifyFailure: false,
     continuedUsageLimit: false,
@@ -775,6 +777,7 @@ describe('the reviewer is told what the task requires', () => {
       bodyTruncated: false,
       contextSources: [],
       contextComplete: true,
+      ...briefCapabilityFields(),
       ...overrides,
     };
   }
@@ -810,10 +813,12 @@ describe('the reviewer is told what the task requires', () => {
     const a = buildReviewPayload(
       briefFor({ body: 'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.' }),
       1,
+      briefingFixture(),
     );
     const b = buildReviewPayload(
       briefFor({ body: 'Document the widget. ACCEPTANCE: README gains a Widget section.' }),
       1,
+      briefingFixture(),
     );
 
     expect(a).not.toBe(b);
@@ -824,16 +829,16 @@ describe('the reviewer is told what the task requires', () => {
   });
 
   it('tells the reviewer which round it is', () => {
-    expect(buildReviewPayload(briefFor(), 3)).toContain('round 3');
+    expect(buildReviewPayload(briefFor(), 3, briefingFixture())).toContain('round 3');
   });
 
   it('asks whether the tree satisfies the task, not only what it broke', () => {
     // Without this the round-3 PASS recurs: an empty diff introduces no defects.
-    expect(buildReviewPayload(briefFor(), 1)).toMatch(/satisf/i);
+    expect(buildReviewPayload(briefFor(), 1, briefingFixture())).toMatch(/satisf/i);
   });
 
   it('says so when the body was truncated', () => {
-    expect(buildReviewPayload(briefFor({ bodyTruncated: true }), 1)).toMatch(/truncat/i);
+    expect(buildReviewPayload(briefFor({ bodyTruncated: true }), 1, briefingFixture())).toMatch(/truncat/i);
   });
 
   it('parks rather than degrading when the brief is unavailable', async () => {
@@ -919,7 +924,19 @@ describe('a step-budget boundary does not cost the remediation its detail', () =
     // so byte equality against a run that never met the boundary is the
     // strongest available assertion.
     const uncrossed = await remediationPayloadWith({ maxSteps: 4 });
-    expect(crossed.payload).toBe(uncrossed.payload);
+    // Byte equality on the half that is a function of the findings alone.
+    //
+    // M8 put a measured briefing above it — the instant a verification was
+    // measured, the commit it measured — and those differ between two runs of
+    // the same scenario by construction. Comparing the whole payload would now
+    // fail for a reason that has nothing to do with the boundary this case is
+    // about, and pinning it would pin a clock. What still has to be identical is
+    // everything from the findings heading down, which is where "src/named.ts"
+    // and "e2e.named" live and where a degraded brief would show.
+    const findingsHalf = (payload: string): string =>
+      payload.slice(payload.indexOf('FINDINGS ('));
+    expect(findingsHalf(crossed.payload)).toBe(findingsHalf(uncrossed.payload));
+    expect(findingsHalf(crossed.payload)).toContain('src/named.ts');
   });
 });
 

@@ -164,7 +164,9 @@ const REPROVED_FIELD_PROVERS = {
         ? record.state === 'READY_FOR_PR'
         : entry.disposition === 'BLOCKED'
           ? getStateKind(record.state) === 'BLOCKING'
-          : record.state === 'ABORTED';
+          : entry.disposition === 'RESOLVED'
+            ? record.state === 'OPERATOR_RESOLVED'
+            : record.state === 'ABORTED';
     return proved ? null : 'TASK_STATE_DOES_NOT_PROVE_IT';
   },
 

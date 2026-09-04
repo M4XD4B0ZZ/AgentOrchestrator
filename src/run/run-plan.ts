@@ -47,7 +47,12 @@ import {
   loadVerificationAttempts,
   type VerificationAttemptLoad,
 } from '../verify/verification-attempt-store.js';
-import { isTerminalState, isBlockingState, type TaskStateName } from '../core/states.js';
+import {
+  isTerminalState,
+  isBlockingState,
+  type TaskStateName,
+  type TerminalState,
+} from '../core/states.js';
 import { isValidTaskId } from '../plan/task-id.js';
 import { previewTaskBrief, type TaskBriefPreviewResult } from '../plan/task-brief.js';
 import type { TaskEligibility } from '../plan/select-task.js';
@@ -102,6 +107,12 @@ export const RUN_PLAN_CONCLUSIONS = [
   'TASK_COMPLETED',
   /** The durable state is `ABORTED`: given up on, irreversibly. */
   'TASK_ABORTED',
+  /**
+   * The durable state is `OPERATOR_RESOLVED`: an operator ended the task
+   * themselves, out of a state in which the loop had stopped and was waiting for
+   * them. It claims nothing about the work.
+   */
+  'TASK_OPERATOR_RESOLVED',
   /**
    * A regular in-flight state whose record agrees with observed reality. A
    * human may continue it; `resume.continuation` says exactly on whose
@@ -257,6 +268,24 @@ function conclusionForReconciliation(reconciliation: TaskReconciliation): RunPla
 }
 
 /**
+ * The conclusion for a record that is already terminal.
+ *
+ * Exhaustive rather than a ternary, for the reason `run-driver.ts` states about
+ * its own: a boolean test cannot see a third terminal state, and its `else`
+ * would report an operator's decision as an abandonment.
+ */
+function terminalPlanConclusion(state: TerminalState): RunPlanConclusion {
+  switch (state) {
+    case 'READY_FOR_PR':
+      return 'TASK_COMPLETED';
+    case 'OPERATOR_RESOLVED':
+      return 'TASK_OPERATOR_RESOLVED';
+    case 'ABORTED':
+      return 'TASK_ABORTED';
+  }
+}
+
+/**
  * Plans one run, read-only. Never throws for an expected condition; every
  * refusal arrives as a conclusion with its own reason codes.
  */
@@ -356,8 +385,7 @@ export async function planRun(
   // to continue.
   if (reconciliation.load.ok && isTerminalState(reconciliation.load.state.state)) {
     return plan({
-      conclusion:
-        reconciliation.load.state.state === 'READY_FOR_PR' ? 'TASK_COMPLETED' : 'TASK_ABORTED',
+      conclusion: terminalPlanConclusion(reconciliation.load.state.state),
       target,
       selection,
       reconciliation,

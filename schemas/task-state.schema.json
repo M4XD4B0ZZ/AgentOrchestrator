@@ -47,7 +47,8 @@
         "SCOPE_VIOLATION",
         "RESUME_STATE_DIVERGED",
         "HUMAN_DECISION_REQUIRED",
-        "ABORTED"
+        "ABORTED",
+        "OPERATOR_RESOLVED"
       ]
     },
     "stateEnteredAt": {
@@ -167,6 +168,30 @@
     "worktreeCleanAtCheckpoint": {
       "type": "boolean"
     },
+    "operatorResolution": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "closedFrom": {
+              "type": "string",
+              "enum": [
+                "HUMAN_DECISION_REQUIRED",
+                "BLOCKED_VERIFY"
+              ]
+            }
+          },
+          "required": [
+            "closedFrom"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "findingHistory": {
       "type": "array",
       "items": {
@@ -220,6 +245,7 @@
     "resumeFrom",
     "reportedResetAt",
     "worktreeCleanAtCheckpoint",
+    "operatorResolution",
     "findingHistory"
   ],
   "additionalProperties": false

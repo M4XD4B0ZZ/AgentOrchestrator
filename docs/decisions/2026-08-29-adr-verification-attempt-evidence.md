@@ -389,8 +389,12 @@ Not that verification would fail now. Not that the repository is at fault
 (`UNAVAILABLE` is in the vocabulary for that reason). Not that remediation is
 authorised — that comes from an operator, and this is read *after* the decision,
 never as it. Not that a retry is authorised. Not that the diagnostics are true.
-And **its absence proves nothing**: nothing writes a record for a pass, and a
-store that could not be written is a store that was not written. The report says
+And **its absence proves nothing**: nothing adds an entry to this failure
+history for a pass, and a store that could not be written is a store that was
+not written. M8 added a separate record for a pass — see
+`verify/verification-pass.ts` — which does not change anything in this document:
+this history is still failures only, still bounded, and still the only thing that
+answers "why did AO stop". The report says
 so in those words rather than printing "no diagnostics".
 
 ## 12. Non-goals

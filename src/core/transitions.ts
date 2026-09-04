@@ -106,6 +106,9 @@ export const TRANSITION_TABLE: Readonly<Record<TaskStateName, readonly TaskState
     // --- terminal ----------------------------------------------------------
     READY_FOR_PR: [],
     ABORTED: [],
+    // An operator ended the task on their own authority. Terminal like its two
+    // siblings, and reachable from exactly two states — see them below.
+    OPERATOR_RESOLVED: [],
 
     // --- blocking states ---------------------------------------------------
     // After the operator re-authenticates, auth is re-proven from scratch
@@ -128,7 +131,7 @@ export const TRANSITION_TABLE: Readonly<Record<TaskStateName, readonly TaskState
     // A failed verification is handed to the writing agent for remediation, or
     // escalated. It never goes straight back to VERIFYING: re-running the same
     // verification without a change would just fail again.
-    BLOCKED_VERIFY: ['REMEDIATING', 'HUMAN_DECISION_REQUIRED', 'ABORTED'],
+    BLOCKED_VERIFY: ['REMEDIATING', 'HUMAN_DECISION_REQUIRED', 'ABORTED', 'OPERATOR_RESOLVED'],
 
     // Never automatically resumable: an agent left its sandbox, so a human has
     // to look at the damage before anything else happens.
@@ -141,7 +144,22 @@ export const TRANSITION_TABLE: Readonly<Record<TaskStateName, readonly TaskState
     // The operator decides where to continue. Deliberately *not* including
     // `READY_FOR_PR`: approving a task must go through a real REVIEWING pass,
     // it cannot be short-circuited by a decision prompt.
-    HUMAN_DECISION_REQUIRED: ['IMPLEMENTING', 'VERIFYING', 'REVIEWING', 'REMEDIATING', 'ABORTED'],
+    //
+    // `OPERATOR_RESOLVED` is not that short-circuit and must not be read as one.
+    // `READY_FOR_PR` is this build's claim that the work is finished — it feeds
+    // the delivery machinery, which opens a pull request — and its invariants
+    // demand a completed review round, a resolved commit and a clean checkpoint.
+    // `OPERATOR_RESOLVED` claims none of that: it says a person ended the task,
+    // records which refusal they overrode, feeds no delivery, and is invisible
+    // to `select-delivery-task.ts`, which gates on `READY_FOR_PR` alone.
+    HUMAN_DECISION_REQUIRED: [
+      'IMPLEMENTING',
+      'VERIFYING',
+      'REVIEWING',
+      'REMEDIATING',
+      'ABORTED',
+      'OPERATOR_RESOLVED',
+    ],
   } satisfies Record<TaskStateName, readonly TaskStateName[]>);
 
 /** Allowed successors of `from`. Empty for terminal states. */

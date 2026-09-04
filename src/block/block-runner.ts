@@ -148,6 +148,7 @@ import {
 } from './block-ledger.js';
 import {
   abandonBlockTask,
+  resolveBlockTask,
   activateBlockTask,
   parkBlockTask,
   settleBlockTask,
@@ -977,7 +978,9 @@ async function driveOneTask(
       ? settleBlockTask(ledger, taskId, options)
       : conclusion === 'PARK'
         ? parkBlockTask(ledger, taskId, options)
-        : abandonBlockTask(ledger, taskId, options);
+        : conclusion === 'RESOLVE'
+          ? resolveBlockTask(ledger, taskId, options)
+          : abandonBlockTask(ledger, taskId, options);
 
   const graded = recordingResultFor(record.outcome);
   if (graded === 'WRITE_FAILED') return driven(ended('DURABLE_WRITE_FAILED', saveDetail(record)));
