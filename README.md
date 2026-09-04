@@ -14162,6 +14162,38 @@ run unsettleable, unparkable and unabandonable. `COMPLETE` accepts it beside
 `SETTLED`, because a block whose tasks are all finished — some by this
 orchestrator, some by the person it escalated to — has nothing left to do.
 
+### Carried forward from M8, deliberately
+
+- **L-M8-1 — an escalated task still loses the reasons for its escalation.** The
+  incident that produced this slice had two halves and this is the other one.
+  `findingHistory` stores `{round, severity, fingerprint}` and deliberately no
+  agent-authored text, and the remediation pass that would otherwise write the
+  findings down never runs at `maxReviewRounds`. So a task that escalates keeps
+  the *count* and the *severities* of its last round and not one path or rule.
+  On `RESOLVER-V3-054` three findings were recovered only by brute-forcing the
+  fingerprint preimages, and three more were never recovered at all. M8 does not
+  close it: the fix is a durable record of agent-authored text, which is a
+  decision about what this build persists rather than a defect in what it
+  measures. Recorded here rather than done.
+- **L-M8-2 — an operator's word does not unblock a successor.** A resolved task
+  is terminal, and its block-ledger entry becomes `RESOLVED`, which `COMPLETE`
+  accepts. `block/chain-fitness.ts` still requires a predecessor to be
+  `SETTLED` before a dependent task may start, so a chain whose first task an
+  operator ended by hand stops there. That is the conservative reading — AO
+  proved nothing about the predecessor's work — and widening it would mean
+  letting an assertion authorise the *start* of new work, which is a different
+  decision from letting it close a ledger.
+- **L-M8-3 — the pass record has no retention.** One document per task, replaced
+  in place, never pruned. It is small — under 6 KiB in every spelling — and it
+  shares the runtime directory's fate, but nothing removes it when a task is
+  finished. The same is true of the failure history beside it, and the rule that
+  retention must not be able to fail a delivery applies to both.
+- **L-M8-4 — a briefing is bounded, and a large one is truncated silently at the
+  tail.** The block sits above the repository's text precisely so the clamp
+  cannot cut it, but the changed-path list is capped at 40 entries and says so.
+  A repository whose task genuinely touches hundreds of paths gets a count and a
+  sample, not a manifest.
+
 ### What M8 does not do
 
 It starts no new kind of process for an agent, grants the writer no tool it did
