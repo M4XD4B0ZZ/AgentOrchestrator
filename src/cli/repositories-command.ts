@@ -505,11 +505,12 @@ export async function reportRepositories(
   //
   // The notifier is built **before** the loop, and — since this slice — its
   // state is *printed* before the loop too. Building it early was never the
-  // promise; being told was. A recurring invocation prints nothing until it
-  // ends (`L-M3-02-10`), so until now an operator with a broken notify.yaml
-  // learned of it from the report at the end of an eight-hour run, which is
-  // exactly the "eight hours later" this comment claimed to prevent. It was
-  // measured false on a real overnight run before it was fixed.
+  // promise; being told was. Until this slice a recurring invocation printed
+  // nothing until it ended, so an operator with a broken notify.yaml was told at
+  // the end of an eight-hour run **at best**: the attention section is omitted
+  // entirely when nothing needed anybody, and it says nothing about the
+  // configuration on a pass with no pending items, so a quiet night told them
+  // nothing at all. It was measured on a real overnight run before it was fixed.
   //
   // It lives in this file rather than in the scheduler because the scheduler is
   // pinned against knowing about notification at all, and the pin is right: what

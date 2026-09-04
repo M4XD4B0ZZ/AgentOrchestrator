@@ -76,7 +76,11 @@ import type { AttentionReason } from '../core/task-attention.js';
 import type { TaskStateName } from '../core/states.js';
 import type { UsageLimitContinuationReading } from '../core/usage-limit-continuation.js';
 import { markAttentionDelivered, type AttentionRecord } from './attention-store.js';
-import { loadNotificationConfig, type NotificationConfig } from './notify-config.js';
+import {
+  loadNotificationConfig,
+  type NotificationConfig,
+  type NotifyConfigRefusal,
+} from './notify-config.js';
 import type { TransportResult } from './notification.js';
 import { createNtfyAttentionTransport } from './ntfy-transport.js';
 
@@ -166,8 +170,15 @@ export type AttentionNotifierState = 'ARMED' | 'NOT_CONFIGURED' | 'CONFIG_UNUSAB
 
 export interface AttentionNotifier {
   readonly state: AttentionNotifierState;
-  /** The refusal code when `state` is `CONFIG_UNUSABLE`, else `null`. */
-  readonly configCode: string | null;
+  /**
+   * The refusal code when `state` is `CONFIG_UNUSABLE`, else `null`.
+   *
+   * Typed as the closed refusal union rather than `string`, because this value
+   * is printed on an operator's console and the claim that it can never carry a
+   * path, an endpoint or a token is exactly the claim `NOTIFY_CONFIG_REFUSALS`
+   * makes. Held by the type, not by whoever assigns it.
+   */
+  readonly configCode: NotifyConfigRefusal | null;
   /** Present only when armed. Nothing to call is what "off" means. */
   readonly transport: AttentionTransport | null;
 }
@@ -179,9 +190,11 @@ export interface AttentionNotifier {
  * same reason.
  *
  * Being called early is not by itself being *told*, and this comment used to
- * claim it was. A recurring invocation prints nothing until it ends, so a
- * notifier built at minute zero and reported at hour eight told nobody anything
- * while they were still standing there. What closes the gap is the caller:
+ * claim it was. A recurring invocation used to print nothing until it ended, so
+ * a notifier built at minute zero told nobody anything while they were still
+ * standing there — and on a night where nothing needed a person it told them
+ * nothing at hour eight either, because the attention section is omitted when
+ * there is nothing to say. What closes the gap is the caller:
  * `cli/repositories-command.ts` writes `renderNotificationReadiness(...)` before
  * it enters the loop, and this factory's state is what that line reads.
  *
@@ -244,7 +257,8 @@ export interface AttentionPushResult {
   /** Closed codes, one per failure, in attempt order. Never a message. */
   readonly failures: readonly string[];
   /** The configuration refusal when `outcome` is `CONFIG_UNUSABLE`, else `null`. */
-  readonly configCode: string | null;
+  /** Typed as the closed union for the reason {@link AttentionNotifier} is. */
+  readonly configCode: NotifyConfigRefusal | null;
 }
 
 const pushResult = (
@@ -252,7 +266,7 @@ const pushResult = (
   attempted: number,
   delivered: number,
   failures: readonly string[],
-  configCode: string | null = null,
+  configCode: NotifyConfigRefusal | null = null,
 ): AttentionPushResult =>
   Object.freeze({ outcome, attempted, delivered, failures: Object.freeze([...failures]), configCode });
 

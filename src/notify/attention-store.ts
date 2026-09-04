@@ -565,6 +565,33 @@ export function removeAttentionRecord(
     return 'REMOVAL_FAILED';
   }
   if (!isContained(root, target)) return 'REMOVAL_FAILED';
+
+  // The receipt goes with the record, and it goes **first**.
+  //
+  // This used to run after the record was unlinked, with a comment that argued
+  // for the opposite order and then did not take it. The argument was right. A
+  // receipt outliving its record is read by the next listing as "delivered", and
+  // a REPOSITORY-subject identity digests no instant (`repositoryAttentionIdFor`
+  // takes root, condition and reason and deliberately no time) - so when the
+  // same condition recurs it re-uses the same name, the re-raised item is born
+  // already acknowledged, and it is **never sent again**, for as long as the
+  // orphan survives. Two ways to orphan one: the process dies between the two
+  // unlinks, or the receipt unlink fails for anything but ENOENT, which on this
+  // build's Windows/NTFS contract is an indexer or a scanner holding a file.
+  //
+  // Reversed, the surviving failure is a record with no receipt: it is offered
+  // again, which is at worst one duplicate push and is the failure this module's
+  // header already names as the acceptable one - "a removal that does not happen
+  // is a stale item, which is noise rather than silence". Not even that, usually:
+  // `settleAttention` derives what to announce from the conditions that are true
+  // *now*, so a record left behind by a failed unlink whose condition has
+  // cleared is not announced at all.
+  //
+  // Its own outcome is deliberately not reported: this function answers about
+  // the record, and a caller counting resolutions must not be told a different
+  // number because a receipt was already gone.
+  discardDeliveryReceipt(attentionId, provider);
+
   let code: AttentionRemovalCode;
   try {
     rmSync(target, { force: false, recursive: false });
@@ -572,18 +599,6 @@ export function removeAttentionRecord(
   } catch (error: unknown) {
     code = safeErrnoCode(error) === 'ENOENT' ? 'ALREADY_GONE' : 'REMOVAL_FAILED';
   }
-
-  // The receipt goes with the record, and it goes **after** it. A receipt
-  // outliving its record would be read by the next listing as "delivered", and
-  // if that condition then recurs it would re-use the same identity - so the
-  // re-raised item would be born already acknowledged and never sent. Removing
-  // the receipt first would have the harmless failure instead (a re-send), which
-  // is why the order is this way round and not the other.
-  //
-  // Its own outcome is deliberately not reported: this function answers about
-  // the record, and a caller counting resolutions must not be told a different
-  // number because a receipt was already gone.
-  if (code !== 'REMOVAL_FAILED') discardDeliveryReceipt(attentionId, provider);
   return code;
 }
 
@@ -595,9 +610,17 @@ function discardDeliveryReceipt(attentionId: string, provider: PathProvider): vo
     if (!isContained(root, receipt)) return;
     rmSync(receipt, { force: true, recursive: false });
   } catch {
-    // A receipt that will not go away costs one suppressed re-send of a
-    // condition that has already been resolved once. It is not worth failing a
-    // removal that succeeded.
+    // Swallowed, and the cost is stated as it really is rather than softened.
+    // For a TASK item it is one suppressed re-send: the identity carries
+    // `stateEnteredAt`, so a re-entry is a different name and is announced. For
+    // a REPOSITORY item there is no instant in the identity, so every future
+    // occurrence of that condition on that root re-uses this name and stays
+    // silent while the file survives.
+    //
+    // It is still not worth failing on: the record has not been removed yet at
+    // this point, so returning early would leave a record *and* a receipt, which
+    // is the same silence plus a stale item. The removal continues, and the next
+    // successful resolution of the same condition tries this unlink again.
   }
 }
 

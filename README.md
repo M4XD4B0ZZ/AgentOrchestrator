@@ -3935,9 +3935,10 @@ and because the failure mode it describes — a command that cannot start is
   outcome reaches it, so `STALE_LEASE_PRESENT`, `LEASE_ACQUISITION_REFUSED`,
   `LEASE_RELEASE_UNPROVEN`, `REPOSITORY_UNPLANNABLE` and
   `REPOSITORY_UNRESOLVABLE` raise no durable item and send no push. Combined with
-  `L-M3-02-10` — a long recurring run prints nothing until it ends — a repository
-  that has been unreachable since the first cycle is invisible in every channel
-  until the run terminates. This is the precise reason the durable outbox
+  `L-M3-02-10` — a long recurring run prints nothing about its cycles until it
+  ends, the readiness line before the first pass being the one exception and
+  saying nothing about any repository — a repository that has been unreachable
+  since the first cycle is invisible in every channel until the run terminates. This is the precise reason the durable outbox
   mitigates **U2** and does not touch **U3**, and the M3 final dogfood measured
   it: the repository-unresolvable injection raised nothing.
 
@@ -4034,12 +4035,22 @@ and because the failure mode it describes — a command that cannot start is
   needs an attention judgement that can run Git and an auth preflight, which is a
   different and much larger thing.
 
-- **L-M3-02-10** — a long recurring run **prints nothing until it ends and holds
-  every cycle in memory**. `--idle-poll-ms 60000 --max-cycles 4096` is a
+- **L-M3-02-10** — a long recurring run **prints almost nothing until it ends and
+  holds every cycle in memory**. `--idle-poll-ms 60000 --max-cycles 4096` is a
   ~2.8-day invocation, and the scheduler accumulates one `SchedulerCycle` per
   cycle — each retaining a whole `CrossRepositoryRunResult` and a `WakeScan` —
-  plus one attention report per pass, and the whole report is written in a single
-  `write()` at the end. Before this slice the practical cycle count was the
+  plus one attention report per pass, and the whole run report is written in a
+  single `write()` at the end.
+
+  **Narrowed, not closed.** A waiting invocation now writes one thing before it
+  goes quiet: the registry head and a `Notifications` readiness line, in a
+  `write()` of its own before the first pass (`cli/repositories-command.ts`).
+  That is the whole of the exception — a broken `notify.yaml` is a fact an
+  operator has to have *before* they walk away, and it was previously invisible
+  for the length of the run. Everything else this entry says still holds: no
+  per-cycle progress reaches the console, and the memory growth is untouched.
+
+  Before this slice the practical cycle count was the
   number of recorded quota resets in a run, a handful. Streaming the report per
   cycle is a change to what `repositories` prints, which is its own decision; the
   durable outbox is the part an operator can read *while* a run is going, and
@@ -7596,21 +7607,28 @@ Deciding it early is not the same as saying it early, and for a long time only
 one of the two commands did both. `agent-loop block` printed the state the line
 after it built the notifier; the recurring `agent-loop repositories
 --wait-for-reset` built it just as early and then said nothing, because a
-recurring invocation prints nothing at all until it ends — so on a run that
-waited, "immediately" meant "when the run is over", which is the one moment the
-sentence above exists to rule out. It was measured false on a real overnight run.
-A waiting invocation now writes a `Notifications` line before its first pass:
+recurring invocation printed nothing at all until it ended.
+
+"Told when the run is over" is the charitable reading of what it did. The
+attention section is omitted entirely when nothing needed anybody, and
+`pushAttentionItems` answers `NOTHING_TO_SEND` before it looks at the notifier's
+state at all — so an operator could run an unattended night against an unusable
+`notify.yaml` and be told nothing, at any point, by anything. It was measured on
+a real overnight run.
+
+A waiting invocation now writes a `Notifications` line before its first pass —
+the state, then its sentence on the following line, unwrapped:
 
 ```text
 Notifications: ARMED
-  a notification endpoint is configured, so anything that needs you during this
-  run is sent to it as soon as the pass that found it ends
+  a notification endpoint is configured, so anything that needs you during this run is sent to it as soon as the pass that found it ends
 ```
 
-`NOT_CONFIGURED` and `CONFIG_UNUSABLE <closed code>` are the other two readings.
-The refusal code is the only thing printed beside the state — never the
-endpoint, never the topic, never the token — because that code is a word from
-`NOTIFY_CONFIG_REFUSALS` and the refusal never carried the file into itself. An
+`NOT_CONFIGURED` and `CONFIG_UNUSABLE  <closed code>` are the other two
+readings. The refusal code is the only thing printed beside the state — never
+the endpoint, never the topic, never the token — because `configCode` is typed
+`NotifyConfigRefusal | null`, so it can hold nothing but a word from
+`NOTIFY_CONFIG_REFUSALS`, and the refusal never carried the file into itself. An
 invocation that did not ask to wait reads no configuration and prints no such
 line, which is the same promise it already kept about the store.
 
