@@ -399,6 +399,11 @@ describe('M4 / U3 — the judgement table over run conditions', () => {
     ['COMPLETED', 'the intended end'],
     ['INVOCATION_BUDGET_EXHAUSTED', 'the operator’s own bound, reached'],
     ['TASK_ABORTED', 'leaves ABORTED, which the task table calls silent: an end somebody chose'],
+    [
+      'TASK_OPERATOR_RESOLVED',
+      'leaves OPERATOR_RESOLVED, which the task table calls silent: the person any item ' +
+        'here would be addressed to is the one who ended it',
+    ],
     ['BLOCKED_USAGE_LIMIT', 'leaves BLOCKED_USAGE_LIMIT, judged against the clock by the scan'],
     ['BLOCKED_VERIFY', 'leaves BLOCKED_VERIFY, which the task table raises'],
     ['BLOCKED_AUTH', 'leaves BLOCKED_AUTH, which the task table raises'],

@@ -639,12 +639,15 @@ export type CapabilityProvisioner = (
  * registry that is absent, unusable or silent about this capability grants no
  * preparation command, and the provisioner says so rather than guessing at one.
  */
-function defaultCapabilityProvisioner(git: GitRunner): CapabilityProvisioner {
+function defaultCapabilityProvisioner(
+  git: GitRunner,
+  leaseHolds: () => boolean,
+): CapabilityProvisioner {
   return async (worktreePath, requirement) => {
     const registry = loadMcpCapabilityRegistry();
     const grant =
       registry.state === 'CONFIGURED' ? (registry.grants.get('codegraph') ?? null) : null;
-    return await provisionCodegraphIndex({ worktreePath, requirement, grant, git });
+    return await provisionCodegraphIndex({ worktreePath, requirement, grant, git, leaseHolds });
   };
 }
 
@@ -1234,7 +1237,12 @@ export async function runTask(
     // what parks the task.
     if (!capabilityProvisionAttempted) {
       capabilityProvisionAttempted = true;
-      const provision = deps.provisionCapability ?? defaultCapabilityProvisioner(deps.git);
+      const provision =
+        deps.provisionCapability ??
+        defaultCapabilityProvisioner(
+          deps.git,
+          () => verifyExecutionLeaseHeldFor(repository, request.lease).code === 'HELD',
+        );
       capabilityProvision = await provision(
         authorisedWorktreePath,
         repository.capabilities.codegraph.requirement,

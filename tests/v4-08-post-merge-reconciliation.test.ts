@@ -2579,7 +2579,11 @@ describe('the execution lifecycle is untouched, and the block ledger with it', (
     // does not extend `TaskState`: block settlement re-proves itself against the
     // task file's exact BYTES, so any post-delivery write to it — a state change
     // or a same-state checkpoint — falsifies every SETTLED entry for the task.
-    expect([...TERMINAL_STATES]).toEqual(['READY_FOR_PR', 'ABORTED']);
+    // The third member is M8's, and this case's claim is unchanged by it: what
+    // is pinned here is that *this* slice invented no post-delivery state, and
+    // `OPERATOR_RESOLVED` is not one — it is written by an operator's own
+    // command, out of a blocking state, and says nothing about a delivery.
+    expect([...TERMINAL_STATES]).toEqual(['READY_FOR_PR', 'ABORTED', 'OPERATOR_RESOLVED']);
     expect(isTerminalState('READY_FOR_PR')).toBe(true);
     expect(TRANSITION_TABLE.READY_FOR_PR).toEqual([]);
     // No state gained an edge INTO a post-delivery member either, because there

@@ -90,6 +90,20 @@ export interface VerificationStatement {
    * `null` is not a soft `false`. It is reported, never folded into the reading.
    */
   readonly uncommittedChanges: boolean | null;
+  /**
+   * Whether this task's failure history is on disk and could not be read.
+   *
+   * Reported rather than folded into the reading, and it is a real residual: a
+   * `MALFORMED`, `UNSUPPORTED_VERSION` or `NOT_THIS_TASK` attempt store may hold
+   * a failure *newer* than the pass this statement is about, and nothing here can
+   * know. The pass record is still intact and still about this commit, so the
+   * reading stands — but a reader that is told "PASSED" while this is `true` has
+   * been told something narrower than it looks, and the rendering says so.
+   *
+   * `false` for an absent history, which is the ordinary case and means exactly
+   * "nobody wrote one".
+   */
+  readonly failureHistoryUnreadable: boolean;
 }
 
 export interface VerificationStatementInputs {
@@ -117,6 +131,7 @@ function statement(from: Partial<VerificationStatement> & { readonly reading: Ve
     failureVerdict: null,
     failureStoppedAt: null,
     uncommittedChanges: null,
+    failureHistoryUnreadable: false,
     ...from,
   });
 }
@@ -165,9 +180,14 @@ function newestAttemptFor(
 export function verificationStatement(inputs: VerificationStatementInputs): VerificationStatement {
   const clean = inputs.worktreeClean;
   const uncommittedChanges = clean === null ? null : !clean;
+  // "Nobody wrote one" and "something is there this build cannot read" are the
+  // difference between an absence and a blind spot, and only the second one can
+  // be hiding a newer failure.
+  const failureHistoryUnreadable =
+    inputs.attempts.reading !== 'ATTEMPT_HISTORY' && inputs.attempts.reading !== 'ABSENT';
 
   if (inputs.observedCommit === null) {
-    return statement({ reading: 'NOT_OBSERVABLE', uncommittedChanges });
+    return statement({ reading: 'NOT_OBSERVABLE', uncommittedChanges, failureHistoryUnreadable });
   }
   const observedCommit = inputs.observedCommit;
 
@@ -199,12 +219,18 @@ export function verificationStatement(inputs: VerificationStatementInputs): Veri
         failureVerdict: failure.verdict,
         failureStoppedAt: failure.stoppedAt,
         uncommittedChanges,
+        failureHistoryUnreadable,
       });
     }
   }
 
   if (passRecord === null) {
-    return statement({ reading: 'NOT_MEASURED', observedCommit, uncommittedChanges });
+    return statement({
+      reading: 'NOT_MEASURED',
+      observedCommit,
+      uncommittedChanges,
+      failureHistoryUnreadable,
+    });
   }
 
   if (passIsThisTree && passIsThisProfile) {
@@ -215,6 +241,7 @@ export function verificationStatement(inputs: VerificationStatementInputs): Veri
       observedCommit,
       phases: passRecord.phases,
       uncommittedChanges,
+      failureHistoryUnreadable,
     });
   }
 
@@ -229,5 +256,6 @@ export function verificationStatement(inputs: VerificationStatementInputs): Veri
     phases: passRecord.phases,
     differs: passIsThisTree ? 'PROFILE' : 'COMMIT',
     uncommittedChanges,
+    failureHistoryUnreadable,
   });
 }

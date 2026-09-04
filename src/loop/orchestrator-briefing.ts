@@ -140,6 +140,14 @@ function verificationLines(statement: VerificationStatement): readonly string[] 
         : '  worktree    : carries no uncommitted changes',
     );
   }
+  // The residual, said out loud rather than left implicit: a failure history
+  // this build cannot read may hold a newer failure than the pass above.
+  if (statement.failureHistoryUnreadable) {
+    lines.push(
+      '  caution     : this task’s recorded verification FAILURES could not be read,',
+      '                so a newer failure than the line above cannot be ruled out',
+    );
+  }
 
   return lines;
 }

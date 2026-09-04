@@ -291,10 +291,17 @@ describe('an interrupted run keeps the evidence the task already had', () => {
     const reloaded = loadTaskState(root, TASK_ID);
     if (reloaded.classification !== 'STATE_VALID') expect.unreachable();
 
+    // Compared against the state as the CONTRACT reads it, not against the
+    // literal the fixture wrote. `inFlightState` omits the additive, defaulted
+    // fields — a state written before they existed does — and parsing supplies
+    // them, so a raw comparison reports `undefined` vs `null` as a change the
+    // interruption never made. Widening the list to absorb that would have made
+    // this case claim the writer touched a field it does not know exists.
+    const baseline = parseTaskState(before) as Record<string, unknown>;
     const changed = Object.keys(reloaded.state).filter(
       (key) =>
         JSON.stringify((reloaded.state as Record<string, unknown>)[key]) !==
-        JSON.stringify((before as Record<string, unknown>)[key]),
+        JSON.stringify(baseline[key]),
     );
     // The last two are the checkpoint claims a writer may have invalidated
     // (V1-05-RR-F8). They are listed here rather than allowed to drift, so that

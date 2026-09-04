@@ -223,6 +223,7 @@ describe('provisioning the worktree index', () => {
       requirement: 'OPTIONAL',
       grant: grant({ command: 'git', args: ['init', '.codegraph'] }),
       git: runGitCommand,
+      leaseHolds: () => true,
     });
     expect(result.outcome).toBe('NOT_REQUIRED');
     expect(result.commandRan).toBe(false);
@@ -235,6 +236,7 @@ describe('provisioning the worktree index', () => {
       requirement: 'REQUIRED',
       grant: grant(null),
       git: runGitCommand,
+      leaseHolds: () => true,
     });
     expect(result.outcome).toBe('NO_OPERATOR_COMMAND');
     expect(result.commandRan).toBe(false);
@@ -255,6 +257,7 @@ describe('provisioning the worktree index', () => {
       requirement: 'REQUIRED',
       grant: grant({ command: 'git', args: ['init', '.codegraph'] }),
       git: runGitCommand,
+      leaseHolds: () => true,
     });
     expect(result.outcome).toBe('INDEX_PATH_NOT_IGNORED');
     expect(result.commandRan).toBe(false);
@@ -271,6 +274,7 @@ describe('provisioning the worktree index', () => {
       // this suite may not depend on an indexer being installed.
       grant: grant({ command: 'git', args: ['init', '.codegraph'] }),
       git: runGitCommand,
+      leaseHolds: () => true,
     });
     expect(result.outcome).toBe('PREPARED');
     expect(result.commandRan).toBe(true);
@@ -291,6 +295,7 @@ describe('provisioning the worktree index', () => {
       requirement: 'REQUIRED',
       grant: grant({ command: 'git', args: ['init', '.codegraph'] }),
       git: runGitCommand,
+      leaseHolds: () => true,
     });
     expect(again.outcome).toBe('ALREADY_PRESENT');
     expect(again.commandRan).toBe(false);
@@ -306,6 +311,7 @@ describe('provisioning the worktree index', () => {
       requirement: 'REQUIRED',
       grant: grant({ command: 'git', args: ['--version'] }),
       git: runGitCommand,
+      leaseHolds: () => true,
     });
     expect(result.outcome).toBe('STILL_ABSENT');
     expect(result.commandRan).toBe(true);
@@ -569,5 +575,38 @@ describe('a block run survives a task an operator ended', () => {
     // having asked a human and been answered.
     expect(stopBlockRun(load(), 'COMPLETE', options).outcome).toBe('RECORDED');
     expect(load().ledger.stopReason).toBe('COMPLETE');
+  });
+});
+
+/* ═════════ F. Provisioning is a productive spawn, and is fenced ═══════════ */
+
+describe('the index-preparation command sits behind the execution lease', () => {
+  it('starts nothing once this run has stopped being the writer', async () => {
+    // What it creates is local — a directory inside the worktree — and local is
+    // exactly what the lease protects. The check is asked immediately before the
+    // spawn rather than taken from a value computed earlier in the invocation.
+    const started = await withDivergentIndex('M8-02-PROV-LEASE', 'REQUIRED');
+    let spawned = false;
+    const result = await provisionCodegraphIndex({
+      worktreePath: started.workspace.worktreePath,
+      requirement: 'REQUIRED',
+      grant: Object.freeze({
+        capability: 'codegraph' as const,
+        command: 'git',
+        args: Object.freeze(['--version']),
+        tool: 'mcp__codegraph__codegraph_explore',
+        prepare: Object.freeze({ command: 'git', args: Object.freeze(['init', '.codegraph']) }),
+      }),
+      git: runGitCommand,
+      leaseHolds: () => false,
+      run: async () => {
+        spawned = true;
+        return null;
+      },
+    });
+
+    expect(result.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    expect(spawned).toBe(false);
+    expect(probeCodegraphCapability(started.workspace.worktreePath)).toBe('UNAVAILABLE');
   });
 });

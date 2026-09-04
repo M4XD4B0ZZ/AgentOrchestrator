@@ -49,6 +49,7 @@ export function notMeasured(
     failureVerdict: null,
     failureStoppedAt: null,
     uncommittedChanges: null,
+    failureHistoryUnreadable: false,
     ...overrides,
   });
 }

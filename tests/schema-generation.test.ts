@@ -45,6 +45,11 @@ describe('generated JSON Schema', () => {
       'resumeFrom',
       'reportedResetAt',
       'worktreeCleanAtCheckpoint',
+      // M8's provenance field, required here for the same reason the field
+      // above it is: defaulted on the input side, so a state written before it
+      // existed still parses, and parsing fills it with the `null` that means
+      // no operator ever ended this task.
+      'operatorResolution',
       'findingHistory',
     ]);
   });

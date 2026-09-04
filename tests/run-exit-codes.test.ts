@@ -69,6 +69,9 @@ describe('every plan conclusion has an exit code', () => {
         'RECONCILED_IN_FLIGHT',
         'TASK_COMPLETED',
         'TASK_NOT_STARTED',
+        // M8. A task an operator ended is a nominal answer like the four above:
+        // the plan is complete, and there is nobody to summon.
+        'TASK_OPERATOR_RESOLVED',
       ].sort(),
       [EXIT_RUN_INPUT_UNUSABLE]: [
         'NO_ELIGIBLE_TASK',
@@ -112,7 +115,7 @@ describe('every run outcome has an exit code', () => {
     }
 
     expect(Object.fromEntries([...grouped.entries()].sort((a, b) => a[0] - b[0]))).toEqual({
-      [EXIT_RUN_OK]: ['TASK_COMPLETED'],
+      [EXIT_RUN_OK]: ['TASK_COMPLETED', 'TASK_OPERATOR_RESOLVED'].sort(),
       [EXIT_RUN_INPUT_UNUSABLE]: ['TASK_NOT_STARTED'],
       [EXIT_RUN_NEEDS_OPERATOR]: [
         'BLOCKED_AUTH',
@@ -143,9 +146,16 @@ describe('every run outcome has an exit code', () => {
     });
   });
 
-  it('reserves 0 for TASK_COMPLETED alone', () => {
+  it('reserves 0 for the two endings that leave nobody waiting', () => {
+    // The claim was 'TASK_COMPLETED alone' until M8, and the narrowing is
+    // deliberate rather than an accommodation. 0 says this invocation has
+    // nothing left to hand anyone: either the loop drove the task to
+    // READY_FOR_PR, or an operator had already ended it themselves. The second
+    // is emphatically not the first — it claims nothing about the work, opens
+    // no pull request, and carries its own outcome and its own state — but
+    // exiting 3 would summon the very person who made the decision.
     const ok = RUN_OUTCOMES.filter((o) => exitCodeForRunOutcome(o) === EXIT_RUN_OK);
-    expect(ok).toEqual(['TASK_COMPLETED']);
+    expect([...ok].sort()).toEqual(['TASK_COMPLETED', 'TASK_OPERATOR_RESOLVED']);
   });
 
   it('reserves "call again" for the one outcome that means it', () => {
@@ -330,6 +340,9 @@ describe('the start exit-code expectations are load-bearing', () => {
 const EXPECTED_LIFECYCLE_EXIT_CODES: Readonly<Record<string, number>> = Object.freeze({
   // The task finished.
   COMPLETED: 0,
+  // M8: the task was already over because an operator ended it. Nothing to
+  // drive and nobody to summon — see the run table for why 3 would be wrong.
+  TASK_OPERATOR_RESOLVED: 0,
 
   // Durably parked, or a record an operator has to look at. Identical to the run
   // table: a task did not end differently because an outer loop was watching.

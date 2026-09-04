@@ -105,6 +105,8 @@ export const CODEGRAPH_PROVISION_OUTCOMES = [
   'INDEX_PATH_NOT_IGNORED',
   /** Git could not say whether the index path is ignored. Nothing was started. */
   'INDEX_IGNORE_UNDETERMINED',
+  /** This run is no longer the repository's writer. Nothing was started. */
+  'EXECUTION_LEASE_NOT_HELD',
   /** The command ran, and the worktree now carries an index. */
   'PREPARED',
   /** The command could not be started, timed out, or exited non-zero. */
@@ -134,6 +136,17 @@ export interface CodegraphProvisionRequest {
   readonly grant: McpCapabilityGrant | null;
   /** The Git seam, used only to ask what is ignored. */
   readonly git: GitRunner;
+  /**
+   * Whether this run still holds the repository's execution lease.
+   *
+   * Asked as a function so it is answered *now*, immediately before the spawn,
+   * and not taken as a value computed earlier in the invocation. This is the
+   * fence every other productive spawn in this build sits behind: what it
+   * protects is local — a directory inside the worktree, tens of megabytes of
+   * it — and a process that has stopped being the repository's writer must not
+   * be creating one.
+   */
+  readonly leaseHolds: () => boolean;
   /**
    * The runner, defaulting to the real one.
    *
@@ -223,6 +236,10 @@ export async function provisionCodegraphIndex(
   );
   if (ignored === 'UNDETERMINED') return result('INDEX_IGNORE_UNDETERMINED', before);
   if (ignored !== 'IGNORED') return result('INDEX_PATH_NOT_IGNORED', before);
+
+  // Last of every gate and first of nothing, for the reason the stores give:
+  // it is the answer that goes stale, and the effect is immediately after it.
+  if (!request.leaseHolds()) return result('EXECUTION_LEASE_NOT_HELD', before);
 
   const run = request.run ?? defaultRunner;
   const ran = await run(prepare.command, prepare.args, request.worktreePath);

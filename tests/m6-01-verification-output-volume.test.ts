@@ -293,12 +293,20 @@ describe('memory stays bounded whatever the child writes', () => {
 
 /* ═══ 5. Exactly one caller decouples, and it is the gate ═════════════════ */
 
-describe('the decoupling is asked for in exactly one place', () => {
-  it('is set by verify-command.ts and by nothing else in src/', () => {
+describe('the decoupling is asked for only where it is argued for', () => {
+  it('is set by two named call sites and by nothing else in src/', () => {
     // A structural pin, in the spirit of the writer-argv pin: the danger is not
-    // this call site, it is a second one appearing later without an argument.
+    // these call sites, it is a third one appearing later without an argument.
     // `git grep` rather than a filesystem walk, so an untracked scratch file
     // cannot make this vacuous.
+    //
+    // M8 added the second, and it is listed rather than left to drift.
+    // `repo/codegraph-index.ts` runs the operator's index-preparation command,
+    // and the same argument applies to it as to a gate: an indexer killed for
+    // being verbose leaves a partial `.codegraph/` directory behind, which the
+    // capability probe then reads as `INDEX_PRESENT` — a broken index reported
+    // as a prepared one. Its output is bounded at 64 KiB and read by nothing;
+    // the effect is measured by probing the directory afterwards.
     const found = spawnSync(
       'git',
       ['grep', '-l', '--', 'terminateOnOutputLimit: false', 'src/'],
@@ -309,7 +317,10 @@ describe('the decoupling is asked for in exactly one place', () => {
       .map((line) => line.trim().replace(/\\/g, '/'))
       .filter((line) => line !== '');
 
-    expect(files).toEqual(['src/verify/verify-command.ts']);
+    expect(files.sort()).toEqual([
+      'src/repo/codegraph-index.ts',
+      'src/verify/verify-command.ts',
+    ]);
   });
 
   it('leaves the verification budget itself unchanged', () => {

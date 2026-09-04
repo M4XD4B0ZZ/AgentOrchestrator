@@ -36,6 +36,7 @@ import {
   TASK_RUNTIME_DIR_NAME,
 } from '../src/state/state-location.js';
 import { writeFileAtomically } from '../src/state/atomic-file.js';
+import { parseTaskState } from '../src/core/task-state.js';
 import {
   loadTaskState,
   MAX_TASK_STATE_BYTES,
@@ -434,7 +435,11 @@ describe('saving task state', () => {
     const loaded = loadTaskState(root, 'task-0001');
     expect(loaded.code).toBe('LOADED');
     if (!loaded.ok) return;
-    expect(loaded.state).toEqual(state);
+    // Compared against the state as the contract reads it. The fixture writes
+    // the input shape, which omits the defaulted fields a pre-M8 document also
+    // omits; parsing supplies them, and asserting raw equality would make this
+    // case a claim about the fixture's literal rather than about the round trip.
+    expect(loaded.state).toEqual(parseTaskState(state));
   });
 
   it('creates the runtime directory it needs', () => {

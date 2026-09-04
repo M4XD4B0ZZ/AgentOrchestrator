@@ -692,3 +692,47 @@ describe('the pass store', () => {
     expect(loadVerificationPass(started.root, started.taskId).reading).toBe('NOT_THIS_TASK');
   });
 });
+
+/* ═════════ F. The residual the join cannot close ══════════════════════════ */
+
+describe('an unreadable failure history is a blind spot, and says so', () => {
+  const passing = {
+    pass: { reading: 'PASS_RECORD' as const, path: null, record: passRecord() },
+    observedCommit: COMMIT_A,
+    worktreeClean: true,
+    profileDigest: DIGEST_A,
+  };
+
+  it('leaves the reading alone and raises the flag', () => {
+    // The pass record is intact and about this commit, so the reading stands.
+    // What cannot be ruled out is a NEWER failure inside the document this build
+    // could not read — and a statement that said nothing about that would be
+    // narrower than it looks.
+    for (const reading of ['MALFORMED', 'UNSUPPORTED_VERSION', 'NOT_THIS_TASK'] as const) {
+      const statement = verificationStatement({
+        ...passing,
+        attempts: { reading, path: null, record: null },
+      });
+      expect(statement.reading).toBe('PASSED_ON_THIS_TREE');
+      expect(statement.failureHistoryUnreadable).toBe(true);
+    }
+  });
+
+  it('does not raise it for a history nobody wrote', () => {
+    const statement = verificationStatement({
+      ...passing,
+      attempts: { reading: 'ABSENT', path: null, record: null },
+    });
+    expect(statement.failureHistoryUnreadable).toBe(false);
+  });
+
+  it('prints the caution beside the measurement', () => {
+    const statement = verificationStatement({
+      ...passing,
+      attempts: { reading: 'MALFORMED', path: null, record: null },
+    });
+    const lines = reviewerBriefingLines(briefingFixture({ verification: statement })).join('\n');
+    expect(lines).toContain('PASSED');
+    expect(lines).toMatch(/could not be read/);
+  });
+});
