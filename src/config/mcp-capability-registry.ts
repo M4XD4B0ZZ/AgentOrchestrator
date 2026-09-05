@@ -143,12 +143,47 @@ export type McpCapabilityRegistryRefusal = (typeof MCP_CAPABILITY_REGISTRY_REFUS
  * credentials, and the one capability this build knows about needs none. Adding
  * it later is a decision with its own argument to make, not an omission.
  */
+/** An operator-declared command that makes a capability true in a working copy. */
+export interface McpCapabilityPrepare {
+  /** The program to start. Shell-inert, and never repository-supplied. */
+  readonly command: string;
+  /** Its arguments, in order. Each shell-inert. */
+  readonly args: readonly string[];
+}
+
 export interface McpCapabilityGrant {
   readonly capability: RepositoryCapability;
   /** The program to start. Shell-inert, and never repository-supplied. */
   readonly command: string;
   /** Its arguments, in order. Each shell-inert. */
   readonly args: readonly string[];
+  /**
+   * The command that makes this capability true in a fresh working copy, or
+   * `null` when the operator declared none.
+   *
+   * ── Why the operator supplies it and not the repository ──────────────────
+   *
+   * A task worktree is created by `git worktree add`, which populates tracked
+   * content only — and a CodeGraph index is ignored, so no worktree ever
+   * inherits one. Something has to make the index exist in the tree the writer
+   * opens, and there are only three candidates: the repository names a command,
+   * the writing agent runs one, or the operator names one.
+   *
+   * The repository may not, because that is a repository choosing a program for
+   * this machine to run, which is the whole reason this file exists. The writer
+   * may not, because `repo/capabilities.ts` treats the index directory as the
+   * *evidence* for the capability, so a writer able to create it would mint the
+   * proof of the capability AO fails closed on — an agent forging its own
+   * authority. What is left is the operator, in this file, in the same voice
+   * that already names the server command: one program, shell-inert arguments,
+   * no environment, no repository input.
+   *
+   * Optional, and absence is not an error. A repository whose worktrees somehow
+   * carry an index needs nothing here; one that does not, and declares the
+   * capability `REQUIRED`, will park its tasks with the capability unsatisfied,
+   * which is the fail-closed answer rather than a silent pass.
+   */
+  readonly prepare: McpCapabilityPrepare | null;
   /**
    * The exact tool name the writer may call, e.g.
    * `mcp__codegraph__codegraph_explore`.
@@ -186,11 +221,23 @@ export function mcpCapabilityRegistryPath(provider: PathProvider = OS_PATH_PROVI
  * refusal rather than a silently ignored intention — and in particular a
  * misspelled `tool:` does not become a grant with no callable tool.
  */
+const PrepareSchema = z
+  .object({
+    command: z.string().min(1).max(256),
+    args: z.array(z.string().min(1).max(256)).max(MAX_MCP_CAPABILITY_ARGS),
+  })
+  .strict();
+
 const GrantSchema = z
   .object({
     command: z.string().min(1).max(256),
     args: z.array(z.string().min(1).max(256)).max(MAX_MCP_CAPABILITY_ARGS),
     tool: z.string().min(1).max(128),
+    /**
+     * Optional, and `.strict()` around it: a misspelled `prepare:` is a refusal
+     * rather than a grant that silently prepares nothing.
+     */
+    prepare: PrepareSchema.optional(),
   })
   .strict();
 
@@ -270,6 +317,19 @@ export function loadMcpCapabilityRegistry(
       if (!isShellInertArgument(arg)) return unusable('COMMAND_NOT_SHELL_INERT');
     }
 
+    // The preparation command is held to the same grammar as the server
+    // command, in the same pass. It goes into argv the same way and is started
+    // by the same runner, so a second, weaker rule for it would be the drift
+    // this module exists to prevent.
+    if (declared.prepare !== undefined) {
+      if (!isShellInertArgument(declared.prepare.command)) {
+        return unusable('COMMAND_NOT_SHELL_INERT');
+      }
+      for (const arg of declared.prepare.args) {
+        if (!isShellInertArgument(arg)) return unusable('COMMAND_NOT_SHELL_INERT');
+      }
+    }
+
     if (!MCP_TOOL_NAME_PATTERN.test(declared.tool)) return unusable('TOOL_NAME_REFUSED');
 
     grants.set(
@@ -279,6 +339,13 @@ export function loadMcpCapabilityRegistry(
         command: declared.command,
         args: Object.freeze([...declared.args]),
         tool: declared.tool,
+        prepare:
+          declared.prepare === undefined
+            ? null
+            : Object.freeze({
+                command: declared.prepare.command,
+                args: Object.freeze([...declared.prepare.args]),
+              }),
       }),
     );
   }

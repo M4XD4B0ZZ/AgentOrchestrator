@@ -76,6 +76,8 @@ export const BLOCK_RECONCILIATION_FINDINGS = [
   'BLOCKED_WITHOUT_BLOCKING_STATE',
   /** An `ABANDONED` entry whose task record did not reach `ABORTED`. */
   'ABANDONED_WITHOUT_ABORTED_STATE',
+  /** A `RESOLVED` entry whose task record did not reach `OPERATOR_RESOLVED`. */
+  'RESOLVED_WITHOUT_OPERATOR_STATE',
   /** An `ACTIVE` entry with no durable task state at all. */
   'ACTIVE_WITHOUT_TASK_STATE',
   /** A task record exists and cannot be read or validated. */
@@ -135,6 +137,7 @@ const DIVERGENT: ReadonlySet<BlockReconciliationFinding> = new Set([
   'EVIDENCE_STALE',
   'BLOCKED_WITHOUT_BLOCKING_STATE',
   'ABANDONED_WITHOUT_ABORTED_STATE',
+  'RESOLVED_WITHOUT_OPERATOR_STATE',
   'ACTIVE_WITHOUT_TASK_STATE',
   'TASK_STATE_UNUSABLE',
   'COMMIT_NOT_PROVEN_BY_STATE',
@@ -301,6 +304,8 @@ function findingFor(
       return 'BLOCKED_WITHOUT_BLOCKING_STATE';
     case 'ABANDONED':
       return 'ABANDONED_WITHOUT_ABORTED_STATE';
+    case 'RESOLVED':
+      return 'RESOLVED_WITHOUT_OPERATOR_STATE';
     case 'PLANNED':
       // A planned entry only fails a proof by carrying a base pin, which the
       // first two arms already answered. Kept exhaustive rather than defaulted.

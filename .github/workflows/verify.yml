@@ -62,7 +62,23 @@ jobs:
     # merge policy reads as a blocking failure. V2-07LR's break race is what
     # finally tipped it over, and raising the ceiling is the honest fix rather
     # than trimming a check to fit under a number.
-    timeout-minutes: 40
+    #
+    # It was 40, and M8 landed the coin on tails. Measured on this runner, on two
+    # runs of the SAME code minutes apart — the second differed by one README
+    # paragraph and nothing else:
+    #
+    #   934af9b   node 22  34:10  success
+    #   934af9b   node 24  37:09  success
+    #   3e85479   node 22  38:49  success
+    #   3e85479   node 24  40:05  cancelled — the ceiling, not a failure
+    #
+    # Six minutes of spread between identical runs, against six minutes of
+    # headroom. The suite is now ~5 870 tests plus sixteen dist-artefact checks;
+    # 40 stopped being a ceiling and became the thing the gate races. 75 restores
+    # roughly the 2x margin the previous raise was sized for, and the numbers are
+    # written down here so the next raise is argued from measurements rather than
+    # from the feeling that it is too small again.
+    timeout-minutes: 75
 
     steps:
       - name: Check out the repository

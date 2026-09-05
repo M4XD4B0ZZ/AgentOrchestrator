@@ -2768,6 +2768,13 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'deliver', 'github-pull-request-creator.ts'),
         join('src', 'deliver', 'github-pull-request-merger.ts'),
         join('src', 'doctor', 'capabilities.ts'),
+        // M8, and it starts a process: the operator's own command that makes a
+        // CodeGraph index exist in a task worktree. It is in the measured group
+        // below, and it is fenced. `leaseHolds` is a required member of its
+        // request and is asked immediately before the spawn, because what it
+        // creates is local — a directory inside the worktree — and local is
+        // exactly what the lease protects.
+        join('src', 'repo', 'codegraph-index.ts'),
         join('src', 'repo', 'git-query.ts'),
         join('src', 'verify', 'run-verification.ts'),
         join('src', 'verify', 'verify-command.ts'),
@@ -2807,6 +2814,7 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'deliver', 'github-pull-request-creator.ts'),
         join('src', 'deliver', 'github-pull-request-merger.ts'),
         join('src', 'doctor', 'capabilities.ts'),
+        join('src', 'repo', 'codegraph-index.ts'),
         join('src', 'repo', 'git-query.ts'),
         join('src', 'verify', 'verify-command.ts'),
         join('src', 'worktree', 'git-command.ts'),

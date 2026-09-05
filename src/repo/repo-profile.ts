@@ -22,9 +22,21 @@ import { z } from 'zod';
 import {
   REPO_PROFILE_SCHEMA_VERSION,
   RepoProfileObjectSchema,
+  VERIFICATION_PHASES,
 } from './internal/repo-profile-object-schema.js';
 
 export { REPO_PROFILE_SCHEMA_VERSION };
+
+/**
+ * The phase names a profile may declare, re-exported as this module's own.
+ *
+ * Modules outside `repo/` read the vocabulary from here rather than reaching
+ * into `internal/`, and they read it rather than restating it: a second copy of
+ * a closed vocabulary is a copy that can drift from the schema that enforces
+ * it, and `verify/verification-pass.ts` stores this value in a document it
+ * later prints into an agent's prompt.
+ */
+export { VERIFICATION_PHASES };
 
 export type RepoProfileInput = z.input<typeof RepoProfileObjectSchema>;
 export type RepoProfile = z.infer<typeof RepoProfileObjectSchema>;

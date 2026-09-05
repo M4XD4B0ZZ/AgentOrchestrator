@@ -9,11 +9,23 @@
  *
  * ── What the CodeGraph probe actually proves (and what it does not) ─────────
  *
- * The probe answers one question honestly: **does this repository carry a
- * CodeGraph index?** It looks for a real `.codegraph` directory at the
- * canonical repository root, which is the documented marker of an indexed
- * repository, and it looks for it in-process — no subprocess, no PATH search,
- * no network, no environment value.
+ * The probe answers one question honestly: **does this working copy carry a
+ * CodeGraph index?** It looks for a real `.codegraph` directory at the directory
+ * it is given, which is the documented marker of an indexed working copy, and it
+ * looks for it in-process — no subprocess, no PATH search, no network, no
+ * environment value.
+ *
+ * **Which working copy is the caller's decision, and it is a real decision.**
+ * The probe used to be described as asking about "the canonical repository
+ * root", and its one caller passed exactly that — while the agents this build
+ * starts work in a *task worktree*, a sibling directory. Those two can disagree,
+ * and on the machine this was written on they always did: `.codegraph/` is
+ * ignored through `.git/info/exclude`, a file in the **common** Git directory,
+ * so every linked worktree inherits the ignore rule and none inherits the
+ * directory. Measured: 0 of 12 worktrees carried an index while the root did.
+ * `resolve-repository.ts` still asks at the root, because that is the only
+ * question answerable before a task exists, and `plan/task-brief.ts` asks again
+ * in the worktree, which is the answer a writer's authority may rest on.
  *
  * That is the whole of the evidence, so it is also the whole of what the type
  * says. The positive status is named `INDEX_PRESENT` rather than `AVAILABLE`
@@ -66,15 +78,20 @@ export const CODEGRAPH_INDEX_DIR_NAME = '.codegraph';
 
 /**
  * `INDEX_PRESENT` only for a real directory — not a symlink, not a junction,
- * not a file — named `.codegraph` directly at `repositoryRoot`.
+ * not a file — named `.codegraph` directly in `workingCopy`.
  *
  * A link is refused rather than followed: the marker is supposed to say
- * something about *this* repository, and a link makes it say something about
+ * something about *this* working copy, and a link makes it say something about
  * wherever it points. An inspection error that is not "absent" yields `UNKNOWN`
  * rather than a guess in either direction.
+ *
+ * The parameter is the whole of the subject. Nothing in here knows or cares
+ * whether it was handed a repository root or a task worktree, and a caller that
+ * passes the wrong one gets a true answer to the wrong question — which is the
+ * defect this parameter was renamed to stop repeating.
  */
-export function probeCodegraphCapability(repositoryRoot: string): CapabilityStatus {
-  const indexPath = join(repositoryRoot, CODEGRAPH_INDEX_DIR_NAME);
+export function probeCodegraphCapability(workingCopy: string): CapabilityStatus {
+  const indexPath = join(workingCopy, CODEGRAPH_INDEX_DIR_NAME);
 
   let stats;
   try {
@@ -97,9 +114,10 @@ export function probeCodegraphCapability(repositoryRoot: string): CapabilityStat
  * `OPTIONAL` is met by every status, including `UNKNOWN`: the repository stated
  * that it can work without the capability. `REQUIRED` is met by `INDEX_PRESENT`
  * alone — that is, by the only status backed by evidence this build can gather.
- * A profile declaring `REQUIRED` is therefore requiring a locally indexed
- * repository, which is what the resolver is able to check; it is not being told
- * that a CodeGraph tool answered.
+ * A profile declaring `REQUIRED` is therefore requiring an indexed working copy,
+ * which is what a probe is able to check; it is not being told that a CodeGraph
+ * tool answered — and *which* working copy was asked is a property of the
+ * caller, never of this function.
  */
 export function capabilitySatisfied(
   requirement: 'REQUIRED' | 'OPTIONAL',

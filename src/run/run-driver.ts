@@ -78,6 +78,7 @@
 import {
   isBlockingState,
   isTerminalState,
+  type TerminalState,
   type BlockingState,
   type TaskStateName,
 } from '../core/states.js';
@@ -109,6 +110,11 @@ import { planNextTask, type TaskPlanningResult } from '../plan/plan-next-task.js
 import type { TaskDefinition } from '../plan/task-definition.js';
 import { readExecutionBrief } from '../plan/task-brief.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
+import {
+  provisionCodegraphIndex,
+  type CodegraphProvisionResult,
+} from '../repo/codegraph-index.js';
+import { loadMcpCapabilityRegistry } from '../config/mcp-capability-registry.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import {
   reconcileTask,
@@ -145,6 +151,16 @@ export const RUN_OUTCOMES = [
   'TASK_COMPLETED',
   /** The task was already `ABORTED`. Terminal, and nothing was run. */
   'TASK_ABORTED',
+  /**
+   * The record is terminal because an operator ended the task themselves.
+   *
+   * Its own outcome rather than `TASK_ABORTED`, and the difference is not
+   * cosmetic: `TASK_ABORTED` grades `ABANDON` in a block run, and
+   * `abandonBlockTask` then refuses the entry because the record is not
+   * `ABORTED` — a wedged run. It is not `TASK_COMPLETED` either, because that is
+   * this build's claim that the loop finished the work.
+   */
+  'TASK_OPERATOR_RESOLVED',
 
   /* --- the task is durably parked ---------------------------------------- */
   /**
@@ -330,6 +346,17 @@ export interface RunResult {
    * claim about a decision rather than the decision itself.
    */
   readonly remediatedVerifyFailure: boolean;
+  /**
+   * What this run did about a capability the repository requires in the task's
+   * worktree, or `null` when it never reached the point of asking.
+   *
+   * Reported because a silent one is the failure this slice is fixing: the
+   * capability gate parks a task with `HUMAN_DECISION_REQUIRED`, and an operator
+   * reading that needs to know whether AO tried to prepare the index, whether
+   * the operator's registry names a command at all, and whether the command ran
+   * and left nothing behind. Never persisted — it is a fact about one call.
+   */
+  readonly capabilityProvision: CodegraphProvisionResult | null;
   /**
    * Whether this call took a task out of `HUMAN_DECISION_REQUIRED` on the
    * operator's decision.
@@ -582,6 +609,66 @@ export interface RunDependencies {
   /** State-store seams, forwarded to every write. */
   readonly replace?: ReplaceFn;
   readonly tempSuffix?: TempSuffixFn;
+  /**
+   * How a required capability is made true in the task's worktree. Defaults to
+   * the real one, which reads the operator's own registry.
+   *
+   * **Not the same class of seam as `writerMcp`.** That value is authority for a
+   * writing agent, decided once at the top of the invocation and deliberately
+   * not re-decidable further down. This is AO's own command, run by AO, in a
+   * directory AO created, and nothing an agent does can reach it — so it is
+   * resolved where the worktree is known rather than threaded through every
+   * caller. What a test substitutes here is the process, never the decision: the
+   * effect is measured by probing the filesystem afterwards.
+   */
+  readonly provisionCapability?: CapabilityProvisioner;
+}
+
+/** How a required capability is made true in one worktree. See the dependency. */
+export type CapabilityProvisioner = (
+  worktreePath: string,
+  requirement: 'REQUIRED' | 'OPTIONAL',
+) => Promise<CodegraphProvisionResult>;
+
+/**
+ * The production provisioner: the operator's registry, and nothing else.
+ *
+ * The registry is read here rather than carried in because it is the operator's
+ * file, on the operator's machine, outside every repository — the same trust
+ * root `mcp-capability-preflight.ts` reads for the grant it hands the writer. A
+ * registry that is absent, unusable or silent about this capability grants no
+ * preparation command, and the provisioner says so rather than guessing at one.
+ */
+function defaultCapabilityProvisioner(
+  git: GitRunner,
+  leaseHolds: () => boolean,
+): CapabilityProvisioner {
+  return async (worktreePath, requirement) => {
+    const registry = loadMcpCapabilityRegistry();
+    const grant =
+      registry.state === 'CONFIGURED' ? (registry.grants.get('codegraph') ?? null) : null;
+    return await provisionCodegraphIndex({ worktreePath, requirement, grant, git, leaseHolds });
+  };
+}
+
+/**
+ * The outcome for a record that is already terminal.
+ *
+ * One function rather than a ternary at each site, because a ternary over a
+ * boolean is exactly what a widened terminal vocabulary does not fail: the
+ * compiler cannot see that a third terminal state now falls into the `else`,
+ * and the `else` here says "aborted". Written once, exhaustively, so the next
+ * terminal state is a compile error in one place instead of a lie in four.
+ */
+function terminalRunOutcome(state: TerminalState): RunOutcome {
+  switch (state) {
+    case 'READY_FOR_PR':
+      return 'TASK_COMPLETED';
+    case 'OPERATOR_RESOLVED':
+      return 'TASK_OPERATOR_RESOLVED';
+    case 'ABORTED':
+      return 'TASK_ABORTED';
+  }
 }
 
 /* ──────────────────────────── the driver ────────────────────────────────── */
@@ -601,6 +688,7 @@ function runResult(
     continuedUsageLimit: false,
     usageLimitContinuation: null,
     permissionDenials: NO_PERMISSION_DENIALS,
+    capabilityProvision: null,
     ...from,
   });
 }
@@ -701,6 +789,18 @@ export async function runTask(
   let humanDecisionContinuationSpent = false;
   /** The third decision, bounded exactly as its two siblings are. */
   let usageLimitContinuationSpent = false;
+  /**
+   * What preparing the task worktree's required capability did, and whether it
+   * was tried at all.
+   *
+   * Attempted **once per invocation**, not once per iteration. The probe that
+   * short-circuits it is a single `lstat`, so repeating it would be cheap — but
+   * the command behind it is not, and a preparation that keeps failing must not
+   * be re-run at every step until the budget runs out. One attempt, then the
+   * capability gate in the loop decides what to do about the answer.
+   */
+  let capabilityProvision: CodegraphProvisionResult | null = null;
+  let capabilityProvisionAttempted = false;
   const stop = (from: Partial<RunResult> & { readonly outcome: RunOutcome }): RunResult =>
     runResult({
       taskId,
@@ -708,6 +808,7 @@ export async function runTask(
       remediatedVerifyFailure: verifyRemediationSpent,
       continuedHumanDecision: humanDecisionContinuationSpent,
       continuedUsageLimit: usageLimitContinuationSpent,
+      capabilityProvision,
       ...from,
     });
 
@@ -837,7 +938,7 @@ export async function runTask(
     // else fails the load, not the comparison — and it always stops.
     if (loaded !== null && isTerminalState(loaded.state.state)) {
       return stop({
-        outcome: loaded.state.state === 'READY_FOR_PR' ? 'TASK_COMPLETED' : 'TASK_ABORTED',
+        outcome: terminalRunOutcome(loaded.state.state),
         state: loaded.state.state,
         steps,
         reconciliation,
@@ -893,7 +994,11 @@ export async function runTask(
     // into the blocking and execution gates below.
     if (resume.continuation === 'TERMINAL') {
       return stop({
-        outcome: state.state === 'READY_FOR_PR' ? 'TASK_COMPLETED' : 'TASK_ABORTED',
+        // Narrowed rather than assumed: this floor exists precisely for the case
+        // where the classifier and the vocabulary disagree, and calling a state
+        // this build does not consider terminal "aborted" is the kind of quiet
+        // mislabelling the whole helper was written to remove.
+        outcome: isTerminalState(state.state) ? terminalRunOutcome(state.state) : 'TASK_ABORTED',
         state: state.state,
         steps,
         reconciliation,
@@ -1115,6 +1220,33 @@ export async function runTask(
         reconciliation,
         resume,
       });
+    }
+
+    // --- 5a. The capability the repository requires, in the tree agents open --
+    //
+    // Here because this is the first line at which the authorised worktree is
+    // known, and before section 7 because every step that briefs an agent gates
+    // on the capability being satisfied *in that tree*. A `git worktree add`
+    // never carries an ignored index across, so without this the corrected probe
+    // would refuse every task in every `codegraph: REQUIRED` repository.
+    //
+    // It is AO's own command, from the operator's own registry — never the
+    // repository's, and never the writing agent's, which would let an agent mint
+    // the proof of the capability AO fails closed on. And it decides nothing: a
+    // failure leaves the capability unsatisfied, and the loop's existing gate is
+    // what parks the task.
+    if (!capabilityProvisionAttempted) {
+      capabilityProvisionAttempted = true;
+      const provision =
+        deps.provisionCapability ??
+        defaultCapabilityProvisioner(
+          deps.git,
+          () => verifyExecutionLeaseHeldFor(repository, request.lease).code === 'HELD',
+        );
+      capabilityProvision = await provision(
+        authorisedWorktreePath,
+        repository.capabilities.codegraph.requirement,
+      );
     }
 
     // --- 6. A blocked task's resume, once every gate above has passed -------

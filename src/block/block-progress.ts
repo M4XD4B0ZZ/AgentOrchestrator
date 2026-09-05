@@ -271,8 +271,11 @@ export function settleBlockTask(
   const entry = entryFor(ledger, taskId);
   if (entry === null) return progress({ outcome: 'TASK_NOT_IN_RUN' });
   if (entry.disposition === 'SETTLED') return progress({ outcome: 'DISPOSITION_UNCHANGED' });
-  // Nothing continues from a task that was given up on.
-  if (entry.disposition === 'ABANDONED') return progress({ outcome: 'DISPOSITION_UNCHANGED' });
+  // Nothing continues from a task that was given up on, or that an operator has
+  // already ended.
+  if (entry.disposition === 'ABANDONED' || entry.disposition === 'RESOLVED') {
+    return progress({ outcome: 'DISPOSITION_UNCHANGED' });
+  }
 
   const state = loadTaskState(options.repositoryRoot, taskId);
   if (state.classification === 'STATE_MISSING') return progress({ outcome: 'TASK_NOT_STARTED' });
@@ -334,8 +337,13 @@ export function parkBlockTask(
   const entry = entryFor(ledger, taskId);
   if (entry === null) return progress({ outcome: 'TASK_NOT_IN_RUN' });
   if (entry.disposition === 'BLOCKED') return progress({ outcome: 'DISPOSITION_UNCHANGED' });
-  // A finished or abandoned task has a past a later writer does not revise.
-  if (entry.disposition === 'SETTLED' || entry.disposition === 'ABANDONED') {
+  // A finished, abandoned or operator-ended task has a past a later writer does
+  // not revise.
+  if (
+    entry.disposition === 'SETTLED' ||
+    entry.disposition === 'ABANDONED' ||
+    entry.disposition === 'RESOLVED'
+  ) {
     return progress({ outcome: 'DISPOSITION_UNCHANGED' });
   }
 
@@ -398,7 +406,11 @@ export function abandonBlockTask(
   if (hasStopped(ledger)) return progress({ outcome: 'RUN_ALREADY_STOPPED' });
   const entry = entryFor(ledger, taskId);
   if (entry === null) return progress({ outcome: 'TASK_NOT_IN_RUN' });
-  if (entry.disposition === 'ABANDONED' || entry.disposition === 'SETTLED') {
+  if (
+    entry.disposition === 'ABANDONED' ||
+    entry.disposition === 'SETTLED' ||
+    entry.disposition === 'RESOLVED'
+  ) {
     return progress({ outcome: 'DISPOSITION_UNCHANGED' });
   }
 
@@ -419,6 +431,72 @@ export function abandonBlockTask(
     tasks: withEntry(ledger, taskId, {
       ...entry,
       disposition: 'ABANDONED',
+      evidenceRevision: state.revision,
+      baseCommit: state.state.basePinnedCommit,
+    }),
+  };
+  return commit(current, next, options);
+}
+
+/**
+ * Records that an operator ended the task themselves.
+ *
+ * ── Why the ledger needs this at all ───────────────────────────────────────
+ *
+ * An operator may end a task this orchestrator escalated to them — with
+ * `agent-loop resolve`, out of `HUMAN_DECISION_REQUIRED` or `BLOCKED_VERIFY`.
+ * The task's record then reads `OPERATOR_RESOLVED`, and a ledger entry that
+ * still says `BLOCKED` is no longer provable: `getStateKind` answers `TERMINAL`.
+ * Because `firstUnprovenClaim` re-proves **every** entry on any write that moves
+ * a disposition, one such record would make every remaining task in the run
+ * unsettleable, unparkable and unabandonable — the ledger frozen by the very
+ * decision the operator was asked for. This is the legal move that keeps the
+ * run writable.
+ *
+ * ── What it does not claim ─────────────────────────────────────────────────
+ *
+ * Nothing about the work. No `resultCommit` is recorded — rule 4 pins it to
+ * `null` for every disposition but `SETTLED`, and this build has no commit it
+ * can prove finished the task. `COMPLETE` accepts the entry beside a settled
+ * one, so a block whose every task is finished can say so; what it may not do
+ * is present an operator's decision as this orchestrator's measurement, and the
+ * disposition's own name is what keeps those apart.
+ *
+ * Evidence-backed exactly as its three siblings are: the task's own record must
+ * be in `OPERATOR_RESOLVED`, named rather than derived from a kind, because
+ * three states are terminal and each has its own disposition.
+ */
+export function resolveBlockTask(
+  current: LedgerLoadSuccess,
+  taskId: string,
+  options: BlockProgressOptions,
+): BlockProgressResult {
+  const ledger = current.ledger;
+  if (hasStopped(ledger)) return progress({ outcome: 'RUN_ALREADY_STOPPED' });
+  const entry = entryFor(ledger, taskId);
+  if (entry === null) return progress({ outcome: 'TASK_NOT_IN_RUN' });
+  if (
+    entry.disposition === 'RESOLVED' ||
+    entry.disposition === 'SETTLED' ||
+    entry.disposition === 'ABANDONED'
+  ) {
+    return progress({ outcome: 'DISPOSITION_UNCHANGED' });
+  }
+
+  const state = loadTaskState(options.repositoryRoot, taskId);
+  if (state.classification === 'STATE_MISSING') return progress({ outcome: 'TASK_NOT_STARTED' });
+  if (!state.ok) return progress({ outcome: 'TASK_STATE_UNUSABLE' });
+
+  if (state.state.state !== 'OPERATOR_RESOLVED') {
+    return progress({ outcome: 'TASK_STATE_DOES_NOT_PROVE_IT' });
+  }
+
+  const next: BlockRunLedger = {
+    ...ledger,
+    activeTaskId: ledger.activeTaskId === taskId ? null : ledger.activeTaskId,
+    tasks: withEntry(ledger, taskId, {
+      ...entry,
+      disposition: 'RESOLVED',
       evidenceRevision: state.revision,
       baseCommit: state.state.basePinnedCommit,
     }),

@@ -38,6 +38,7 @@ import type { DeliveryTaskSelection } from '../deliver/select-delivery-task.js';
 import type { DeliveryDrive } from './delivery-driver.js';
 import type { AttendedBlockResult, BlockRunOutcome } from '../block/block-runner.js';
 import type { ReleaseOutcome } from '../run/release-workspace.js';
+import type { ResolveTaskOutcome } from '../run/resolve-task.js';
 import type { LeaseReleaseResult } from '../lease/execution-lease.js';
 import type { LifecycleOutcome } from '../run/lifecycle-driver.js';
 import type { RunOutcome } from '../run/run-driver.js';
@@ -99,6 +100,8 @@ const PLAN_EXIT_CODES = Object.freeze({
   ALL_TASKS_COMPLETE: EXIT_RUN_OK,
   TASK_NOT_STARTED: EXIT_RUN_OK,
   TASK_COMPLETED: EXIT_RUN_OK,
+  // An operator ended the task. Nothing to plan and nobody to summon.
+  TASK_OPERATOR_RESOLVED: EXIT_RUN_OK,
   RECONCILED_IN_FLIGHT: EXIT_RUN_OK,
   // The input cannot be planned or the named task cannot run.
   PLANNING_FAILED: EXIT_RUN_INPUT_UNUSABLE,
@@ -125,6 +128,11 @@ export function exitCodeForPlan(conclusion: RunPlanConclusion): CliExitCode {
  */
 const RUN_EXIT_CODES = Object.freeze({
   TASK_COMPLETED: EXIT_RUN_OK,
+  // The task is over and nobody is waiting: an operator ended it deliberately,
+  // and a run that meets that record has nothing to do and nothing to report.
+  // `EXIT_RUN_NEEDS_OPERATOR` would summon the very person who made the
+  // decision.
+  TASK_OPERATOR_RESOLVED: EXIT_RUN_OK,
   // Durably parked, or a record an operator has to look at.
   TASK_ABORTED: EXIT_RUN_NEEDS_OPERATOR,
   BLOCKED_USAGE_LIMIT: EXIT_RUN_NEEDS_OPERATOR,
@@ -234,6 +242,28 @@ const START_TASK_EXIT_CODES = Object.freeze({
 
 export function exitCodeForStartOutcome(outcome: StartTaskOutcome): CliExitCode {
   return START_TASK_EXIT_CODES[outcome];
+}
+
+/**
+ * Exit code for every `resolve` outcome. Total; pinned by test.
+ *
+ * `RESOLVED` and `ALREADY_RESOLVED` are both `EXIT_RUN_OK`: the operator asked
+ * for the task to be ended and it is ended, and a second invocation that finds
+ * it already ended has not failed. Everything else needs a person to look —
+ * including `STATE_NOT_RESOLVABLE`, which is this command refusing to end a
+ * scope violation or a diverged record from a command line.
+ */
+const RESOLVE_EXIT_CODES = Object.freeze({
+  RESOLVED: EXIT_RUN_OK,
+  ALREADY_RESOLVED: EXIT_RUN_OK,
+  TASK_NOT_STARTED: EXIT_RUN_INPUT_UNUSABLE,
+  STATE_UNUSABLE: EXIT_RUN_NEEDS_OPERATOR,
+  STATE_NOT_RESOLVABLE: EXIT_RUN_NEEDS_OPERATOR,
+  STATE_NOT_RECORDED: EXIT_RUN_NEEDS_OPERATOR,
+}) satisfies Record<ResolveTaskOutcome, CliExitCode>;
+
+export function exitCodeForResolveOutcome(outcome: ResolveTaskOutcome): CliExitCode {
+  return RESOLVE_EXIT_CODES[outcome];
 }
 
 /**
@@ -360,6 +390,9 @@ export function exitCodeForBlockRun(result: AttendedBlockResult): CliExitCode {
 const LIFECYCLE_EXIT_CODES = Object.freeze({
   // The task finished.
   COMPLETED: EXIT_RUN_OK,
+  // The task was ended by an operator. Nobody is waiting on it, so the same
+  // code as above rather than the one that summons a person.
+  TASK_OPERATOR_RESOLVED: EXIT_RUN_OK,
 
   // Durably parked, or a record an operator has to look at. Same codes as the
   // run table, deliberately.

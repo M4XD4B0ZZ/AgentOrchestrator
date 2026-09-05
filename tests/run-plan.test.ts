@@ -302,6 +302,27 @@ describe('planRun — durable-state conclusions', () => {
     expect(plan.resume).toBeNull();
   });
 
+  it('reports an operator-ended task as TASK_OPERATOR_RESOLVED', async () => {
+    // M8's third terminal state, judged in the same place and the same way as
+    // the two above: before the world is looked at, because a task nobody is
+    // going to continue does not owe anyone a reconciliation. It must not be
+    // reported as completed — the loop did not finish it — and it must not be
+    // reported as aborted, which says it was given up on.
+    const started = await startTask({ taskId: 'V2-01' });
+    seedState(started, {
+      state: 'OPERATOR_RESOLVED',
+      resumeFrom: null,
+      operatorResolution: { closedFrom: 'HUMAN_DECISION_REQUIRED' },
+    });
+    removeTree(started.workspace.worktreePath);
+
+    const plan = await planned({ repository: started.repository, taskId: 'V2-01' });
+
+    expect(plan.conclusion).toBe('TASK_OPERATOR_RESOLVED');
+    expect(plan.state).toBe('OPERATOR_RESOLVED');
+    expect(plan.resume).toBeNull();
+  });
+
   it('reports an unreadable repository as STATE_UNOBSERVABLE', async () => {
     const started = await startTask({ taskId: 'V2-01' });
     seedState(started);

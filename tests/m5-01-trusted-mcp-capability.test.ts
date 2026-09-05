@@ -250,6 +250,7 @@ describe('a repository may name a capability and may supply nothing else', () =>
       command: 'codegraph',
       args: Object.freeze(['serve', '--mcp']),
       tool: 'mcp__codegraph__codegraph_explore',
+    prepare: null,
     });
     const document: unknown = JSON.parse(renderMcpConfig([grant]));
     expect(document).toEqual({

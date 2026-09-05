@@ -156,6 +156,25 @@ import {
   type VerificationAttemptLoad,
   type VerificationAttemptRecordResult,
 } from '../verify/verification-attempt-store.js';
+import {
+  verificationPassFrom,
+  type VerificationPassRecord,
+} from '../verify/verification-pass.js';
+import {
+  loadVerificationPass as loadVerificationPassFromStore,
+  recordVerificationPass as recordVerificationPassInStore,
+  type VerificationPassLoad,
+  type VerificationPassRecordResult,
+} from '../verify/verification-pass-store.js';
+import {
+  verificationStatement,
+  type VerificationStatement,
+} from '../verify/verification-statement.js';
+import {
+  reviewerBriefingLines,
+  writerBriefingLines,
+  type OrchestratorBriefing,
+} from './orchestrator-briefing.js';
 import { askRuntimeIgnored, type RuntimeIgnoreVerdict } from '../state/runtime-ignored.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import {
@@ -222,6 +241,24 @@ export interface LoopStepResult {
    * the store's answer rather than this step's inference.
    */
   readonly verificationEvidence: VerificationEvidenceOutcome | null;
+  /**
+   * What became of this step's attempt to make a **pass** durable, present only
+   * on a verify step that passed.
+   *
+   * Its own field rather than a second meaning for `verificationEvidence`, and
+   * that separation is not tidiness: `cli/render-attended-run.ts` renders that
+   * field as the fate of an attempt to explain a *failure*, and prints "the
+   * verification result was not durably explained, so this run did not write
+   * BLOCKED_VERIFY on the strength of it" when it did not land. Reusing it here
+   * would put that sentence in front of an operator whose task passed and
+   * advanced — sending them hunting a failure that does not exist — and would
+   * make every clean run claim an entry in a history this design never touches.
+   * Two questions: did the accusation get its evidence, and did the good news
+   * get filed.
+   *
+   * Reported, never persisted, for the same reason as its sibling.
+   */
+  readonly verificationPass: VerificationPassOutcome | null;
   /**
    * The remediation instructions derived from the review that just ran,
    * present only on the write that enters `REMEDIATING`.
@@ -394,6 +431,18 @@ export interface LoopDependencies extends AdvanceOptions {
   readonly recordVerificationAttempt?: VerificationAttemptRecorder;
   /** Where durable verification evidence is read back. Defaults to the real store. */
   readonly loadVerificationAttempts?: VerificationAttemptLoader;
+  /**
+   * Where a verification **pass** is durably recorded. Defaults to the real store.
+   *
+   * The same class of seam as `recordVerificationAttempt`, and it carries the
+   * same rule: a caller may substitute the process that writes, never the
+   * decision. Nothing in this module gates a transition on the result — a pass
+   * that could not be filed is still a pass — so what the seam makes testable is
+   * the reporting, not the routing.
+   */
+  readonly recordVerificationPass?: VerificationPassRecorder;
+  /** Where a durable verification pass is read back. Defaults to the real store. */
+  readonly loadVerificationPass?: VerificationPassLoader;
 }
 
 /** The store's write, as a seam. See {@link LoopDependencies.recordVerificationAttempt}. */
@@ -411,12 +460,28 @@ export type VerificationAttemptLoader = (
   taskId: string,
 ) => VerificationAttemptLoad;
 
+/** The pass store's write, as a seam. See {@link LoopDependencies.recordVerificationPass}. */
+export type VerificationPassRecorder = (request: {
+  readonly repositoryRoot: string;
+  readonly taskId: string;
+  readonly pass: VerificationPassRecord;
+  readonly leaseHolds: () => boolean;
+  readonly checkIgnored: (relativePath: string) => Promise<RuntimeIgnoreVerdict>;
+}) => Promise<VerificationPassRecordResult>;
+
+/** The pass store's read, as a seam. See {@link LoopDependencies.loadVerificationPass}. */
+export type VerificationPassLoader = (
+  repositoryRoot: string,
+  taskId: string,
+) => VerificationPassLoad;
+
 function result(from: Partial<LoopStepResult> & { readonly outcome: LoopStepOutcome }): LoopStepResult {
   return Object.freeze({
     state: null,
     save: null,
     verification: null,
     verificationEvidence: null,
+    verificationPass: null,
     remediationPayload: null,
     scope: null,
     permissionDenials: null,
@@ -1112,16 +1177,38 @@ export async function runVerifyStep(
   );
 
   if (report.verdict === 'PASSED') {
+    // Nothing is appended to the FAILURE HISTORY for a pass. That store answers
+    // one question — why did AO stop — and a pass is not an answer to it;
+    // spending its bounded history on the outcome nobody diagnoses would push
+    // the failures an operator does need out of the back of it, and its refusal
+    // when full is what this step gates `BLOCKED_VERIFY` on.
+    //
+    // The pass itself is recorded, in its own store, and that is the whole of
+    // what M8 adds here. Until it existed, a pass was measured and then
+    // forgotten: the report was a local of this function, the driver carried
+    // nothing into the review step, and `REVIEWING` is reachable from two
+    // blocking states as well as from here — so no later step could tell a task
+    // that had passed from one that had been resumed. `RESOLVER-V3-054` then
+    // spent three review rounds on a finding that verification had not passed,
+    // raised from stale prose in the tree, which was the only statement about
+    // verification anywhere.
+    //
+    // The ORDER is the opposite of the failure path below, deliberately. There
+    // the record must land before the accusation, because a durable accusation
+    // with no evidence is the defect that ordering exists to prevent. Here the
+    // measurement is good news, and a sidecar that could not be written must
+    // never turn a passing gate into a stopped task — so the advance is
+    // unconditional and the store's answer is reported beside it.
+    const pass = await recordVerificationPassEvidence(current, report, deps);
     const save = advanceTaskState(
       current,
       { ...state, state: 'REVIEWING', stateEnteredAt: now, ...RESUME_EVIDENCE_SPENT },
       advance,
     );
-    // No attempt is recorded for a pass. The store answers one question — why
-    // did AO stop — and a pass is not an answer to it. Spending a bounded
-    // history on the outcome nobody needs to read would push the failures an
-    // operator does need out of the back of it.
-    return saved(save, 'REVIEWING', 'ADVANCED', { verification: report });
+    return saved(save, 'REVIEWING', 'ADVANCED', {
+      verification: report,
+      verificationPass: pass,
+    });
   }
 
   // -- The explanation becomes durable BEFORE the block does ----------------
@@ -1308,6 +1395,159 @@ const EVIDENCE_NOT_APPLICABLE: VerificationEvidenceOutcome = Object.freeze({
 });
 
 /**
+ * Records the pass this verify step measured, and never decides anything.
+ *
+ * The mirror of {@link recordVerificationEvidence}, and the differences are the
+ * ones the two records' contracts require: the subject commit is observed the
+ * same way, the lease is re-proved by the store at the write the same way, and
+ * the outcome is reported rather than acted on — no caller gates a transition on
+ * it, because a pass that could not be filed is still a pass.
+ */
+async function recordVerificationPassEvidence(
+  current: StateLoadSuccess,
+  report: VerificationReport,
+  deps: LoopDependencies,
+): Promise<VerificationPassOutcome> {
+  const state = current.state;
+  const git = leasedGit(deps);
+
+  const head = await observeSettledWorktree(git, deps.authorisedWorktreePath);
+  if (head.observedCommit === null) return PASS_SUBJECT_UNREADABLE;
+
+  const pass = verificationPassFrom(report, {
+    measuredAt: deps.now,
+    subjectCommit: head.observedCommit,
+    profileDigest: verificationProfileDigest(deps.verification),
+    taskId: state.taskId,
+    repositoryRoot: state.repositoryRoot,
+  });
+  // A report this build would not accept as a pass — no phases, or a phase that
+  // did not run and exit 0. `runVerification` cannot produce one, so this is a
+  // refusal to mint rather than a degraded record, and it is reported as its own
+  // outcome so a caller can tell it from a store that refused.
+  if (pass === null) return PASS_NOT_APPLICABLE;
+
+  const record = deps.recordVerificationPass ?? defaultVerificationPassRecorder;
+  const written = await record({
+    repositoryRoot: state.repositoryRoot,
+    taskId: state.taskId,
+    pass,
+    leaseHolds: () => leaseHolds(deps),
+    checkIgnored: (relativePath) => askRuntimeIgnored(git, state.repositoryRoot, relativePath),
+  });
+
+  return Object.freeze({
+    recorded: written.recorded,
+    code: written.code,
+    path: written.path,
+    measuredAt: pass.measuredAt,
+    subjectCommit: pass.subjectCommit,
+  });
+}
+
+const defaultVerificationPassRecorder: VerificationPassRecorder = (request) =>
+  recordVerificationPassInStore(request);
+
+const defaultVerificationPassLoader: VerificationPassLoader = (repositoryRoot, taskId) =>
+  loadVerificationPassFromStore(repositoryRoot, taskId);
+
+/**
+ * What this orchestrator measured about the tree an agent is about to open.
+ *
+ * Read from the two durable stores and from one observation, and rendered by
+ * `loop/orchestrator-briefing.ts` into whichever agent's briefing is being
+ * built. Nothing here starts a verification: the facts are the ones this loop
+ * has already produced for its own purposes, which is the whole difference
+ * between telling an agent the truth and paying for it again at every launch.
+ *
+ * `observed` is supplied by a caller that has already looked — the review step
+ * observes the worktree before briefing a reviewer, and asking Git twice for the
+ * same fact in one step would invite the two answers to differ.
+ */
+async function orchestratorBriefingFor(
+  deps: LoopDependencies,
+  state: TaskState,
+  changedPaths: readonly string[] | null,
+  observed?: CompletionCheckpoint,
+): Promise<OrchestratorBriefing> {
+  const seen =
+    observed ??
+    (await (async () => {
+      const head = await observeSettledWorktree(leasedGit(deps), deps.authorisedWorktreePath);
+      return Object.freeze({
+        currentCommit: head.observedCommit,
+        worktreeClean: head.worktreeClean,
+      });
+    })());
+
+  // Read from the dependency set rather than taken as an argument, because the
+  // remediate step is briefed without one: it establishes its cause from durable
+  // evidence, not from the repository's account of the task. A step with no
+  // usable brief reports no capability rather than guessing at one.
+  const execution = deps.brief !== undefined && deps.brief.ok ? deps.brief.brief : null;
+
+  const pass = (deps.loadVerificationPass ?? defaultVerificationPassLoader)(
+    state.repositoryRoot,
+    state.taskId,
+  );
+  const attempts = (deps.loadVerificationAttempts ?? defaultVerificationAttemptLoader)(
+    state.repositoryRoot,
+    state.taskId,
+  );
+
+  return Object.freeze({
+    verification: verificationStatement({
+      pass,
+      attempts,
+      observedCommit: seen.currentCommit,
+      worktreeClean: seen.worktreeClean,
+      profileDigest: verificationProfileDigest(deps.verification),
+    }),
+    // Reported only where the repository asked for the capability. An
+    // `OPTIONAL` capability's index status is not a fact an agent needs, and
+    // printing it would invite one to treat a missing index as an obstacle the
+    // repository never said it was.
+    codegraph:
+      execution !== null && execution.codegraph.requirement === 'REQUIRED'
+        ? execution.codegraph.status
+        : null,
+    changedPaths,
+  });
+}
+
+/** What the verify step's attempt to file a pass did. Reported, never persisted. */
+export interface VerificationPassOutcome {
+  readonly recorded: boolean;
+  /**
+   * The store's own code, or one of this module's two.
+   *
+   * `SUBJECT_UNREADABLE` — Git could not say what the worktree is at, so no
+   * record could name its subject. `NOT_APPLICABLE` — the report was not one
+   * this build mints a pass from.
+   */
+  readonly code: VerificationPassRecordResult['code'] | 'SUBJECT_UNREADABLE' | 'NOT_APPLICABLE';
+  readonly path: string | null;
+  readonly measuredAt: string | null;
+  readonly subjectCommit: string | null;
+}
+
+const PASS_SUBJECT_UNREADABLE: VerificationPassOutcome = Object.freeze({
+  recorded: false as const,
+  code: 'SUBJECT_UNREADABLE' as const,
+  path: null,
+  measuredAt: null,
+  subjectCommit: null,
+});
+
+const PASS_NOT_APPLICABLE: VerificationPassOutcome = Object.freeze({
+  recorded: false as const,
+  code: 'NOT_APPLICABLE' as const,
+  path: null,
+  measuredAt: null,
+  subjectCommit: null,
+});
+
+/**
  * What one pass through the provider gate produced.
  *
  * `WITHHELD` is not a reviewer result and is deliberately not shaped like one:
@@ -1416,7 +1656,7 @@ export async function runReviewStep(
   // silent degrade is the defect being fixed here, and it would be untestable
   // by absence, since a payload naming only an id looks exactly like a payload
   // for a task with nothing to say.
-  if (brief === undefined || !brief.ok || !brief.brief.contextComplete) {
+  if (brief === undefined || !brief.ok || !brief.brief.contextComplete || !brief.brief.capabilitiesSatisfied) {
     const save = advanceTaskState(
       current,
       {
@@ -1443,6 +1683,15 @@ export async function runReviewStep(
   // nothing" a measurement instead of a restatement of the sandbox flag.
   const beforeReview = await (observe ?? observeCompletion)(state);
 
+  // What this orchestrator measured, told to the reviewer in AO's own voice
+  // (M8). Built from the observation just taken, so the commit the block names
+  // is the commit the reviewer will be looking at.
+  //
+  // `changedPaths` is null here on purpose: the scope guard does not run in a
+  // review step, so AO has not established which paths this task changed, and
+  // the block says that rather than printing an empty list.
+  const briefing = await orchestratorBriefingFor(deps, state, null, beforeReview);
+
   // One reviewer call at a time, per machine, and the quota question answered
   // *inside* the exclusion. Asked outside it, two repositories both read
   // "available" before either had run, and the second would spend the call the
@@ -1458,7 +1707,7 @@ export async function runReviewStep(
       {
         worktreePath: authorisedWorktreePath,
         round,
-        payload: buildReviewPayload(brief.brief, round),
+        payload: buildReviewPayload(brief.brief, round, briefing),
         now,
       },
       { agent: leasedAgent(deps) },
@@ -1569,7 +1818,7 @@ export async function runReviewStep(
       advance,
     );
     return saved(save, 'REMEDIATING', 'ADVANCED', {
-      remediationPayload: buildRemediationPayload(review.findings, round),
+      remediationPayload: buildRemediationPayload(review.findings, round, briefing),
     });
   }
 
@@ -1686,10 +1935,11 @@ async function resumedBrief(
   current: StateLoadSuccess,
   deps: LoopDependencies,
   round: number,
+  briefing: OrchestratorBriefing,
 ): Promise<ResumedRemediationBrief> {
   const state = current.state;
 
-  const fromReview = buildResumedRemediationBrief(state.findingHistory, round);
+  const fromReview = buildResumedRemediationBrief(state.findingHistory, round, briefing);
   if (fromReview.kind === 'DURABLE_RECORD') return fromReview;
 
   const load = (deps.loadVerificationAttempts ?? defaultVerificationAttemptLoader)(
@@ -1706,7 +1956,7 @@ async function resumedBrief(
 
   return Object.freeze({
     kind: 'DURABLE_RECORD' as const,
-    payload: buildVerificationRemediationPayload(attempt, round),
+    payload: buildVerificationRemediationPayload(attempt, round, briefing),
   });
 }
 
@@ -1767,12 +2017,25 @@ export async function runRemediateStep(
   // in its own store, and {@link resumedBrief} reads it. The rule the old
   // sentence protected is unchanged and is what that function still enforces: a
   // caller that has not established a cause may not invent one.
-  const brief =
+  // What this orchestrator measured, handed over unasked (M8), exactly as the
+  // implement pass does — and for the sharper case, because a remediating writer
+  // is the one that was asked to answer findings it had no way to check.
+  //
+  // `changedPaths` is null here, and that is a limitation rather than an
+  // oversight: the cause has to be established before a writer is briefed, and
+  // the scope guard that measures the changed paths runs after it. Re-ordering
+  // the two would change which durable state a task with *both* problems lands
+  // in — a scope violation instead of "no cause to remediate" — which is a
+  // contract change and not this slice's to make. The briefing says the paths
+  // were not established rather than printing an empty list.
+  const briefing = await orchestratorBriefingFor(deps, state, null);
+
+  const cause =
     remediationPayload === undefined
-      ? await resumedBrief(current, deps, round)
+      ? await resumedBrief(current, deps, round, briefing)
       : ({ kind: 'DURABLE_RECORD', payload: remediationPayload } as const);
 
-  if (brief.kind === 'NO_DURABLE_FINDINGS') {
+  if (cause.kind === 'NO_DURABLE_FINDINGS') {
     const save = advanceTaskState(
       current,
       {
@@ -1805,7 +2068,7 @@ export async function runRemediateStep(
       worktreePath: authorisedWorktreePath,
       phase: 'REMEDIATE',
       round,
-      payload: brief.payload,
+      payload: cause.payload,
       mcp: deps.writerMcp,
     },
     { agent: leasedAgent(deps) },
@@ -1954,7 +2217,21 @@ export async function runContextLoadingStep(
   // that is a thing a human fixes rather than something the loop routes around.
   const contextIncomplete = brief !== undefined && brief.ok && !brief.brief.contextComplete;
 
-  if (brief === undefined || !brief.ok || contextIncomplete) {
+  // The third conjunct, and the one M8 adds: a capability the repository
+  // declared REQUIRED, judged in the worktree the agents will open rather than
+  // at the canonical repository root.
+  //
+  // Gated at all three entry points — here, `runImplementStep` and
+  // `runReviewStep` — rather than here alone, because each of them is a separate
+  // entry into the same work: `HUMAN_DECISION_REQUIRED → IMPLEMENTING` is a
+  // declared edge and a resume takes it directly, so a gate that stood only here
+  // would be bypassed by the very path a human takes after fixing the condition.
+  // The same reasoning, and the same conjunction, that `contextComplete` already
+  // carries.
+  const capabilityUnsatisfied =
+    brief !== undefined && brief.ok && !brief.brief.capabilitiesSatisfied;
+
+  if (brief === undefined || !brief.ok || contextIncomplete || capabilityUnsatisfied) {
     const save = advanceTaskState(
       current,
       {
@@ -2032,7 +2309,7 @@ export async function runImplementStep(
   // declared context vanished — in the meantime must not be handed a prompt
   // built from nothing. The same conjunction as `CONTEXT_LOADING`, for the
   // same reasons, because this is a separate entry point into the same work.
-  if (brief === undefined || !brief.ok || !brief.brief.contextComplete) {
+  if (brief === undefined || !brief.ok || !brief.brief.contextComplete || !brief.brief.capabilitiesSatisfied) {
     const save = advanceTaskState(
       current,
       {
@@ -2060,12 +2337,19 @@ export async function runImplementStep(
   const before = await enforceScope(current, { ...scopeGuard, writerRan: false });
   if (before.blocked !== null) return before.blocked;
 
+  // What this orchestrator measured, handed over unasked (M8). The writer holds
+  // no shell and is not given one; this is the truth it would have used a shell
+  // to obtain, measured by AO under AO's own environment policy and containment.
+  // The scope guard has just told us which paths this task's work touches, so
+  // the readback a writer would have run `git status` for is already in hand.
+  const briefing = await orchestratorBriefingFor(deps, state, before.assessment.approvedPaths);
+
   const writer = await runClaudeWriter(
     {
       worktreePath: authorisedWorktreePath,
       phase: 'IMPLEMENT',
       round,
-      payload: buildImplementPayload(brief.brief, round),
+      payload: buildImplementPayload(brief.brief, round, briefing),
       mcp: deps.writerMcp,
     },
     { agent: leasedAgent(deps) },

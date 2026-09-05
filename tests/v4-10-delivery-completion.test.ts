@@ -1995,7 +1995,11 @@ describe('concluding a delivery changes no execution state and no ledger', () =>
     // ledger's byte digest for every settled entry, and `tests/v4-08-…` already
     // fails by name on one; this states the other half — that slice 10 did not
     // add one either.
-    expect([...TERMINAL_STATES]).toEqual(['READY_FOR_PR', 'ABORTED']);
+    // M8 added the third, and the invariant this case exists for is untouched:
+    // no state means "delivered" or "complete". `OPERATOR_RESOLVED` claims
+    // nothing about the work at all, which is why it is safe beside a ledger
+    // that digests task-file bytes — nothing on the delivery path writes it.
+    expect([...TERMINAL_STATES]).toEqual(['READY_FOR_PR', 'ABORTED', 'OPERATOR_RESOLVED']);
     expect(TRANSITION_TABLE.READY_FOR_PR).toEqual([]);
     for (const invented of ['COMPLETE', 'COMPLETED', 'DELIVERED', 'CONCLUDED', 'MERGED']) {
       expect(ALL_STATES, invented).not.toContain(invented);

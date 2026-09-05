@@ -66,6 +66,11 @@ import { join } from 'node:path';
 
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import {
+  capabilitySatisfied,
+  probeCodegraphCapability,
+  type CapabilityAssessment,
+} from '../repo/capabilities.js';
+import {
   inspectContainedFile,
   proveContainedDirectory,
   readContainedFile,
@@ -172,6 +177,29 @@ export interface ExecutionBrief extends TaskProse {
   readonly contextSources: readonly ContextSourceReport[];
   /** `true` when every declared context source is `PRESENT` in the worktree. */
   readonly contextComplete: boolean;
+  /**
+   * The CodeGraph capability as it stands **in the worktree the agents open**,
+   * assessed against the requirement the repository declared.
+   *
+   * A sibling of {@link contextComplete}, and the same kind of fact: an
+   * execution-time property of one working copy, discovered per task. It is here
+   * rather than on the resolved repository because the resolver asks at the
+   * canonical root, before any task is chosen and before any worktree exists —
+   * and those two directories can disagree. They did: `.codegraph/` is ignored
+   * through `.git/info/exclude`, a file in the common Git directory, so every
+   * linked worktree inherits the *rule* and none inherits the directory. AO
+   * judged `REQUIRED` satisfied from the root while the writer worked in a tree
+   * where the tool could answer nothing.
+   */
+  readonly codegraph: CapabilityAssessment;
+  /**
+   * `true` when every capability the repository declared as `REQUIRED` is
+   * satisfied in this worktree.
+   *
+   * One name for the conjunction, so the steps that gate on it do not each
+   * spell out which capabilities exist. Today there is one.
+   */
+  readonly capabilitiesSatisfied: boolean;
 }
 
 export interface TaskBriefPreviewSuccess {
@@ -344,6 +372,23 @@ export function readExecutionBrief(
   if (isFailure(prose)) return prose;
 
   const contextSources = inspectContext(repository, worktreePath);
+
+  // The capability is probed in the SAME tree the context was proven in, and
+  // named explicitly rather than looped over `REPOSITORY_CAPABILITIES`: the
+  // resolver names it too (`resolve-repository.ts`), and a generic loop over a
+  // capability-specific probe is a wrong answer waiting for the second
+  // capability. The requirement comes from the resolved repository, which is
+  // where the profile's declaration already lives; only the STATUS is measured
+  // here, and only here is it measured in the right directory.
+  const requirement = repository.capabilities.codegraph.requirement;
+  const status = probeCodegraphCapability(worktreePath);
+  const codegraph: CapabilityAssessment = Object.freeze({
+    capability: 'codegraph' as const,
+    requirement,
+    status,
+    satisfied: capabilitySatisfied(requirement, status),
+  });
+
   return Object.freeze({
     ok: true as const,
     code: 'BRIEF' as const,
@@ -351,6 +396,8 @@ export function readExecutionBrief(
       ...prose,
       contextSources,
       contextComplete: contextSources.every((source) => source.status === 'PRESENT'),
+      codegraph,
+      capabilitiesSatisfied: codegraph.satisfied,
     }),
   });
 }

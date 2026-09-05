@@ -71,6 +71,16 @@ export const TASK_CONCLUSIONS = [
    * steps is refused as unresolved rather than tried again.
    */
   'CONTINUE',
+  /**
+   * Record that an operator ended the task themselves.
+   *
+   * Neither `SETTLE` nor `ABANDON`, because the ledger's evidence prover accepts
+   * exactly one record state for each: `READY_FOR_PR` and `ABORTED`. A task
+   * whose record reads `OPERATOR_RESOLVED` proves neither, and a run that
+   * proposed one of them would be refused by the store and left holding an
+   * entry no disposition can accept.
+   */
+  'RESOLVE',
 ] as const;
 
 export type TaskConclusion = (typeof TASK_CONCLUSIONS)[number];
@@ -78,6 +88,10 @@ export type TaskConclusion = (typeof TASK_CONCLUSIONS)[number];
 const CONCLUSION_FOR_RUN_OUTCOME = Object.freeze({
   TASK_COMPLETED: 'SETTLE',
   TASK_ABORTED: 'ABANDON',
+  // An operator ended it. The ledger has its own disposition for that, and
+  // grading it `ABANDON` would have the store refuse the write and wedge the
+  // run — `abandonBlockTask` proves against `ABORTED` alone.
+  TASK_OPERATOR_RESOLVED: 'RESOLVE',
 
   // The six blocking states, each of which the task's own record now carries.
   // `parkBlockTask` re-reads that record and refuses if it does not classify as

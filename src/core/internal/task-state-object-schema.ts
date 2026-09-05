@@ -110,6 +110,24 @@ export const FindingRecordSchema = z
   })
   .strict();
 
+/**
+ * What an operator's own ending of a task recorded about itself.
+ *
+ * `closedFrom` is restricted to the two states a task may be ended from —
+ * `HUMAN_DECISION_REQUIRED` and `BLOCKED_VERIFY` — rather than to every blocking
+ * state. Those two are the ones in which the loop stopped and asked the person
+ * driving it for a decision. A `SCOPE_VIOLATION` says an agent left its sandbox
+ * and the run is not trustworthy until somebody has looked; a
+ * `RESUME_STATE_DIVERGED` says the record and the repository disagree. Ending
+ * those with a flag is exactly the generic escape hatch this design refuses, and
+ * narrowing the enum is what makes the refusal structural rather than a habit.
+ */
+const OperatorResolutionSchema = z
+  .object({
+    closedFrom: z.enum(['HUMAN_DECISION_REQUIRED', 'BLOCKED_VERIFY']),
+  })
+  .strict();
+
 /** Plain object shape, without cross-field invariants. INTERNAL. */
 export const TaskStateObjectSchema = z
   .object({
@@ -168,6 +186,33 @@ export const TaskStateObjectSchema = z
     reportedResetAt: IsoDateTimeSchema.nullable(),
 
     worktreeCleanAtCheckpoint: z.boolean(),
+
+    /**
+     * What an operator overrode when they ended this task themselves, or `null`
+     * for every task no operator has ended.
+     *
+     * The provenance half of `OPERATOR_RESOLVED`, and `core/task-state.ts` makes
+     * the two biconditional: the state cannot exist without naming what it
+     * overrode, and the provenance cannot be attached to any other state as
+     * decoration. That is what keeps this from being a force-complete switch —
+     * a `grep` over a runtime directory counts hand-ended tasks and says which
+     * refusal each one walked away from, which neither `READY_FOR_PR` nor
+     * `ABORTED` could ever answer.
+     *
+     * `closedFrom` is written from the record the command **read**, never from
+     * an argument, so an operator cannot name a softer state than the one they
+     * actually overrode.
+     *
+     * Additive and defaulted rather than versioned, on the argument
+     * `scopeAuthorityCommit` sets out above: a state written before this field
+     * existed means exactly `null`, because no such task was ever
+     * operator-ended, and the other direction fails closed because an older
+     * build meets an unknown key — and an unknown enum member — at a `.strict()`
+     * boundary and refuses the state. What that costs is stated rather than
+     * hidden: the older build reports it as a broken record rather than as a
+     * version boundary, which are different sentences to an operator.
+     */
+    operatorResolution: OperatorResolutionSchema.nullable().default(null),
 
     findingHistory: z.array(FindingRecordSchema),
   })

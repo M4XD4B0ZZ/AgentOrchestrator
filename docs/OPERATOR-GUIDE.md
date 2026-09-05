@@ -466,7 +466,56 @@ acceptEdits           bleibt
 Freigegeben wird genau ein Server und genau die benannten Werkzeuge. Alle
 anderen MCP-Server des Operators bleiben draußen.
 
+### M8: `prepare:` — wie der Worktree den Index bekommt
+
+Ein Task-Worktree entsteht mit `git worktree add`. Das legt **nur getrackte
+Inhalte** an, und ein CodeGraph-Index ist gitignored. Gemessen: 0 von 12
+Worktrees hatten einen Index, während das Repo-Root einen hatte.
+
+Bis M8 hat AO die Capability am **Repo-Root** geprüft — dort war der Index — und
+der Writer arbeitete im Worktree, wo er fehlte. Seit M8 wird im Worktree geprüft.
+Damit `codegraph: REQUIRED` überhaupt erfüllbar bleibt, stellt AO den Index dort
+selbst her, und zwar mit **deinem** Kommando:
+
+```yaml
+schemaVersion: 1
+capabilities:
+  codegraph:
+    command: codegraph
+    args: [serve, --mcp]
+    tool: mcp__codegraph__codegraph_explore
+    prepare:
+      command: codegraph
+      args: [init]
+```
+
+`prepare` ist optional und folgt derselben Grammatik wie `command`/`args`: keine
+Leerzeichen, keine Klammern, kein `env`. Fehlt es, wird nichts hergestellt — und
+ein Repository mit `codegraph: REQUIRED` parkt seine Tasks, bis du eines nennst.
+Das ist die ehrliche Antwort und kein stiller Durchlauf.
+
+Warum du und nicht das Repository: ein Profil, das ein Programm nennen dürfte,
+wäre ein Repository, das bestimmt, was diese Maschine ausführt. Warum du und
+nicht der Writer: der Index **ist** der Beweis der Capability, an der AO
+fail-closed scheitert — ein Agent, der ihn anlegen darf, stellt sich seine eigene
+Autorität aus.
+
+Was AO dabei tut, in dieser Reihenfolge:
+
+```text
+Profil sagt REQUIRED?              nein → nichts passiert
+Index schon im Worktree?           ja   → nichts passiert
+prepare: genannt?                  nein → NO_OPERATOR_COMMAND, Task parkt
+Git ignoriert .codegraph/ dort?    nein → INDEX_PATH_NOT_IGNORED, nichts startet
+sonst: dein Kommando läuft im Worktree, danach wird nachgemessen
+```
+
+Das Ergebnis kommt aus der **Messung**, nicht aus dem Exit-Code: ein Kommando,
+das 0 liefert und nichts anlegt, ist `STILL_ABSENT`. Einmal pro Invocation, nicht
+pro Schritt. Der Bericht zeigt es als `CodeGraph index : …`.
+
 ---
+
 
 ## 6. Ein Projekt für AgentOrchestrator vorbereiten
 
@@ -1201,6 +1250,51 @@ Divergenz wird **nie durch Schreiben aufgelöst**. Der Run stoppt und sagt es.
 
 ---
 
+## 16a. Einen Task selbst beenden (M8)
+
+Es gab bis M8 keinen Weg, einem Task zu sagen, dass **du** ihn erledigt hast.
+`READY_FOR_PR` ist bewusst nicht von `HUMAN_DECISION_REQUIRED` aus erreichbar,
+und `ABORTED` heißt „aufgegeben" — beides falsch für Arbeit, die du selbst
+fertiggemacht hast. Der Task blieb blockiert, und sein Attention-Item blieb offen,
+auch nach dem Merge.
+
+```bash
+agent-loop resolve --repository <pfad> --task <id> --attended
+```
+
+Das schreibt den dritten terminalen Zustand: `OPERATOR_RESOLVED`. Er sagt genau
+eine Sache — **eine Person hat diesen Task beendet**. Nicht, dass verifiziert,
+reviewt, geliefert oder gemerged wurde: das kann AO nicht wissen, und es
+behauptet es deshalb auch nicht. Es gibt bewusst **kein** Commit-Argument dafür.
+
+Erlaubt ist es nur aus den zwei Zuständen, in denen die Schleife stehen geblieben
+ist und dich gefragt hat:
+
+```text
+HUMAN_DECISION_REQUIRED   ja
+BLOCKED_VERIFY            ja
+SCOPE_VIOLATION           nein — da hat ein Agent seine Sandbox verlassen
+RESUME_STATE_DIVERGED     nein — da widersprechen sich Record und Repository
+alles andere              nein
+```
+
+Was danach gilt:
+
+```text
+Attention-Item            weg, deterministisch, genau dieses eine
+Task für Scheduling       terminal, wird nicht mehr geplant
+Block-Ledger              Disposition RESOLVED, der Run bleibt schreibbar
+Pull Request              keiner — Delivery gilt weiter nur für READY_FOR_PR
+Was überschrieben wurde   steht im Record: operatorResolution.closedFrom
+```
+
+Der Befehl nimmt die Execution Lease und sonst nichts. Kein Auth-Preflight, kein
+MCP-Preflight, keine Reconciliation — genau die drei Dinge, die in der Lage,
+für die er existiert, ohnehin verweigern würden (Login kaputt, Capability fehlt,
+Worktree nach der Lieferung entfernt).
+
+---
+
 ## 17. Einen Run stoppen, und die Stale Lease
 
 *(Dieser Abschnitt schließt die Audit-Punkte A4 und A5.)*
@@ -1822,6 +1916,19 @@ beweisbar, startet kein Writer und der Lauf endet mit
 `INDEX_PRESENT` ist davon unberührt: es bleibt die Aussage über das Verzeichnis
 und beantwortet weiterhin nicht, ob ein Werkzeug erreichbar ist. Das sind zwei
 Fragen und seit M5 zwei Antworten.
+
+**Ebene 1 fragt seit M8 das richtige Verzeichnis.** Bis dahin prüfte AO den
+Repo-Root — dort liegt der Index — während der Writer im Task-Worktree arbeitet,
+wo keiner liegt: `.codegraph/` wird über `.git/info/exclude` ignoriert, eine
+Datei im **gemeinsamen** Git-Verzeichnis, deren Regel jeder Worktree erbt und
+deren Inhalt keiner erbt. Genau das hat `RESOLVER-V3-054` drei Review-Runden
+gekostet: der Reviewer meldete den fehlenden Index korrekt, und der Writer durfte
+ihn nicht anlegen. Jetzt prüft AO im Worktree, an allen drei Stellen, die einen
+Brief benutzen — und stellt den Index dort mit deinem `prepare`-Kommando selbst
+her. Siehe [Abschnitt 5a](#5a-vertrauenswürdige-mcp-capabilities-m5).
+
+Der Root-Status bleibt, was er war: eine Zulassungsfrage vor der Task-Auswahl.
+Autorität für einen Writer ist er nicht mehr.
 
 **Was weiterhin in die Task-Datei gehört**, weil kein Build es beweisen kann: dass
 der schreibende Agent das Werkzeug auch *benutzt*. AO stellt es bereit; ob eine

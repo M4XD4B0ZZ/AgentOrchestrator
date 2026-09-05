@@ -603,6 +603,7 @@ describe('the layer delegates rather than re-implements', () => {
     const expected: Record<(typeof RUN_OUTCOMES)[number], LifecycleOutcome> = {
       TASK_COMPLETED: 'COMPLETED',
       TASK_ABORTED: 'TASK_ABORTED',
+      TASK_OPERATOR_RESOLVED: 'TASK_OPERATOR_RESOLVED',
       BLOCKED_USAGE_LIMIT: 'BLOCKED_USAGE_LIMIT',
       BLOCKED_VERIFY: 'BLOCKED_VERIFY',
       BLOCKED_AUTH: 'BLOCKED_AUTH',

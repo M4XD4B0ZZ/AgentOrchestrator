@@ -65,6 +65,7 @@ import {
 } from './fixtures.js';
 import { cleanScopeGit, writingPassGit } from './helpers/scope-git.js';
 import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
+import { briefCapabilityFields, briefingFixture } from './helpers/briefing.js';
 
 const NOW = '2026-08-10T09:00:00.000Z';
 const TASK_ID = 'task-0001';
@@ -242,6 +243,7 @@ function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDepe
         bodyTruncated: false,
         contextSources: [],
         contextComplete: true,
+        ...briefCapabilityFields(),
       },
     },
     ...overrides,
@@ -1162,7 +1164,7 @@ describe('the resumed remediation brief', () => {
     ['no history at all', [] as FindingRecord[], 1],
     ['history for other rounds only', [{ round: 2, severity: 'low' as const, fingerprint: 'd'.repeat(32) }], 1],
   ])('reports %s as no durable findings, and carries no payload', (_label, history, round) => {
-    const brief = buildResumedRemediationBrief(history, round);
+    const brief = buildResumedRemediationBrief(history, round, briefingFixture());
 
     expect(brief.kind).toBe('NO_DURABLE_FINDINGS');
     expect('payload' in brief).toBe(false);
@@ -1172,6 +1174,7 @@ describe('the resumed remediation brief', () => {
     const brief = buildResumedRemediationBrief(
       [{ round: 1, severity: 'high', fingerprint: 'c'.repeat(32) }],
       1,
+      briefingFixture(),
     );
 
     expect(brief.kind).toBe('DURABLE_RECORD');
