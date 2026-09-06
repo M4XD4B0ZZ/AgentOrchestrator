@@ -9,13 +9,16 @@ already-installed CLI agents:
 Both are intended to run on their existing **subscription logins**, never on
 API keys.
 
-> **One command executes, behind one explicit grant.** `agent-loop run
-> --attended` starts a single task and drives it. Everything else is read-only:
-> `agent-loop doctor`, `agent-loop repositories`, and `agent-loop run` without the
-> grant, which still starts no agent, writes no task state and prepares no
-> workspace. Unattended operation,
-> multi-task blocks, scope enforcement and any PR/CI/merge automation are **not**
-> in this build.
+> **Nothing acts without a grant that names the act.** `agent-loop doctor`,
+> `agent-loop repositories` and `agent-loop run` without a grant start no agent,
+> write no task state and prepare no workspace. Everything that writes, runs an
+> agent or reaches github.com is asked for by name on the invocation and
+> authorised separately, and at most one forge act is attempted per invocation.
+> **Deciding that a merge is WARRANTED is not in this build**; performing one an
+> operator asked for is. The sentence that stood here said unattended operation,
+> multi-task blocks, scope enforcement and PR/CI/merge automation were all absent
+> from this build. Each of the four became false between V2-06 and M4 while this
+> paragraph kept denying it, so it is corrected here rather than left standing.
 
 What *is* implemented:
 
@@ -88,6 +91,20 @@ What *is* implemented:
     [A reviewer quota block is a pause](#a-reviewer-quota-block-is-a-pause-m2-slice-6).
 
 ## Status, and where to start
+
+**Development is closed, 2026-09-06.** Every milestone this README records is
+merged to `main`, no milestone is planned after it, and nothing is open. What
+stands under [Not implemented yet](#not-implemented-yet) stays unimplemented on
+purpose, and that section is the answer to "why does it not do X", not a backlog.
+
+**Every register in this file headed "Carried forward, deliberately" is an
+accepted residual.** Each entry is a limitation that was measured, named and
+left standing on purpose — not a defect report, not queued work, and not an
+instruction to whoever reads it next. The registers are kept because a limitation
+somebody can look up is worth more than one nobody wrote down; keeping one is
+therefore the finished state of that entry, not an unfinished one. Turning a
+residual back into work is a fresh decision and needs its own reason, stated at
+the time. "It is still in the register" is not that reason.
 
 **Released for attended, supervised use on real projects.** The closing audit
 found no `ATTENDED_RELEASE_BLOCKER`. See
