@@ -134,6 +134,12 @@ to prepare a repository, what a preview must show before an attended run, what
 `COMPLETE` does and does not mean, how to stop a run and what the stale lease it
 leaves behind requires of you.
 
+For the short version — set a project up, write a task, preview, run, and what to
+do when it stops — [`docs/ANLEITUNG.md`](docs/ANLEITUNG.md) is that same operator
+contract in plain German on one page. It is a summary and never an authority:
+where it and the operator guide disagree, the guide is right, and where the guide
+and the shipped code disagree, the code is.
+
 ```powershell
 npm install
 npm run build

@@ -2,6 +2,11 @@
 
 Verbindliche Betriebsanleitung für AgentOrchestrator (`agent-loop`).
 
+> **Suchst du die Kurzfassung?** [`ANLEITUNG.md`](ANLEITUNG.md) führt in einfacher
+> Sprache und auf einer Seite durch Einrichten, Aufgabe schreiben, Vorschau,
+> Start und die häufigsten Klemmer. Sie ist eine Zusammenfassung, nie eine
+> Autorität: Wo sie und dieses Dokument sich widersprechen, gilt dieses.
+
 `README.md` ist der Produkt- und Entwurfsbericht: was gebaut wurde, warum es so
 gebaut wurde, und was jede Zusicherung wert ist. Dieses Dokument ist das andere:
 **wie man das Ding benutzt.** Wo beide dieselbe Tatsache berühren, ist das
@@ -37,6 +42,15 @@ der Zustand der Maschine danach, hängen davon ab, dass ein Mensch da ist.* Gena
 das behauptet `--attended`. Deshalb blockiert keiner von ihnen den beaufsichtigten
 Betrieb, und jeder von ihnen ist für unbeaufsichtigten Betrieb tödlich.
 
+**Seit M4 (2026-09-02) sind U1–U4 geschlossen.** Drei wurden repariert, und `U4`
+wurde daraufhin gemessen, dass andere Arbeit ihn längst geschlossen hatte. Was
+das **nicht** heißt: dass dieser Build je tagelang unbeaufsichtigt gelaufen ist.
+Das hat niemand gemessen, und die Freigabe oben bleibt deshalb, wie sie ist —
+„die vier benannten Hindernisse sind weg" und „das läuft unbeaufsichtigt" sind
+zwei verschiedene Behauptungen und dürfen nicht gleich klingen. Die fünf
+verbleibenden Restpunkte stehen namentlich in `README.md` unter *The unattended
+completion slice (M4)*.
+
 ### Seit M3 Slice 1: der Aufruf überlebt ein Quota-Reset — der Wartezustand überlebt den Prozess
 
 `agent-loop repositories --attended --wait-for-reset --max-wait-ms <n>
@@ -50,7 +64,8 @@ der Platte gelesen. Deshalb verliert ein hartes Beenden nichts, und ein **späte
 gestarteter** Prozess findet dieselbe Wartezeit wieder, ohne dass du ihm sagen
 musst, welcher Task oder welcher Zeitpunkt. Details in Abschnitt 12b.
 
-Das ändert **an der Freigabe oben nichts**, und U1–U4 bleiben offen. Es kommt
+Das ändert **an der Freigabe oben nichts**. (U1–U4 waren zu diesem Zeitpunkt noch
+offen; geschlossen hat sie erst M4 — siehe den Absatz oben.) Es kommt
 auch keine neue Berechtigung dazu: jede Admission läuft weiter unter dem
 gewöhnlichen `--attended`-Grant. Gewartet wird zwischen den Durchläufen; *was*
 ein Durchlauf darf, ist unverändert. Es ist kein Daemon, kein Dienst, kein Cron
@@ -65,8 +80,9 @@ kanonische Resume-Entscheidung frisch `AUTOMATIC_ALLOWED` liefert. Mit
 `--wait-for-reset --max-wait-ms <n>` darf er dafür **einmal** auf ein gemeldetes
 Quota-Reset warten, ohne dabei die Execution Lease zu halten.
 
-Das ist **keine** Freigabe für unbeaufsichtigten Betrieb, und U1–U4 bleiben offen.
-Der Modus kann nicht:
+Das ist **keine** Freigabe für unbeaufsichtigten Betrieb. (Auch hier: U1–U4 waren
+damals noch offen, M4 hat sie geschlossen, und an dieser Aussage ändert das
+nichts.) Der Modus kann nicht:
 
 * einen Task starten (kein Worktree, kein Branch, kein State);
 * laufende Arbeit aufnehmen, die er **nicht selbst resumed hat** — ein
@@ -617,9 +633,17 @@ Drei Dinge, die man einmal wissen muss:
   lokal nicht existiert, ist das `DEFAULT_BRANCH_NOT_FOUND` und nicht ein
   stillschweigender Rückfall auf `main`.
 * **`delivery` benennt ein Ziel und erlaubt nichts.** AO liest daraus
-  `host/owner/name` und zeigt es im Read-only-Plan an. Dieser Build pusht nicht,
-  öffnet keinen Pull Request, liest keine CI und merged nicht; `READY_FOR_PR`
-  bleibt terminal. Fehlt der Block, fragt AO Git gar nicht danach. Das Remote
+  `host/owner/name` und zeigt es im Read-only-Plan an. Der Block selbst ist keine
+  Berechtigung: Er sagt *wohin*, nie *dass*. Dieser Satz stand hier bis
+  2026-09-06 als „dieser Build pusht nicht, öffnet keinen Pull Request, liest
+  keine CI und merged nicht" — das wurde von den V4-Slices 5 bis 7 falsch
+  gemacht, und die Zeile hat es weiter behauptet. Richtig ist: AO kann einen
+  Branch pushen, einen Pull Request öffnen und einen mergen, aber jede der drei
+  Handlungen verlangt ihr eigenes Flag (`--publish-head`, `--create-pr`,
+  `--merge-pr`) und einen Grant, der genau sie benennt, und pro Invocation wird
+  höchstens **eine** versucht. Was dieser Build weiterhin nicht tut, ist zu
+  *entscheiden*, dass ein Merge angebracht ist; `READY_FOR_PR` bleibt terminal.
+  Fehlt der Block, fragt AO Git gar nicht danach. Das Remote
   wird genannt, nicht geraten: `origin` ist eine Konvention von `git clone`,
   keine Tatsache über einen Checkout — und gelesen wird die **Push**-URL, weil
   ein Pull Request dort entsteht, wohin der Branch gepusht wurde.
@@ -1313,9 +1337,21 @@ recovery verdict   : STALE_OWNER_GONE
 next acquire       : STALE_LEASE_RECOVERY_UNSAFE
 ```
 
-Das ist U1. Für attended Betrieb ist es laut und fail-closed und damit richtig —
-für unbeaufsichtigten Betrieb macht ein einziger Absturz das Repository dauerhaft
-unbenutzbar.
+Das war U1, und bis M4 stand hier, ein einziger Absturz mache das Repository für
+unbeaufsichtigten Betrieb dauerhaft unbenutzbar. **Das gilt so nicht mehr.** Zwei
+Dinge haben es geändert, und sie sind verschieden:
+
+* **V3 Slice 5** gab dem Build einen Weg, eine Lease *beweisbar* für tot zu
+  erklären und zu entfernen — `agent-loop lease recover`, unten in diesem
+  Abschnitt. Der Satz „dieser Build hat dafür keinen Befehl" war ab da falsch.
+* **M4** ließ die wiederkehrende Schleife mit `recoverStaleLease: true`
+  zulassen: Eine beweisbar tote Lease wird im nächsten Durchlauf ohne dein
+  Zutun geräumt, und eine, die sich nicht beweisen lässt, bleibt liegen — das
+  Repository wird übersprungen und die Verweigerung wird angesagt statt
+  verschwiegen.
+
+Was **unverändert** gilt: Eine Lease, die dieser Build nicht als tot beweisen
+kann, räumt er nicht. Dafür gibt es kein Flag und keinen Override.
 
 ### Was du siehst
 
@@ -1324,11 +1360,12 @@ Die nächste Invocation wird abgewiesen mit:
 ```text
 A lease is present and this build cannot prove it is safe to take: its owner process
   is not observably running, or the record cannot be read. It is deliberately not
-  taken over - a dead owner does not prove that no agent process survived it. Run
-  `agent-loop lease status` to see what is there. This build has no command that
-  removes it: an attended break was shipped twice and withdrawn twice, because for a
-  record left by a crash there is no fact an operator can be shown that still names
-  the same object once the removal runs. Clearing it is a decision outside this tool.
+  taken over - a dead owner does not prove that no process it started survived it. Run
+  `agent-loop lease status` to see what is there, including whether the lease can be
+  proved removable. If it can, `agent-loop lease recover` removes it and nothing else;
+  the next run then takes its own lease normally. If it cannot, that command refuses
+  and says which fact is missing. There is no way to override the refusal: a lease this
+  build cannot prove dead is cleared by a human decision outside this tool.
 ```
 
 Davon zu unterscheiden ist die normale Meldung, dass jemand anders gerade
@@ -1355,9 +1392,25 @@ Die Lease-Datei liegt im Git-Common-Dir des Repositories:
 <repo>\.git\agent-orchestrator-execution-lease.json
 ```
 
-AO entfernt eine zweifelhafte Lease **absichtlich nicht** und bietet dafür auch
-keinen Befehl an. Sie zu löschen ist eine Entscheidung außerhalb dieses Tools —
-und sie ist deine, nicht die des Tools.
+Sagt `status`, die Lease sei beweisbar entfernbar, dann entfernt AO sie für dich —
+und sonst nichts. Der Befehl vergibt keine Berechtigung und startet nichts; der
+nächste Run nimmt anschließend ganz normal seine eigene Lease:
+
+```powershell
+node .\dist\cli\index.js lease recover --repository "D:\Pfad\Zum\Projekt"
+```
+
+Der Beweis, den er dafür verlangt, ist nicht „der Eigentümer ist tot“: Jeder
+Writer-Start unter dieser Lease muss nachweislich in einem an den Eigentümer
+gekoppelten Process Job gelaufen sein, und jeder weitere Subprozess, den der Run
+über diese Grenze gestartet hat — Verify-Kommandos, der Reviewer, die
+Git-Aufrufe — muss als beendet aufgezeichnet oder nachgeprüft verschwunden sein.
+Fehlt davon irgendetwas, oder stammt die Lease aus einem älteren Build,
+verweigert der Befehl und **sagt, welche Tatsache ihm fehlt**. Einen Override
+gibt es nicht.
+
+Bleibt es bei der Verweigerung, ist das Löschen der Datei eine Entscheidung
+außerhalb dieses Tools — und sie ist deine, nicht die des Tools.
 
 Bevor du sie triffst, ist die eigentliche Frage nicht „lebt der Eigentümer noch“,
 sondern (A5):
