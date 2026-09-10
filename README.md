@@ -97,6 +97,26 @@ merged to `main`, no milestone is planned after it, and nothing is open. What
 stands under [Not implemented yet](#not-implemented-yet) stays unimplemented on
 purpose, and that section is the answer to "why does it not do X", not a backlog.
 
+**Reopened twice since, narrowly, and closed again on 2026-09-10.** Both times
+for the same reason and under the rule stated three paragraphs down: a *fresh
+decision with its own reason*, and in both cases the reason was a defect
+**observed in real operation** driving another repository — not a residual
+somebody re-read. That distinction is the whole gate. A theoretical finding in a
+register is a finished entry; a failure a person watched happen twice is not.
+
+  - `#97` — a capability command's ending was collapsed into one refusal code
+    whose name asserted the wrong one of its causes, and nothing durable was
+    written, so the same failure could happen twice and still not be
+    explainable. Observed 2026-09-09 and 2026-09-10.
+  - `#98` — an escalated task lost the `path` and `rule` of the findings that
+    escalated it, and an exhausted review budget was a **closed loop**: no
+    number of operator continuations could finish the task. Observed on
+    RESOLVER-V3-034R, 2026-09-10.
+
+Neither was a hardening round, and both stayed inside the defect they named.
+What each deliberately did *not* fix is in its own register below, which is the
+same treatment every other residual gets.
+
 **Every register in this file headed "Carried forward, deliberately" is an
 accepted residual.** Each entry is a limitation that was measured, named and
 left standing on purpose — not a defect report, not queued work, and not an
