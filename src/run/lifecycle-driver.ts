@@ -404,6 +404,18 @@ export interface LifecycleResult {
    * last-writer-wins would drop the denials in exactly the case they matter.
    */
   readonly permissionDenials: PermissionDenialObservation;
+  /**
+   * The capability refusal this lifecycle stopped on, whole, or `null`.
+   *
+   * `reasonCodes` widens everything to `readonly string[]`, and that is where
+   * the compiler's help ends — so a refusal that survives only as strings
+   * arrives at the renderer already flattened. This field keeps the typed
+   * answer beside them: which capability, which ending the probe had, against
+   * which budget, and where it was durably recorded. On this path `runs` is
+   * empty, because the gate refuses before `runTask` ever runs, so there is no
+   * per-run surface for any of it to hang on.
+   */
+  readonly capability: McpCapabilityOutcome | null;
 }
 
 /* ──────────────────────────── the inputs ────────────────────────────────── */
@@ -662,8 +674,33 @@ function lifecycleResult(
     steps: 0,
     reasonCodes: Object.freeze([]),
     permissionDenials: NO_PERMISSION_DENIALS,
+    capability: null,
     ...from,
   });
+}
+
+/**
+ * The reason codes one capability refusal contributes, in reading order.
+ *
+ * The refusal code first, then the probe's own ending and its finer failure
+ * code where there was a process. Never folded into one token: `outcome` says
+ * the class and `failureCode` separates two endings that share it — a launch
+ * that was not accounted for and a spawn that failed both surface as
+ * `SPAWN_FAILED`.
+ *
+ * Used by BOTH capability gates. They are the same condition reached at two
+ * moments, and a report that described them differently would be reporting the
+ * state of the task rather than the state of the capability.
+ */
+export function capabilityReasonCodes(refusal: McpCapabilityOutcome): readonly string[] {
+  if (refusal.state !== 'REFUSED') return Object.freeze([]);
+  const codes: string[] = [refusal.code];
+  if (refusal.registryCode !== null) codes.push(refusal.registryCode);
+  if (refusal.probe !== null) {
+    codes.push(refusal.probe.outcome);
+    if (refusal.probe.failureCode !== null) codes.push(refusal.probe.failureCode);
+  }
+  return Object.freeze(codes);
 }
 
 /**
@@ -770,7 +807,11 @@ async function driveUnderLease(
    * Ends the run: gives the lease back, and lets a failure to do so replace the
    * outcome rather than sit beside it.
    */
-  const finish = (outcome: LifecycleOutcome, extra: readonly string[] = []): LifecycleResult => {
+  const finish = (
+    outcome: LifecycleOutcome,
+    extra: readonly string[] = [],
+    capability: McpCapabilityOutcome | null = null,
+  ): LifecycleResult => {
     // The flag is set **after** the call returns, never before. Setting it first
     // meant a release that threw disarmed the safety net below: the `catch`
     // would read "already attempted", skip its own release, and rethrow —
@@ -799,6 +840,7 @@ async function driveUnderLease(
       steps,
       reasonCodes: Object.freeze(codes),
       permissionDenials,
+      capability,
     });
   };
 
@@ -843,7 +885,11 @@ async function driveUnderLease(
       // here, and the loop's gate covers it before it drives.
       const startCapability = await deps.mcpPreflight();
       if (startCapability.state === 'REFUSED') {
-        return finish('REQUIRED_CAPABILITY_UNPROVEN', [startCapability.code]);
+        return finish(
+          'REQUIRED_CAPABILITY_UNPROVEN',
+          capabilityReasonCodes(startCapability),
+          startCapability,
+        );
       }
 
       start = await startTask(
@@ -908,7 +954,11 @@ async function driveUnderLease(
       // never gets an agent that lacks it.
       const capability = await deps.mcpPreflight();
       if (capability.state === 'REFUSED') {
-        return finish('REQUIRED_CAPABILITY_UNPROVEN', [capability.code]);
+        return finish(
+          'REQUIRED_CAPABILITY_UNPROVEN',
+          capabilityReasonCodes(capability),
+          capability,
+        );
       }
       const writerMcp = capability.state === 'PROVEN' ? capability.grant : null;
 

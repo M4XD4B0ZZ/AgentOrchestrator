@@ -2756,6 +2756,15 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         // at all, and it asks whether a capability answers rather than doing
         // any work with it.
         join('src', 'agent', 'mcp-capability-preflight.ts'),
+        // The capability-command observation, and it starts nothing — absent
+        // from the measured group below, deliberately. It imports `exec.js`
+        // for TYPES ONLY: `CommandOutcome` and `CommandFailureCode` are the
+        // vocabulary it carries verbatim rather than renaming, which is the
+        // whole point of the module. This pin counts a type-only import, and
+        // that is correct — if its sibling STORE ever imports `exec.js` for
+        // convenience this goes red, and the fix is to move the type rather
+        // than to widen this list.
+        join('src', 'agent', 'capability-command-failure.ts'),
         // M5, and it starts nothing — it is deliberately absent from the
         // measured group below. It imports `isShellInertArgument` alone, which
         // `exec.ts` exports precisely so a caller that DERIVES an argument can

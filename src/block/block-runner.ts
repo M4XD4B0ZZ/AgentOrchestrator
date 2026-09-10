@@ -123,6 +123,7 @@ import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js
 import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import type { TaskPlanningSuccess } from '../plan/plan-next-task.js';
+import { capabilityReasonCodes } from '../run/lifecycle-driver.js';
 import { runTask, type RunOutcome, type RunResult } from '../run/run-driver.js';
 import { startPlannedTask } from '../run/start-task.js';
 import type { ReplaceFn, TempSuffixFn } from '../state/atomic-file.js';
@@ -377,7 +378,11 @@ export async function runAttendedBlock(
   // rules (M5).
   const capability = await deps.mcpPreflight();
   if (capability.state === 'REFUSED') {
-    return state.gateRefused(`REQUIRED_CAPABILITY_UNPROVEN: ${capability.code}`);
+    // The same composer the lifecycle report uses, so one condition cannot be
+    // described two ways depending on which command met it. Codes only, joined:
+    // the refusal, then the probe's own ending and its finer failure code.
+    const codes = ['REQUIRED_CAPABILITY_UNPROVEN', ...capabilityReasonCodes(capability)];
+    return state.gateRefused(codes.join(': '));
   }
   const writerMcp = capability.state === 'PROVEN' ? capability.grant : null;
 

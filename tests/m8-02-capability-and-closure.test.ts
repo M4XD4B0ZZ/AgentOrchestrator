@@ -299,6 +299,94 @@ describe('provisioning the worktree index', () => {
     });
     expect(again.outcome).toBe('ALREADY_PRESENT');
     expect(again.commandRan).toBe(false);
+    // The success paths carry the ending too, so the seam table below and the
+    // real-process cases here cannot disagree about the same class.
+    expect(result.observation?.outcome).toBe('COMPLETED');
+    expect(result.record).toBeNull();
+  });
+
+  /* ── the prepare step's own collapse ──────────────────────────────────── */
+
+  // `COMMAND_FAILED` covered a timeout, a missing binary, a failed spawn, an
+  // exceeded stream budget, a lost boundary and a plain non-zero exit — and
+  // `commandRan` was hard-coded `true` for all of them, which made it false for
+  // exactly the two where the question matters. The outcome keeps its name,
+  // because it is silent about the cause rather than wrong about it; the cause
+  // now rides beside it. Nothing under `tests/` reached this branch before.
+  const PREPARE_ENDINGS = [
+    ['TIMED_OUT', 'TIMEOUT', true, null],
+    ['BOUNDARY_LOST', 'BOUNDARY_LOST', true, null],
+    ['OUTPUT_LIMIT_EXCEEDED', 'OUTPUT_LIMIT_STDOUT', true, null],
+    ['NOT_FOUND', 'EXECUTABLE_NOT_FOUND', false, null],
+    ['SPAWN_FAILED', 'SPAWN_FAILED', false, null],
+    ['COMPLETED', null, true, 2],
+  ] as const;
+
+  it.each(PREPARE_ENDINGS)(
+    'reports a %s prepare as COMMAND_FAILED and says which ending it was',
+    async (commandOutcome, failureCode, started, exitCode) => {
+      const fixture = await withDivergentIndex(`M8-02-PREP-${commandOutcome}`, 'REQUIRED');
+      const result = await provisionCodegraphIndex({
+        worktreePath: fixture.workspace.worktreePath,
+        requirement: 'REQUIRED',
+        grant: grant({ command: 'git', args: ['--version'] }),
+        git: runGitCommand,
+        leaseHolds: () => true,
+        now: () => new Date('2026-09-10T08:00:00.000Z'),
+        run: async () =>
+          ({
+            display: 'git --version',
+            executable: 'git',
+            args: ['--version'],
+            started,
+            outcome: commandOutcome,
+            exitCode,
+            signal: null,
+            stdout: '',
+            stderr: '',
+            startedAt: '2026-09-10T07:59:00.000Z',
+            finishedAt: '2026-09-10T08:00:00.000Z',
+            durationMs: 60_000,
+            failureCode,
+            errnoCode: null,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutBytesObserved: 0,
+            stderrBytesObserved: 0,
+            stdinDelivery: 'NOT_REQUESTED',
+            processTreeKilled: false,
+          }) as never,
+      });
+
+      expect(result.outcome).toBe('COMMAND_FAILED');
+      // The honesty fix: `commandRan` is the result's own `started`, so the two
+      // endings where no process existed no longer claim one.
+      expect(result.commandRan).toBe(started);
+      expect(result.observation?.outcome).toBe(commandOutcome);
+      expect(result.observation?.failureCode).toBe(failureCode);
+      // Recorded against this task's own budget, which this module overrides on
+      // all three axes — including not being killed for being verbose.
+      expect(result.observation?.budget.terminateOnOutputLimit).toBe(false);
+      expect(result.observation?.budget.timeoutMs).toBe(600_000);
+    },
+  );
+
+  it('starts nothing and observes nothing when the runner refuses the arguments', async () => {
+    const fixture = await withDivergentIndex('M8-02-PREP-REFUSED', 'REQUIRED');
+    const result = await provisionCodegraphIndex({
+      worktreePath: fixture.workspace.worktreePath,
+      requirement: 'REQUIRED',
+      grant: grant({ command: 'git', args: ['--version'] }),
+      git: runGitCommand,
+      leaseHolds: () => true,
+      run: async () => null,
+    });
+    expect(result.outcome).toBe('COMMAND_FAILED');
+    expect(result.commandRan).toBe(false);
+    // No process, so no ending to carry and nothing to record. `null` here is
+    // the answer, not a missing measurement.
+    expect(result.observation).toBeNull();
+    expect(result.record).toBeNull();
   });
 
   it('calls a command that exits 0 and leaves nothing behind a failure', async () => {

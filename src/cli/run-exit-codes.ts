@@ -199,7 +199,7 @@ export function exitCodeForRunOutcome(outcome: RunOutcome): CliExitCode {
  * that no state accounts for — `startTask` reports exactly that as
  * `residue: true`. An operator has to clean that up, so it is not a 4.
  */
-const START_TASK_EXIT_CODES = Object.freeze({
+export const START_TASK_EXIT_CODES = Object.freeze({
   // Nominal: a task is ready to be driven. Neither is terminal for the
   // attended command, which continues into the run and exits on *its* outcome.
   STARTED: EXIT_RUN_OK,
@@ -232,8 +232,6 @@ const START_TASK_EXIT_CODES = Object.freeze({
   EXECUTION_LEASE_LOST: EXIT_RUN_NEEDS_OPERATOR,
   // An operator must act before anything may run.
   AUTH_PREFLIGHT_FAILED: EXIT_RUN_NEEDS_OPERATOR,
-  // A person has to grant or repair the capability; no amount of retrying will.
-  REQUIRED_CAPABILITY_UNPROVEN: EXIT_RUN_NEEDS_OPERATOR,
   WORKSPACE_COLLISION: EXIT_RUN_NEEDS_OPERATOR,
   WORKSPACE_REFUSED: EXIT_RUN_NEEDS_OPERATOR,
   STATE_UNUSABLE: EXIT_RUN_NEEDS_OPERATOR,
@@ -387,7 +385,7 @@ export function exitCodeForBlockRun(result: AttendedBlockResult): CliExitCode {
  * loop was watching. What is new is the lease phase, which happens *before* any
  * run, and the two stops the outer loop owns.
  */
-const LIFECYCLE_EXIT_CODES = Object.freeze({
+export const LIFECYCLE_EXIT_CODES = Object.freeze({
   // The task finished.
   COMPLETED: EXIT_RUN_OK,
   // The task was ended by an operator. Nobody is waiting on it, so the same

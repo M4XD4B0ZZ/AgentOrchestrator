@@ -6,9 +6,13 @@
  * ids, block and run ids, closed-vocabulary codes and the canonical repository
  * identity. Agent output, verifier output, exception text and finding paths are
  * not representable in an `AttendedBlockResult` and therefore cannot be printed.
- * `detail` is the one field that carries a value from elsewhere, and it is an
- * allow-listed code from another module's closed vocabulary, printed as one
- * (AO-002).
+ * `detail` is the one field that carries a value from elsewhere. It carries
+ * **codes from closed vocabularies, and only those** — sometimes one, sometimes
+ * several joined by `: `, which is what the capability gate composes
+ * (`block/block-runner.ts`). The earlier wording here said "an allow-listed code
+ * ... printed as one", singular, and that had already stopped being true: the
+ * property that matters is that every part is a member of some module's closed
+ * set, never that there is exactly one part (AO-002).
  *
  * ── What the unrecorded sentences may and may not say ──────────────────────
  *

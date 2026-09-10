@@ -24,6 +24,8 @@ import {
   EXIT_RUN_REFUSED,
   EXIT_RUN_UNEXPECTED,
   exitCodeForLifecycle,
+  LIFECYCLE_EXIT_CODES,
+  START_TASK_EXIT_CODES,
   exitCodeForLifecycleRun,
   exitCodeForPlan,
   exitCodeForRunOutcome,
@@ -224,6 +226,23 @@ describe('every start outcome has an exit code', () => {
     expect(expected).toEqual(declared);
     expect(START_TASK_OUTCOMES).toHaveLength(16);
     expect(new Set(declared).size).toBe(declared.length);
+  });
+
+  // The case above compares the test's OWN table against the vocabulary, and
+  // never reads the shipped map's keys — so a stray key in the shipped map was
+  // invisible to it, and one shipped: `REQUIRED_CAPABILITY_UNPROVEN` sat in
+  // `START_TASK_EXIT_CODES` and is not a `StartTaskOutcome` at all. It compiled
+  // because `satisfies Record<K, V>` placed on the RESULT of `Object.freeze(...)`
+  // proves completeness but loses object-literal freshness, so excess-property
+  // checking never fires.
+  //
+  // This is the hazard for every such map in this file, not a single mistake,
+  // which is why both maps are asserted rather than the one that was wrong.
+  it.each([
+    ['START_TASK_EXIT_CODES', START_TASK_EXIT_CODES, [...START_TASK_OUTCOMES]],
+    ['LIFECYCLE_EXIT_CODES', LIFECYCLE_EXIT_CODES, [...LIFECYCLE_OUTCOMES]],
+  ] as const)('%s carries no key its vocabulary does not declare', (_name, map, vocabulary) => {
+    expect(Object.keys(map).sort()).toEqual([...vocabulary].sort());
   });
 
   it.each([...START_TASK_OUTCOMES])('%s exits with its documented code', (outcome) => {

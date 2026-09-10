@@ -23,6 +23,10 @@ import type {
   LifecycleOutcome,
   LifecycleResult,
 } from '../run/lifecycle-driver.js';
+import type {
+  McpCapabilityOutcome,
+  McpCapabilityRefusal,
+} from '../agent/mcp-capability-preflight.js';
 import type { InvocationGrant } from '../run/invocation-grant.js';
 import type {
   ResetWaitDisposition,
@@ -39,6 +43,99 @@ import {
   STALE_RECOVERY_SENTENCES,
   leaseReleaseLine,
 } from './render-lease.js';
+
+/**
+ * One sentence per capability refusal, and the compiler insists on all of them.
+ *
+ * Annotated rather than `satisfies`-ed, deliberately: `satisfies Record<K, V>`
+ * placed on the result of `Object.freeze(...)` proves every key is present but
+ * loses object-literal freshness, so excess-property checking never fires and a
+ * stray key ships. That is how a dead key survived in `run-exit-codes.ts`.
+ *
+ * Its existence is the point as much as its contents. The refusal vocabulary
+ * widens to `readonly string[]` one layer up, so before this map there was no
+ * place where adding a refusal forced anyone to say what it means to an
+ * operator — and the outcome sentence tried to carry all of them in one
+ * paragraph, which is the shape that goes stale.
+ */
+export const MCP_CAPABILITY_REFUSAL_SENTENCES: Readonly<Record<McpCapabilityRefusal, string>> =
+  Object.freeze({
+    REGISTRY_UNUSABLE:
+      'The operator registry exists and could not be used. The second code on the Stopped by\n' +
+      '  line is the registry\'s own. Repair the file; this does not clear on its own.',
+    CAPABILITY_NOT_GRANTED:
+      'No registry file, or one that grants nothing for this capability. Grant it in\n' +
+      '  <user profile>/.agent-orchestrator/mcp-capabilities.yaml. This does not clear on its own.',
+    CONFIG_WRITE_FAILED:
+      'The MCP configuration this build writes for the CLI could not be written. A disk or\n' +
+      '  permission condition under the orchestrator home, not a grant problem.',
+    GRANT_NOT_SHELL_INERT:
+      'A granted command, argument or generated path could not be put in argv unchanged.\n' +
+      '  Repair the grant; this does not clear on its own.',
+    PROBE_DID_NOT_START:
+      'No probe process was ever created -- proved, not inferred. Nothing about the grant was\n' +
+      '  measured, because nothing ran. Check that the CLI is on PATH for this account.',
+    PROBE_DID_NOT_COMPLETE:
+      'A probe process was created and did not complete. The Probe line says how, against the\n' +
+      '  budget it was given. This class includes causes that clear on their own -- a timeout\n' +
+      '  under load is not a grant problem -- so read the ending before changing configuration.',
+    PROBE_EMITTED_NO_SESSION:
+      'The probe ran to completion and announced no session, so nothing was measured. The\n' +
+      '  session announcement is the evidence; an exit code is not.',
+    SERVER_NOT_CONNECTED:
+      'The session announced the granted server and it is not connected. The server\'s own\n' +
+      '  command is the thing to check; the grant reached the CLI intact.',
+    GRANTED_TOOL_ABSENT:
+      'The server connected and the granted tool is not in the session\'s tool set. The tool\n' +
+      '  name in the grant and the one the server exposes disagree.',
+  });
+
+/** `3484 ms of 20000 ms`, or `not measured` where the field never arrived. */
+function against(value: number | null, budget: number, unit: string): string {
+  return value === null ? 'not measured' : `${value} ${unit} of ${budget} ${unit}`;
+}
+
+/**
+ * The three lines a capability refusal contributes.
+ *
+ * `Probe` is present only where a process ran, because a line of nulls reads as
+ * a measurement that came back empty rather than as one that was never taken.
+ * `Evidence` is present whenever recording was attempted, including when it
+ * failed — a durable half nobody can see from the console is a durable half
+ * nobody can falsify.
+ */
+function renderCapabilityRefusal(
+  refusal: Extract<McpCapabilityOutcome, { state: 'REFUSED' }>,
+): readonly string[] {
+  const lines = [
+    line('Capability', `${refusal.capability}  (${refusal.code})`),
+    `  ${MCP_CAPABILITY_REFUSAL_SENTENCES[refusal.code]}`,
+  ];
+  const probe = refusal.probe;
+  if (probe !== null) {
+    const failure = probe.failureCode === null ? '' : `/${probe.failureCode}`;
+    lines.push(
+      line(
+        'Probe',
+        `${probe.outcome}${failure}  started=${String(probe.started)}  ` +
+          `${against(probe.durationMs, probe.budget.timeoutMs, 'ms')}  ` +
+          `stdout ${against(probe.stdoutBytesObserved, probe.budget.maxStdoutBytes, 'B')}`,
+      ),
+    );
+  }
+  const record = refusal.record;
+  if (record !== null) {
+    lines.push(
+      line(
+        'Evidence',
+        record.recorded
+          ? `RECORDED  ${record.path ?? ''}`
+          : `NOT RECORDED  ${record.code}${record.detailCode === null ? '' : `/${record.detailCode}`}`,
+      ),
+    );
+  }
+  return Object.freeze(lines);
+}
 
 /**
  * The closing sentence of a run that took more than one invocation.
@@ -153,10 +250,10 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
     REQUIRED_CAPABILITY_UNPROVEN:
       'This repository declares an MCP capability REQUIRED, and this invocation could not prove\n' +
       '  it. Nothing was driven, deliberately: a repository whose own rules make a tool mandatory\n' +
-      '  for coding work must not be handed a writing agent that lacks it. The reason code above\n' +
-      '  says which half failed -- the operator has not granted the capability in\n' +
-      '  <user profile>/.agent-orchestrator/mcp-capabilities.yaml, or the granted server did not\n' +
-      '  answer. Grant or repair it and invoke again.',
+      '  for coding work must not be handed a writing agent that lacks it. The Capability line\n' +
+      '  below names which refusal it was and says what that one means; where a process ran, the\n' +
+      '  Probe line carries its ending against the budget it was given, and Evidence says where\n' +
+      '  that is written down. Some of these refusals are permanent and some clear on their own.',
     COMPLETED:
       'The task reached READY_FOR_PR. Terminal: a human opens the pull request from here.',
     TASK_ABORTED: 'The task was already ABORTED. Nothing was run.',
@@ -306,6 +403,21 @@ export function renderLifecycleRun(
   // `LIFECYCLE_OUTCOME_SENTENCES` and a second one would say it twice.
   if (result.release !== null) {
     lines.push(leaseReleaseLine('Release', result.release));
+  }
+
+  // At top level, and that placement is the whole point. On this path `runs` is
+  // empty — the gate refuses before `runTask` — so `renderRunResult` below is
+  // never reached and these three lines are the only surface the refusal has.
+  //
+  // `?.` rather than `!== null`, and the difference is the whole defect this
+  // change exists to fix, met once more on the way out: `undefined !== null` is
+  // TRUE, so a result assembled without this field walked straight through the
+  // guard and threw inside the renderer. `LifecycleResult` requires the field,
+  // but a caller can hand over a partial object through a cast — a test did —
+  // and a REPORT that throws is worse than a report missing a line. The guard
+  // now answers the question it means to ask.
+  if (result.capability?.state === 'REFUSED') {
+    lines.push(...renderCapabilityRefusal(result.capability));
   }
 
   lines.push(

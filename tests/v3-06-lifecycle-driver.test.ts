@@ -806,6 +806,7 @@ describe('the report carries the lease vocabulary, not only its codes', () => {
     steps: 0,
     reasonCodes: [],
     permissionDenials: { count: 0, tools: [] },
+    capability: null,
   } as const;
 
   it('prints the acquire vocabulary sentence beside the code', () => {
