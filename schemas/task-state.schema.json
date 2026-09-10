@@ -108,6 +108,12 @@
       "minimum": 1,
       "maximum": 1000
     },
+    "grantedReviewRounds": {
+      "default": 0,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+    },
     "blockedAgent": {
       "anyOf": [
         {
@@ -215,12 +221,41 @@
           "fingerprint": {
             "type": "string",
             "pattern": "^[0-9a-f]{32}$"
+          },
+          "path": {
+            "default": null,
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024,
+                "pattern": "^[A-Za-z0-9._:@=+/-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rule": {
+            "default": null,
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "round",
           "severity",
-          "fingerprint"
+          "fingerprint",
+          "path",
+          "rule"
         ],
         "additionalProperties": false
       }
@@ -241,6 +276,7 @@
     "currentCommit",
     "reviewRound",
     "maxReviewRounds",
+    "grantedReviewRounds",
     "blockedAgent",
     "resumeFrom",
     "reportedResetAt",

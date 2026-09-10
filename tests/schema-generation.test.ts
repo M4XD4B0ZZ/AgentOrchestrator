@@ -41,6 +41,10 @@ describe('generated JSON Schema', () => {
       'currentCommit',
       'reviewRound',
       'maxReviewRounds',
+      // Defaulted, and still required in the generated schema: the generator
+      // runs with io: 'output', which is why scopeAuthorityCommit and
+      // operatorResolution are in this list too.
+      'grantedReviewRounds',
       'blockedAgent',
       'resumeFrom',
       'reportedResetAt',
@@ -87,9 +91,16 @@ describe('generated JSON Schema', () => {
         };
       };
     };
+    // Five, not three. `path` and `rule` are defaulted rather than required in
+    // the Zod contract -- a record written before them means null, and making
+    // them required would have made every existing checkpoint unloadable -- but
+    // the generator emits the OUTPUT shape, where a default has always been
+    // applied by the time a value exists.
     expect(schema.properties.findingHistory.items.required.sort()).toEqual([
       'fingerprint',
+      'path',
       'round',
+      'rule',
       'severity',
     ]);
     expect(schema.properties.findingHistory.items.properties.severity.enum).toEqual([

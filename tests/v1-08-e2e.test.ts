@@ -266,7 +266,7 @@ describe('a review that finds something drives a real remediation cycle', () => 
     expect(brief).toContain('src/broken.ts');
     expect(brief).toContain('e2e.named');
     // The live brief is the strong one; it must not announce itself as degraded.
-    expect(brief).not.toContain('did not survive');
+    expect(brief).not.toContain('This pass was resumed');
   });
 
   it('stops at a human when the review budget is spent, with its evidence intact', async () => {
@@ -581,7 +581,8 @@ describe('a process that dies mid-step loses nothing and fabricates nothing', ()
     await runTask(request(started), deps({ verify: recordedVerify().runner, agent: agent.runner }));
 
     const brief = agent.calls.find((call) => call.agent === 'claude')?.payload ?? '';
-    expect(brief).toContain('did not survive');
+    expect(brief).toContain('This pass was resumed');
+    expect(brief).toContain('(no path recorded)');
     expect(brief).toContain('review round 1');
     expect(brief).not.toContain('src/named.ts');
     expect(brief).not.toContain('e2e.named');
@@ -619,7 +620,7 @@ describe('a process that dies mid-step loses nothing and fabricates nothing', ()
     const brief = agent.calls.find((call) => call.agent === 'claude')?.payload ?? '';
     expect(brief).toContain('src/named.ts');
     expect(brief).toContain('e2e.named');
-    expect(brief).not.toContain('did not survive');
+    expect(brief).not.toContain('This pass was resumed');
   });
 
   it('refuses a stale write rather than flattening the writer that got there first', async () => {

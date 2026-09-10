@@ -120,8 +120,12 @@ function inFlightState(root: string, overrides: Partial<TaskStateInput> = {}): T
     reviewRound: 1,
     maxReviewRounds: 3,
     findingHistory: [
-      { round: 1, severity: 'high', fingerprint: fingerprint(1) },
-      { round: 1, severity: 'low', fingerprint: fingerprint(2) },
+      // Records from before the reviewer's path and rule were persisted. The
+      // schema defaults both to null, and stating them keeps this fixture and
+      // the parsed state the same shape -- which is the whole point of a case
+      // that asserts the history came through UNCHANGED.
+      { round: 1, severity: 'high', fingerprint: fingerprint(1), path: null, rule: null },
+      { round: 1, severity: 'low', fingerprint: fingerprint(2), path: null, rule: null },
     ],
     ...overrides,
   });

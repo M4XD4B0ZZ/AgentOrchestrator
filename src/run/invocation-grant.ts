@@ -263,8 +263,12 @@ export function mayRemediateVerifyFailure(grant: InvocationGrant): boolean {
  *
  * ── What it does not do ───────────────────────────────────────────────────
  *
- * It does not refill anything. An escalation caused by an exhausted review
- * budget is continued into the same exhausted budget and will escalate again;
+ * It refills nothing but the review budget, and that one only where an
+ * exhausted review budget is what escalated the task, only by ONE round, and
+ * only up to a cap. Without that exception the state had no exit at all: a
+ * remediation whose result nothing may review cannot finish a task, so the
+ * continuation returned to the same park for ever. The round is bought by the
+ * operator decision and recorded on the task;
  * the policy's own rationale says a new invocation does not refill it, and this
  * is not a new invocation's worth of budget either. It does not weaken
  * `automaticResumeEligible: false`, and `AUTOMATIC_RESUME_ONLY` answers `false`

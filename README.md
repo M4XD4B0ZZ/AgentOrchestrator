@@ -2977,7 +2977,7 @@ never passes it.
 | `READY_FOR_PR` / `ABORTED` | terminal, nothing run |
 | `BLOCKED_USAGE_LIMIT` | resumed **only** on `AUTOMATIC_ALLOWED` *and* an attended grant; otherwise stops with the checks that denied it, writing nothing |
 | `BLOCKED_VERIFY` | stops, unless the invocation carried `--remediate-verify-failure` **and** an attended grant, in which case it takes the declared `REMEDIATING` edge once. Never an automatic retry, and never a re-run of the same verification |
-| `HUMAN_DECISION_REQUIRED` | stops, unless the invocation carried `--continue-human-decision` **and** an attended grant, in which case it re-enters the phase its own `resumeFrom` names, once. It does not choose the phase and it refills no budget |
+| `HUMAN_DECISION_REQUIRED` | stops, unless the invocation carried `--continue-human-decision` **and** an attended grant, in which case it re-enters the phase its own `resumeFrom` names, once. It does not choose the phase. Where an exhausted review budget is what escalated the task, it grants exactly one more review round, durably and capped; continuing any other escalation grants nothing |
 | `BLOCKED_AUTH`, `SCOPE_VIOLATION`, `RESUME_STATE_DIVERGED` | stop; each keeps its own outcome |
 | diverged / unobservable / unusable | stop, fail-closed, repair nothing |
 

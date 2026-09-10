@@ -64,7 +64,22 @@ export function findingRecordsFor(
 ): readonly FindingRecord[] {
   return Object.freeze(
     findings.map((finding) =>
-      Object.freeze({ round, severity: finding.severity, fingerprint: finding.fingerprint }),
+      Object.freeze({
+        round,
+        severity: finding.severity,
+        fingerprint: finding.fingerprint,
+        // The line the whole defect lived on. These two were dropped here, so a
+        // task that escalated kept a severity and a digest and nothing a writer
+        // could act on — measured on RESOLVER-V3-034R, where the finding was
+        // recoverable only from the reviewer's own transcript.
+        //
+        // They are not free prose: both passed an anchored allow-list on the way
+        // in, and the durable schema restates that grammar rather than trusting
+        // this producer. A record written before the fix carries `null` for
+        // both, which is why every consumer degrades per record.
+        path: finding.path,
+        rule: finding.rule,
+      }),
     ),
   );
 }
@@ -268,6 +283,16 @@ export type ResumedRemediationBrief =
  * not have. Where there is no record, there is no prompt at all: an empty list
  * is the most confident-looking degraded brief of them all, and the one whose
  * every claim is invented.
+ *
+ * ── What changed, and why the degraded wording stayed ──────────────────────
+ *
+ * The durable record now carries the reviewer's `path` and `rule`, so a resumed
+ * brief names files and is as actionable as the in-memory one. It stopped being
+ * a weaker prompt for records written since — and it is still a weaker prompt
+ * for records written before, which is why the sentence survives and why it is
+ * emitted **per record**. A brief that announced itself degraded merely for
+ * having been resumed would say it of complete records too, and a sentence that
+ * is always present distinguishes nothing.
  */
 export function buildResumedRemediationBrief(
   history: readonly FindingRecord[],
@@ -277,22 +302,45 @@ export function buildResumedRemediationBrief(
   const current = history.filter((record) => record.round === round);
   if (current.length === 0) return Object.freeze({ kind: 'NO_DURABLE_FINDINGS' as const });
 
+  // Per RECORD, never per brief. A record written before paths were persisted
+  // carries `null`; one written since carries both. Announcing a whole brief as
+  // degraded because it was resumed would make the sentence stop discriminating
+  // anything — every resumed brief would carry it, including a complete one.
+  const degraded = current.some((record) => record.path === null);
+
   const lines = [
     `Address the findings reported by review round ${round}.`,
     '',
     ...writerBriefingLines(briefing),
     '',
-    'This pass was resumed after an interruption. The reviewer\'s file paths and',
-    'rule identifiers were held in memory only and did not survive, because they',
-    'are agent-authored text and this orchestrator does not persist such text.',
-    'What follows is the durable record. Re-read the working tree to locate the',
-    'findings; do not guess at files this list does not name.',
+    'This pass was resumed after an interruption. What follows is the durable',
+    'record of what the reviewer reported.',
+  ];
+  if (degraded) {
+    lines.push(
+      '',
+      'Some records below were written by a build that stored no file path or',
+      'rule identifier. They carry a fingerprint and nothing else, and no',
+      'inspection of this tree can turn one back into a location. Address the',
+      'ones that name a file; report the others as unrecoverable rather than',
+      'guessing at what they might have meant.',
+    );
+  }
+  lines.push(
+    '',
+    // Kept, and no longer paralysing: the list now names files, so this is the
+    // anti-scope rule the resumed brief would otherwise entirely lack.
+    'Do not guess at files this list does not name.',
     '',
     `FINDINGS (${current.length}; ${severityTally(current)})`,
-  ];
+  );
 
   for (const record of current) {
-    lines.push(`- [${record.severity}] fingerprint ${record.fingerprint}`);
+    lines.push(
+      record.path === null || record.rule === null
+        ? `- [${record.severity}] fingerprint ${record.fingerprint} (no path recorded)`
+        : `- [${record.severity}] ${record.path} — ${record.rule}`,
+    );
   }
 
   return Object.freeze({ kind: 'DURABLE_RECORD' as const, payload: clamp(lines.join('\n')) });

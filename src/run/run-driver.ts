@@ -96,6 +96,11 @@ import {
 } from './invocation-grant.js';
 import { resumePointToState } from '../core/resume-policy.js';
 import {
+  MAX_REVIEW_BUDGET,
+  reviewBudget,
+  reviewBudgetExhausted,
+} from '../core/review-budget.js';
+import {
   usageLimitContinuation,
   type UsageLimitContinuationReading,
 } from '../core/usage-limit-continuation.js';
@@ -785,6 +790,16 @@ export async function runTask(
    * kept for the same reason: it is the bound that would stop the cycle if
    * either of those changed, and a decision the operator buys once must not be
    * spendable twice by a loop that returns to the state it left.
+   *
+   * **Re-measured when the continuation started granting a review round**, and
+   * it is still a floor: the mutant deleting this conjunct survives, and so
+   * does the one deleting its per-lifecycle twin. The reason has not changed —
+   * every path back to this state is a `BLOCKED` step that ends the call, and
+   * `driveLifecycle` re-enters only on `STEP_BUDGET_EXHAUSTED`. What DID change
+   * is the cost of being wrong: the departure now raises a durable budget
+   * rather than only changing a phase, so if either mechanism is ever altered
+   * this floor is what stands between one operator decision and a budget that
+   * climbs. Said plainly rather than dressed up as a measured bound.
    */
   let humanDecisionContinuationSpent = false;
   /** The third decision, bounded exactly as its two siblings are. */
@@ -1294,7 +1309,43 @@ export async function runTask(
         });
       }
 
-      const resumed = resumeBlockedTask(load, deps.now(), advance);
+      // The one extra review round an operator’s continuation buys, decided
+      // here and nowhere else. All three conjuncts are load-bearing:
+      //
+      //  - `continuingHumanDecision` alone. The other three continuations are
+      //    not operator decisions about a review, and folding them in would
+      //    make an automatic quota resume refill a budget.
+      //  - the budget must actually be exhausted, so continuing a park that
+      //    was never about the budget — a refused scope, a missing brief —
+      //    buys nothing and the ceiling cannot creep on unrelated escalations.
+      //  - the result must be a budget the contract would accept. Writing one
+      //    it would refuse turns the operator’s continuation into a broken
+      //    record instead of a refusal they can read.
+      const grantReviewRound =
+        continuingHumanDecision &&
+        reviewBudgetExhausted(state) &&
+        reviewBudget(state) < MAX_REVIEW_BUDGET;
+
+      // Refused BEFORE the write, beside the phase gate above and for the same
+      // reason: a departure is spent only by a write that landed, so a refusal
+      // that came after would cost the operator their one continuation and
+      // leave the task exactly where it was.
+      if (
+        continuingHumanDecision &&
+        reviewBudgetExhausted(state) &&
+        reviewBudget(state) >= MAX_REVIEW_BUDGET
+      ) {
+        return stop({
+          outcome: 'CONTINUATION_NOT_AUTHORISED',
+          state: state.state,
+          steps,
+          reasonCodes: Object.freeze(['REVIEW_BUDGET_CEILING_REACHED']),
+          reconciliation,
+          resume,
+        });
+      }
+
+      const resumed = resumeBlockedTask(load, deps.now(), advance, grantReviewRound);
       if (resumed === null) {
         return stop({
           outcome: 'CONTINUATION_NOT_AUTHORISED',
@@ -1528,10 +1579,28 @@ export async function runTask(
  * and discarding true evidence there would deny a later resume the checkpoint
  * it was entitled to.
  */
+/**
+ * Spends a blocked task’s resume point, and — only when the caller says so —
+ * records the one extra review round an operator’s continuation buys.
+ *
+ * `grantReviewRound` is an EXPLICIT parameter and is deliberately not derived
+ * here. This function is shared by all four resume arms behind a single `if`,
+ * so a flag computed inside it would raise the budget on every automatic quota
+ * resume as well — which no test in this build would have caught, and which
+ * would falsify the documented promise that an automatic resume refills
+ * nothing.
+ *
+ * The increment rides on the write that already spends the resume point, so
+ * the authorisation is on the record BEFORE the reviewer starts. It cannot be
+ * an in-memory flag: `runLoopStep` reads durable state and nothing else, and
+ * the round bound in `core/task-state.ts` would refuse the resulting write
+ * after the reviewer had already been paid for.
+ */
 function resumeBlockedTask(
   load: StateLoadSuccess,
   now: string,
   advance: AdvanceOptions,
+  grantReviewRound: boolean,
 ): { readonly save: ReturnType<typeof advanceTaskState> } | null {
   const state = load.state;
   if (state.resumeFrom === null) return null;
@@ -1546,6 +1615,7 @@ function resumeBlockedTask(
         state: target,
         stateEnteredAt: now,
         blockedAgent: null,
+        grantedReviewRounds: state.grantedReviewRounds + (grantReviewRound ? 1 : 0),
         ...RESUME_EVIDENCE_SPENT,
         ...withdrawnCheckpointFor(target),
       },

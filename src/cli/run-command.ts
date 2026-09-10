@@ -651,8 +651,11 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
       'Continue ONE named task out of HUMAN_DECISION_REQUIRED, on your decision, from the ' +
         'resume point that task recorded. The four edges out of this state have always been ' +
         'declared and nothing could take them; this is the operator half. It does not choose ' +
-        'the phase -- the record does -- and it refills nothing: an escalation caused by an ' +
-        'exhausted review budget is continued into the same exhausted budget. Requires ' +
+        'the phase -- the record does. Where an exhausted REVIEW BUDGET is what escalated ' +
+        'the task, it grants exactly one more round, durably: a remediation nothing will judge ' +
+        'cannot finish a task, and before this the task could never leave that state at all. ' +
+        'It refills nothing else, the grant is capped, and continuing any other escalation ' +
+        'grants nothing. Requires ' +
         '--attended and --task, is refused with --automatic-resume-only, and buys exactly ' +
         'one departure from the state per invocation. Read what was recorded with ' +
         '`run --task <id>` before deciding.',

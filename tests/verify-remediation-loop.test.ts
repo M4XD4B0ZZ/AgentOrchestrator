@@ -259,6 +259,156 @@ function findingsReview(rule = 'classification.order'): string {
   });
 }
 
+/* ────────── the finding's location survives, and the loop has an exit ────── */
+
+describe('a finding keeps its location across a restart', () => {
+  it('persists the reviewer\u2019s path and rule, not only a digest', async () => {
+    const root = repoRoot();
+    const step = await runReviewStep(
+      persist(root, { state: 'REVIEWING', reviewRound: 0 }),
+      deps(root, {
+        agent: scriptedAgent(agentCommandResult({ stdout: findingsReview() })).runner,
+      }),
+    );
+
+    expect(step.outcome).toBe('ADVANCED');
+    const record = reload(root).state.findingHistory[0];
+    // The line the whole defect lived on. Before this, a task that escalated
+    // kept a severity and a 32-hex digest, and the only way back to the finding
+    // was the reviewer's own transcript.
+    expect(record?.path).toBe('src/agent/claude-writer.ts');
+    expect(record?.rule).toBe('classification.order');
+  });
+
+  it('briefs a resumed writer with the file, and no longer with a hash', () => {
+    const record = {
+      round: 1,
+      severity: 'high' as const,
+      fingerprint: 'e'.repeat(32),
+      path: 'src/agent/claude-writer.ts',
+      rule: 'classification.order',
+    };
+    const brief = buildResumedRemediationBrief([record], 1, briefingFixture());
+
+    expect(brief.kind).toBe('DURABLE_RECORD');
+    if (brief.kind !== 'DURABLE_RECORD') return;
+    expect(brief.payload).toContain('src/agent/claude-writer.ts — classification.order');
+    expect(brief.payload).toContain('This pass was resumed');
+    // The degradation sentence is per RECORD. This one is complete, so the
+    // brief must not announce itself degraded merely for having been resumed —
+    // a sentence that is always present distinguishes nothing.
+    expect(brief.payload).not.toContain('(no path recorded)');
+    expect(brief.payload).not.toContain('stored no file path');
+  });
+
+  it('degrades one record without degrading its complete neighbour', () => {
+    const brief = buildResumedRemediationBrief(
+      [
+        { round: 1, severity: 'high' as const, fingerprint: 'e'.repeat(32), path: null, rule: null },
+        {
+          round: 1,
+          severity: 'low' as const,
+          fingerprint: 'f'.repeat(32),
+          path: 'src/loop/findings.ts',
+          rule: 'brief.degraded-wording',
+        },
+      ],
+      1,
+      briefingFixture(),
+    );
+
+    expect(brief.kind).toBe('DURABLE_RECORD');
+    if (brief.kind !== 'DURABLE_RECORD') return;
+    expect(brief.payload).toContain('(no path recorded)');
+    expect(brief.payload).toContain('src/loop/findings.ts — brief.degraded-wording');
+  });
+});
+
+describe('an exhausted review budget is not a closed loop', () => {
+  /**
+   * The defect, driven rather than described.
+   *
+   * A task whose last permitted round found something parked with
+   * `resumeFrom {REMEDIATE, round}`. The operator continued it, the writer
+   * remediated, verification ran — and the next review computed a round above
+   * the budget and parked again, with the same resume point. Measured on
+   * RESOLVER-V3-034R on 2026-09-10: no number of continuations could reach
+   * `READY_FOR_PR`.
+   *
+   * Nothing drove a task through that sequence, which is why it shipped.
+   */
+  it('parks at the last permitted round rather than starting a pass nobody will judge', async () => {
+    const root = repoRoot();
+    const step = await runReviewStep(
+      persist(root, { state: 'REVIEWING', reviewRound: 2, maxReviewRounds: 3 }),
+      deps(root, {
+        agent: scriptedAgent(agentCommandResult({ stdout: findingsReview() })).runner,
+      }),
+    );
+
+    expect(step.outcome).toBe('BLOCKED');
+    const after = reload(root).state;
+    expect(after.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(after.resumeFrom).toEqual({ phase: 'REMEDIATE', round: 3 });
+    // And the findings are recorded WITH their locations, so the continuation
+    // that follows has something to act on.
+    expect(after.findingHistory.at(-1)?.path).toBe('src/agent/claude-writer.ts');
+  });
+
+  it('reviews once more when a round was granted, and can then finish', async () => {
+    const root = repoRoot();
+    // The state an operator's continuation leaves: the declared budget is spent,
+    // and exactly one round was granted on top of it.
+    const step = await runReviewStep(
+      persist(root, {
+        state: 'REVIEWING',
+        reviewRound: 3,
+        maxReviewRounds: 3,
+        grantedReviewRounds: 1,
+      }),
+      deps(root, { agent: scriptedAgent(agentCommandResult({ stdout: codexTranscript(passingReview()) })).runner }),
+    );
+
+    // Without the grant this review never runs at all: the round would exceed
+    // the budget and the task would park again, for ever.
+    expect(step.outcome).toBe('COMPLETED');
+    const after = reload(root).state;
+    expect(after.state).toBe('READY_FOR_PR');
+    expect(after.reviewRound).toBe(4);
+    // The record still says what the repository declared. The grant is beside
+    // it, not folded into it, so a report can answer how many rounds were given
+    // and by whom.
+    expect(after.maxReviewRounds).toBe(3);
+    expect(after.grantedReviewRounds).toBe(1);
+  });
+
+  it('parks again — with its new findings — when the granted round is not clean', async () => {
+    const root = repoRoot();
+    const step = await runReviewStep(
+      persist(root, {
+        state: 'REVIEWING',
+        reviewRound: 3,
+        maxReviewRounds: 3,
+        grantedReviewRounds: 1,
+      }),
+      deps(root, {
+        agent: scriptedAgent(
+          agentCommandResult({ stdout: findingsReview('granted.round-found-something') }),
+        ).runner,
+      }),
+    );
+
+    // Exactly two outcomes exist for a review that ran, and this is the other
+    // one. There is no third, which is what makes the exit provable.
+    expect(step.outcome).toBe('BLOCKED');
+    const after = reload(root).state;
+    expect(after.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(after.resumeFrom).toEqual({ phase: 'REMEDIATE', round: 4 });
+    expect(after.findingHistory.at(-1)?.round).toBe(4);
+    expect(after.findingHistory.at(-1)?.rule).toBe('granted.round-found-something');
+  });
+});
+
 /* ───────────────────────────── the verify stage ─────────────────────────── */
 
 describe('the verify stage', () => {
@@ -374,7 +524,11 @@ describe('the review stage', () => {
   it('reaches READY_FOR_PR even when earlier rounds found things, and keeps that history', async () => {
     const root = repoRoot();
     const agent = scriptedAgent(agentCommandResult({ stdout: codexTranscript(passingReview()) }));
-    const history = [{ round: 1, severity: 'high' as const, fingerprint: 'a'.repeat(32) }];
+    // A record from before paths were persisted. The schema defaults both to
+    // null, so the fixture states them rather than letting the parse add them.
+    const history = [
+      { round: 1, severity: 'high' as const, fingerprint: 'a'.repeat(32), path: null, rule: null },
+    ];
 
     const step = await runReviewStep(
       persist(root, { state: 'REVIEWING', reviewRound: 1, findingHistory: history }),
@@ -471,8 +625,8 @@ describe('the review stage', () => {
   it('appends to the finding history without disturbing earlier rounds', async () => {
     const root = repoRoot();
     const earlier = [
-      { round: 1, severity: 'high' as const, fingerprint: 'a'.repeat(32) },
-      { round: 1, severity: 'low' as const, fingerprint: 'b'.repeat(32) },
+      { round: 1, severity: 'high' as const, fingerprint: 'a'.repeat(32), path: null, rule: null },
+      { round: 1, severity: 'low' as const, fingerprint: 'b'.repeat(32), path: null, rule: null },
     ];
 
     await runReviewStep(
@@ -654,7 +808,7 @@ describe('the remediate stage', () => {
    * could build would claim a review reported findings and then list none.
    */
   const REMEDIATION_EVIDENCE = [
-    { round: 1, severity: 'high' as const, fingerprint: 'c'.repeat(32) },
+    { round: 1, severity: 'high' as const, fingerprint: 'c'.repeat(32), path: null, rule: null },
   ];
 
   /** A persisted `REMEDIATING` state with its round's findings behind it. */
@@ -779,7 +933,10 @@ describe('the remediate stage', () => {
     );
 
     const payload = writer.calls[0]?.payload ?? '';
-    expect(payload).toContain('did not survive');
+    expect(payload).toContain('This pass was resumed');
+    // Per RECORD: this history predates stored paths, so the brief says so on
+    // the finding line rather than about itself.
+    expect(payload).toContain('(no path recorded)');
     expect(payload).toContain('c'.repeat(32));
     expect(payload).not.toContain('undefined');
   });
@@ -1162,7 +1319,11 @@ describe('execution authority', () => {
 describe('the resumed remediation brief', () => {
   it.each([
     ['no history at all', [] as FindingRecord[], 1],
-    ['history for other rounds only', [{ round: 2, severity: 'low' as const, fingerprint: 'd'.repeat(32) }], 1],
+    [
+      'history for other rounds only',
+      [{ round: 2, severity: 'low' as const, fingerprint: 'd'.repeat(32), path: null, rule: null }],
+      1,
+    ],
   ])('reports %s as no durable findings, and carries no payload', (_label, history, round) => {
     const brief = buildResumedRemediationBrief(history, round, briefingFixture());
 
@@ -1172,14 +1333,17 @@ describe('the resumed remediation brief', () => {
 
   it('renders the durable record for the round, and says the detail is gone', () => {
     const brief = buildResumedRemediationBrief(
-      [{ round: 1, severity: 'high', fingerprint: 'c'.repeat(32) }],
+      [{ round: 1, severity: 'high', fingerprint: 'c'.repeat(32), path: null, rule: null }],
       1,
       briefingFixture(),
     );
 
     expect(brief.kind).toBe('DURABLE_RECORD');
     const payload = brief.kind === 'DURABLE_RECORD' ? brief.payload : '';
-    expect(payload).toContain('did not survive');
+    expect(payload).toContain('This pass was resumed');
+    // Per RECORD: this history predates stored paths, so the brief says so on
+    // the finding line rather than about itself.
+    expect(payload).toContain('(no path recorded)');
     expect(payload).toContain('c'.repeat(32));
     expect(payload).not.toMatch(/FINDINGS \(0;/);
   });

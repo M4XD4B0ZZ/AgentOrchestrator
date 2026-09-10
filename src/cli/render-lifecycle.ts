@@ -286,8 +286,10 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       'The loop escalated to an operator, or found one already waiting. A review budget that\n' +
       '  ran out arrives here, and a new invocation does not refill it. Continuing is a\n' +
       '  decision: re-run with --attended and --continue-human-decision to carry on from the\n' +
-      '  resume point this task recorded. That does not refill the review budget either, so an\n' +
-      '  escalation caused by an exhausted one will escalate again. The decision is spent on\n' +
+      '  resume point this task recorded. Where the budget is what ran out, that decision\n' +
+      '  buys exactly ONE more review round -- enough for the remediation it starts to be\n' +
+      '  judged, which is what a task needs to finish at all. It escalates again if that\n' +
+      '  round finds something, and the granted rounds are capped. The decision is spent on\n' +
       '  one departure per invocation. `run --task <id>` prints what was recorded.',
     RECONCILIATION_DIVERGED:
       'The world contradicts the durable record. Nothing was run, and nothing was repaired.',

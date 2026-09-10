@@ -22,6 +22,7 @@
 import { z } from 'zod';
 
 import { RoundSchema } from '../../core/resume-point.js';
+import { MAX_REVIEW_BUDGET } from '../../core/review-budget.js';
 
 /**
  * Current version of the repository-profile contract. Bump on any breaking
@@ -193,13 +194,31 @@ export const ScopePolicySchema = z
 
 /**
  * The completion policy. Exactly one value, because exactly one has a v1
- * consumer: `maxReviewRounds` is copied into `TaskState.maxReviewRounds` and
- * bounded by the same `RoundSchema` the state contract uses, so a profile can
- * never declare a budget the state contract would refuse.
+ * consumer: `maxReviewRounds` is copied into `TaskState.maxReviewRounds`.
+ *
+ * ── Why the ceiling is here rather than in the state contract ──────────────
+ *
+ * `RoundSchema` alone was never enough, and the sentence that used to stand
+ * here — that a profile "can never declare a budget the state contract would
+ * refuse" — was false before any of this. `RoundSchema` admits up to 1000, and
+ * a task's finding history is bounded by `MAX_TASK_STATE_BYTES`: a review
+ * document may carry 64 findings, so a large enough budget produces a history
+ * no durable state can hold, and the task dies at the round that overflows
+ * rather than at the profile that asked for it.
+ *
+ * {@link MAX_REVIEW_BUDGET} is that arithmetic, and it is refused **here**
+ * because an impossible budget is a configuration error a person fixes in one
+ * line — refusing it at the thirteenth round would refuse it after the work.
+ * The state contract still checks the same ceiling, but only for a state
+ * carrying a granted round, so a profile that legally declared more before this
+ * existed keeps loading its tasks.
  */
 export const CompletionPolicySchema = z
   .object({
-    maxReviewRounds: RoundSchema('completion.maxReviewRounds', 1),
+    maxReviewRounds: RoundSchema('completion.maxReviewRounds', 1).refine(
+      (value) => value <= MAX_REVIEW_BUDGET,
+      `completion.maxReviewRounds must not exceed ${MAX_REVIEW_BUDGET}: a larger budget can produce a finding history no durable task state can hold.`,
+    ),
   })
   .strict();
 

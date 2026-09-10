@@ -165,6 +165,10 @@ describe('a resumed remediation brief has one line per durable finding', () => {
         round: 1,
         severity: 'high' as const,
         fingerprint: fingerprint(index),
+        // A record from before paths were persisted: the shape a resumed brief
+        // must still be able to render, per record.
+        path: null,
+        rule: null,
       })),
       1,
       briefingFixture(),
