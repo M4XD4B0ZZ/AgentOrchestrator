@@ -66,9 +66,14 @@ export const NonBlankString = (label: string) =>
  *
  * ── Why this is a schema rule and not a rendering rule (V1-08, RR-B1-N4) ────
  *
- * `fingerprint` is the only free-form string the durable contract accepts, and
- * a persisted state is untrusted input whoever wrote it: `state-store.ts` says
- * so, and `claude-writer.ts` names the same threat model. The durable value is
+ * A finding record carries three agent-derived strings — `fingerprint`, `path`
+ * and `rule` — and each is admitted through an anchored allow-list at this
+ * boundary, for one reason. A persisted state is untrusted input whoever wrote
+ * it: `state-store.ts` says so, and `claude-writer.ts` names the same threat
+ * model. (`fingerprint` was once the only one, and the paragraph below was
+ * written when that was true; the argument did not change when the other two
+ * arrived, which is why they are constrained here beside it rather than
+ * anywhere else.) The durable value is
  * later rendered into a *writer's* prompt by
  * `buildResumedRemediationBrief`, one record per `'\n'`-joined line — so a
  * persisted fingerprint carrying a line break would arrive in a writing
@@ -95,6 +100,63 @@ export const FindingFingerprintSchema = z
     'fingerprint must be a 32-character lowercase hex digest, exactly as the review parser computes it.',
   );
 
+/**
+ * The reviewer's path, restated here rather than imported.
+ *
+ * `agent/internal/codex-review-transcript.ts` owns the producer's copy and this
+ * module deliberately does not reach into a sibling's internals — the same
+ * reason it does not borrow the repository profile's patterns. What is written
+ * down here is the *grammar a persisted state must pass*, which is a contract of
+ * this boundary even when no producer is running.
+ *
+ * Repository-relative POSIX, 1 to 1024 characters, from an anchored allow-list:
+ * letters, digits and exactly `.` `_` `:` `@` `=` `+` `/` `-`. Backslash, NUL,
+ * space, every ASCII and C1 control, `U+2028`, `U+2029` and the bidi overrides
+ * are excluded **by construction** rather than by enumeration, which is the same
+ * closure property the fingerprint pattern has and the reason both are
+ * allow-lists. No `m` flag, deliberately: under `m` the `$` would match before a
+ * trailing newline and reopen the line-forging hole the whole class exists to
+ * close. No `u` flag either — every member is ASCII.
+ */
+export const FINDING_PATH_PATTERN = /^[A-Za-z0-9._:@=+/-]+$/;
+
+/** A drive-letter prefix, which a repository-relative path may never carry. */
+const DRIVE_LETTER_PREFIX = /^[A-Za-z]:/;
+
+export const FindingPathSchema = z
+  .string()
+  .min(1, 'finding path must not be empty.')
+  .max(1024, 'finding path must be at most 1024 characters.')
+  .regex(
+    FINDING_PATH_PATTERN,
+    'finding path must be repository-relative POSIX built only from letters, digits and . _ : @ = + / -',
+  )
+  .refine((value) => !value.startsWith('/'), 'finding path must not start with "/".')
+  .refine((value) => !DRIVE_LETTER_PREFIX.test(value), 'finding path must not carry a drive letter.')
+  .refine(
+    (value) => value.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..'),
+    'finding path must have no empty, "." or ".." segment.',
+  );
+
+/**
+ * The reviewer's rule slug.
+ *
+ * First and last character alphanumeric, inner set only `.` `_` `:` `-`, at most
+ * 128 characters. Narrower than the path on purpose — `+ = @ /` are not
+ * permitted in a rule — and restated exactly rather than simplified to
+ * `[A-Za-z0-9._:-]+`, which would admit a leading or trailing separator the
+ * producer never emits.
+ */
+export const FINDING_RULE_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]*[A-Za-z0-9])?$/;
+
+export const FindingRuleSchema = z
+  .string()
+  .max(128, 'finding rule must be at most 128 characters.')
+  .regex(
+    FINDING_RULE_PATTERN,
+    'finding rule must begin and end alphanumerically and contain only letters, digits and . _ : -',
+  );
+
 export const FindingRecordSchema = z
   .object({
     round: RoundSchema('Finding round', 1),
@@ -107,8 +169,43 @@ export const FindingRecordSchema = z
      * hand-written state file has to pass.
      */
     fingerprint: FindingFingerprintSchema,
+    /**
+     * Where the finding is, and what it is called.
+     *
+     * **Additive and defaulted rather than versioned**, exactly as
+     * {@link scopeAuthorityCommit} and `operatorResolution` below are, and for
+     * the identical reason: a record written before these fields existed means
+     * `null`, and there is no migration path for a task state anywhere in this
+     * build. Making them required would turn every checkpoint carrying a
+     * finding — including this repository's own committed runtime states — into
+     * a `CONTRACT_VIOLATION`, which `state-store.ts` classifies as
+     * `STATE_INVALID`: nothing resumable and nothing repairable. The other
+     * direction fails closed on its own, because an older build meets unknown
+     * keys at this `.strict()` boundary and refuses the state — reporting it as
+     * a broken record rather than as a newer contract, which is the cost that
+     * shape has always carried.
+     *
+     * `null` is unambiguous here: both grammars refuse the empty string, so it
+     * can only mean "this record predates the fix". That is a fact about **one
+     * record**, which is why a resumed brief degrades per record rather than
+     * announcing itself degraded as a whole.
+     */
+    path: FindingPathSchema.nullable().default(null),
+    rule: FindingRuleSchema.nullable().default(null),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    // Neither or both. Two independent nullables would admit a half-record no
+    // review could produce, and a brief rendering `src/a.ts — null` would be
+    // stating something the reviewer never said.
+    if ((value.path === null) !== (value.rule === null)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['rule'],
+        message: 'a finding record carries both path and rule, or neither.',
+      });
+    }
+  });
 
 /**
  * What an operator's own ending of a task recorded about itself.
@@ -178,7 +275,25 @@ export const TaskStateObjectSchema = z
     currentCommit: GitShaSchema.nullable(),
 
     reviewRound: RoundSchema('reviewRound', 0),
+    /**
+     * What the repository declared. Written once by `run/start-task.ts` and
+     * never re-derived, which is exactly why a grant does not touch it: the
+     * record must keep saying what the profile said.
+     */
     maxReviewRounds: RoundSchema('maxReviewRounds', 1),
+    /**
+     * How many review rounds operators have granted on top of the declared
+     * budget, one per continuation out of an exhausted one.
+     *
+     * Additive and defaulted, so a state written before it existed means
+     * exactly zero. It is the only field on which an operator's decision leaves
+     * a durable mark — the other three continuation grants are frame-locals
+     * that die with the invocation — and that is the point: without it, no
+     * report can honestly answer how many rounds a task actually had, and the
+     * loop reads durable state and nothing else, so an in-memory grant would
+     * pay a reviewer and then be refused when the result was written.
+     */
+    grantedReviewRounds: RoundSchema('grantedReviewRounds', 0).default(0),
 
     blockedAgent: z.enum(AGENT_IDS).nullable(),
     resumeFrom: ResumePointSchema.nullable(),

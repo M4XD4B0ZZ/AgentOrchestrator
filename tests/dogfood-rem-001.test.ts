@@ -914,7 +914,7 @@ describe('a step-budget boundary does not cost the remediation its detail', () =
 
     expect(crossed.payload).toContain('src/named.ts');
     expect(crossed.payload).toContain('e2e.named');
-    expect(crossed.payload).not.toContain('did not survive');
+    expect(crossed.payload).not.toContain('This pass was resumed');
     // The overrun is bounded at one: the extra iteration discharges an
     // obligation it then clears, so it cannot recur.
     expect(crossed.steps).toBeLessThanOrEqual(3);

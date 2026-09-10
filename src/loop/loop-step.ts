@@ -133,6 +133,7 @@ import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
 import type { ExecutionBriefResult } from '../plan/task-brief.js';
 import type { TaskState } from '../core/task-state.js';
 import type { ResumePhase, TaskStateName } from '../core/states.js';
+import { reviewBudget } from '../core/review-budget.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
 import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js';
 import { leaseHolds, leasedAgent, leasedGit, leasedVerify } from './leased-spawns.js';
@@ -539,7 +540,12 @@ function authorised(state: TaskState, authorisedWorktreePath: string): boolean {
  * ends rather than trusting arithmetic to stay inside the contract.
  */
 function currentRound(state: TaskState): number {
-  return Math.min(Math.max(1, state.reviewRound), state.maxReviewRounds);
+  // The BUDGET, not the declaration. After a granted round parks with
+  // reviewRound above what the repository declared, clamping to the declaration
+  // would name an earlier round — and the remediation step would then brief a
+  // round whose findings are already closed while the new ones sit unread, or
+  // filter to a round with no records at all and refuse to start a writer.
+  return Math.min(Math.max(1, state.reviewRound), reviewBudget(state));
 }
 
 function saved(save: StateSaveResult, state: TaskStateName, outcome: LoopStepOutcome, extra: Partial<LoopStepResult> = {}): LoopStepResult {
@@ -1632,7 +1638,7 @@ export async function runReviewStep(
   // The budget is the state's, not a constant here. A review that cannot be
   // performed within it is not performed at all: running one and then refusing
   // to record it would spend an agent's quota to learn something unusable.
-  if (round > state.maxReviewRounds) {
+  if (round > reviewBudget(state)) {
     const save = advanceTaskState(
       current,
       {
@@ -1781,7 +1787,7 @@ export async function runReviewStep(
     // A remediation pass is only worth starting if its result could still be
     // reviewed. At the last permitted round it could not, so the task goes to a
     // human with its evidence intact rather than into a pass nothing will judge.
-    if (round >= state.maxReviewRounds) {
+    if (round >= reviewBudget(state)) {
       const save = advanceTaskState(
         current,
         {

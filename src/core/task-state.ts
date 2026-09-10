@@ -40,6 +40,7 @@ import {
   TaskStateObjectSchema,
 } from './internal/task-state-object-schema.js';
 import { BLOCKED_STATE_POLICIES } from './resume-policy.js';
+import { MAX_REVIEW_BUDGET, reviewBudget } from './review-budget.js';
 
 export type TaskStateInput = z.input<typeof TaskStateObjectSchema>;
 export type TaskState = z.infer<typeof TaskStateObjectSchema>;
@@ -63,32 +64,55 @@ export const TaskStateSchema = TaskStateObjectSchema.superRefine((value, ctx) =>
   }
 
   // --- 2. Review budget ---------------------------------------------------
-  if (value.reviewRound > value.maxReviewRounds) {
+  //
+  // Bounded by the BUDGET, not by the declared maximum. The two were the same
+  // number until an operator could grant a round, and reading the declaration
+  // here would refuse the write a granted round produces — after the reviewer
+  // had already been paid for. `review-budget.ts` says why the grant is a
+  // field of its own rather than an edit to what the repository declared.
+  const budget = reviewBudget(value);
+
+  // A grant may never take the budget past what a durable state can hold. The
+  // condition matters: a legacy state whose profile legally declared more keeps
+  // loading and is simply never granted a round, while every state carrying a
+  // grant is proven to be inside the size arithmetic.
+  if (value.grantedReviewRounds > 0 && budget > MAX_REVIEW_BUDGET) {
     ctx.addIssue({
       code: 'custom',
-      path: ['reviewRound'],
-      message: `reviewRound (${value.reviewRound}) must not exceed maxReviewRounds (${value.maxReviewRounds}).`,
+      path: ['grantedReviewRounds'],
+      message:
+        `the review budget (${budget}) must not exceed MAX_REVIEW_BUDGET ` +
+        `(${MAX_REVIEW_BUDGET}); a granted round may not take it past what a ` +
+        `durable state can hold.`,
     });
   }
 
-  if (value.resumeFrom !== null && value.resumeFrom.round > value.maxReviewRounds) {
+  if (value.reviewRound > budget) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['reviewRound'],
+      message: `reviewRound (${value.reviewRound}) must not exceed the review budget (${budget}).`,
+    });
+  }
+
+  if (value.resumeFrom !== null && value.resumeFrom.round > budget) {
     ctx.addIssue({
       code: 'custom',
       path: ['resumeFrom', 'round'],
       message:
         `resumeFrom.round (${value.resumeFrom.round}) must not exceed ` +
-        `maxReviewRounds (${value.maxReviewRounds}).`,
+        `the review budget (${budget}).`,
     });
   }
 
   value.findingHistory.forEach((finding, index) => {
-    if (finding.round > value.maxReviewRounds) {
+    if (finding.round > budget) {
       ctx.addIssue({
         code: 'custom',
         path: ['findingHistory', index, 'round'],
         message:
           `findingHistory[${index}].round (${finding.round}) must not exceed ` +
-          `maxReviewRounds (${value.maxReviewRounds}).`,
+          `the review budget (${budget}).`,
       });
     }
   });

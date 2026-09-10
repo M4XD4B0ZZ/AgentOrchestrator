@@ -440,7 +440,16 @@ function findingsReview(): string {
   });
 }
 
-const DURABLE_FINDING = { round: 1, severity: 'high' as const, fingerprint: 'c'.repeat(32) };
+// A record from before the reviewer's path and rule were persisted: the
+// schema defaults both to null, and stating them here keeps the fixture and the
+// parsed state the same shape.
+const DURABLE_FINDING = {
+  round: 1,
+  severity: 'high' as const,
+  fingerprint: 'c'.repeat(32),
+  path: null,
+  rule: null,
+};
 
 /* ═══════════════════════ J — reconciliation comes first ═════════════════════ */
 
@@ -1516,7 +1525,10 @@ describe('remediation is never started on invented evidence', () => {
     expect(run.steps).toBe(1);
     expect(reload(root).state.state).toBe('VERIFYING');
     const payload = agent.calls[0]?.payload ?? '';
-    expect(payload).toContain('did not survive');
+    expect(payload).toContain('This pass was resumed');
+    // Per RECORD. This fixture's history predates stored paths, so the brief
+    // says so on the finding line rather than about itself.
+    expect(payload).toContain('(no path recorded)');
     expect(payload).toContain(DURABLE_FINDING.fingerprint);
     expect(payload).not.toMatch(/FINDINGS \(0;/);
   });
@@ -1544,7 +1556,7 @@ describe('remediation is never started on invented evidence', () => {
     const writerPayload = agent.calls[1]?.payload ?? '';
     // The precise brief, naming the file — not the degraded durable one.
     expect(writerPayload).toContain('src/agent/claude-writer.ts');
-    expect(writerPayload).not.toContain('did not survive');
+    expect(writerPayload).not.toContain('This pass was resumed');
   });
 });
 
@@ -2199,6 +2211,90 @@ describe('an escalation is continued only on an explicit decision', () => {
       ...overrides,
     });
   }
+
+  /* ── the one review round a continuation buys ───────────────────────────── */
+
+  /**
+   * Three conjuncts decide the grant, and each is measured here, because none
+   * of them was measured when this was written: a mutant deriving the grant
+   * from the budget alone — so that every automatic quota resume refilled it —
+   * survived the whole of this file and `v3-08`.
+   *
+   * The write itself is durable and cumulative, which is what makes an
+   * unmeasured conjunct expensive: it does not misreport a phase, it raises a
+   * budget that stays raised.
+   */
+  it('grants exactly one round when an operator continues an exhausted budget', async () => {
+    const root = repoRoot();
+    escalated(root, 'REMEDIATE', { reviewRound: 3, maxReviewRounds: 3 });
+    const agent = scriptedAgent(
+      agentCommandResult({ stdout: claudeResultStream({ subtype: 'success', isError: false }) }),
+    );
+
+    const run = await runTask(
+      request(root, { continueHumanDecision: true, maxSteps: 2 }),
+      deps(root, {
+        git: scriptedGit(root, { writingPass: true }),
+        agent: agent.runner,
+        verify: cappedVerify(0).runner,
+      }),
+    );
+
+    expect(run.continuedHumanDecision).toBe(true);
+    const after = reload(root).state;
+    // Exactly one, and beside the declaration rather than folded into it: the
+    // record must keep saying what the repository asked for.
+    expect(after.grantedReviewRounds).toBe(1);
+    expect(after.maxReviewRounds).toBe(3);
+  });
+
+  it('grants nothing when the escalation was never about the budget', async () => {
+    const root = repoRoot();
+    // Same continuation, same flag — but two rounds of a three-round budget are
+    // spent, so this park is about something else. A grant here would let the
+    // ceiling creep on every unrelated escalation.
+    escalated(root, 'REMEDIATE', { reviewRound: 1, maxReviewRounds: 3 });
+    const agent = scriptedAgent(
+      agentCommandResult({ stdout: claudeResultStream({ subtype: 'success', isError: false }) }),
+    );
+
+    await runTask(
+      request(root, { continueHumanDecision: true, maxSteps: 2 }),
+      deps(root, {
+        git: scriptedGit(root, { writingPass: true }),
+        agent: agent.runner,
+        verify: cappedVerify(0).runner,
+      }),
+    );
+
+    expect(reload(root).state.grantedReviewRounds).toBe(0);
+  });
+
+  it('refuses to continue at the ceiling, and leaves the departure unspent', async () => {
+    const root = repoRoot();
+    // A budget already at the largest a durable state can hold. The refusal must
+    // come BEFORE the write: a departure is spent by a write that landed, so a
+    // refusal afterwards would cost the operator their one continuation and
+    // leave the task exactly where it was.
+    escalated(root, 'REMEDIATE', {
+      reviewRound: 12,
+      maxReviewRounds: 11,
+      grantedReviewRounds: 1,
+    });
+
+    const run = await runTask(
+      request(root, { continueHumanDecision: true, maxSteps: 2 }),
+      deps(root, { agent: cappedAgent(agentCommandResult({ stdout: '' }), 0).runner }),
+    );
+
+    expect(run.outcome).toBe('CONTINUATION_NOT_AUTHORISED');
+    expect(run.reasonCodes).toContain('REVIEW_BUDGET_CEILING_REACHED');
+    const after = reload(root).state;
+    expect(after.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(after.grantedReviewRounds).toBe(1);
+    // Untouched: the resume point is still there for a later, legal attempt.
+    expect(after.resumeFrom).not.toBeNull();
+  });
 
   it('stops where it always did when nobody asked, writing nothing', async () => {
     const root = repoRoot();
