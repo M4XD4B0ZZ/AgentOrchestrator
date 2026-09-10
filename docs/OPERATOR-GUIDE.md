@@ -467,8 +467,26 @@ Der Prüf-Prozess läuft mit `--tools ""`, hält also selbst gar kein Werkzeug u
 kann nichts ändern. **Der Exit-Code wird nicht gelesen:** ein Server, dessen
 Kommando nicht existiert, endet ebenfalls mit 0. Gemessen, nicht vermutet.
 
-Scheitert es, endet der Lauf mit `REQUIRED_CAPABILITY_UNPROVEN`, es wird kein
-Agent gestartet, und der Zustand landet in der Operator-Attention.
+Scheitert es, endet der Lauf mit `REQUIRED_CAPABILITY_UNPROVEN` und es wird kein
+Agent gestartet.
+
+Der Bericht sagt danach, **welche** Ablehnung es war und was sie bedeutet. Lief
+ein Prozess, nennt die `Probe`-Zeile sein Ende gegen das Budget, das er
+bekommen hat — `TIMED_OUT/TIMEOUT started=true 3484 ms of 20000 ms`. Das ist
+nicht dasselbe wie „gar nicht gestartet", und die beiden verlangen
+Unterschiedliches: eine fehlende Berechtigung repariert man, eine
+Zeitüberschreitung unter Last verschwindet oft von selbst.
+
+Endungen, die ohne Aufzeichnung mehrdeutig bleiben, schreiben eine Datei unter
+`<Benutzerprofil>/.agent-orchestrator/capability-command-failures`, ein
+Verzeichnis je Vorfall. Die `Evidence`-Zeile nennt den Pfad, oder warum nichts
+geschrieben wurde. **Kein Byte der Ausgabe des Prozesses** steht darin, nur
+Zähler. Aufgeräumt wird dort nichts — dieselbe offene Schuld wie bei den
+`doctor`-Laufverzeichnissen.
+
+In die Operator-Attention wandert der Zustand nur über `repositories`; bei
+`run --attended` und `block --attended` ist die Datei oben das Einzige, was den
+Lauf überdauert.
 
 ### Was sich dadurch **nicht** ändert
 

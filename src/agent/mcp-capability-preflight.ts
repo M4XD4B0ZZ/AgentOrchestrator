@@ -61,7 +61,22 @@ import {
 } from '../config/mcp-capability-registry.js';
 import { orchestratorHome } from '../config/paths.js';
 import { createProbeEnv } from '../auth/env-guard.js';
-import { isShellInertArgument, runCommand, type CommandResult } from '../doctor/exec.js';
+import {
+  DEFAULT_COMMAND_TIMEOUT_MS,
+  DEFAULT_MAX_OUTPUT_BYTES,
+  isShellInertArgument,
+  runCommand,
+  type CommandResult,
+} from '../doctor/exec.js';
+import {
+  observeCapabilityCommand,
+  type CapabilityCommandBudget,
+  type CapabilityCommandObservation,
+} from './capability-command-failure.js';
+import {
+  recordCapabilityCommandFailure,
+  type CapabilityCommandFailureRecord,
+} from './capability-command-failure-store.js';
 import { REPOSITORY_CAPABILITIES, type RepositoryCapability } from '../repo/capabilities.js';
 import type { ResolvedCapabilities } from '../repo/resolve-repository.js';
 
@@ -103,8 +118,24 @@ export const MCP_CAPABILITY_REFUSALS = [
   'CONFIG_WRITE_FAILED',
   /** A grant whose command, argument or generated path could not be put in argv unchanged. */
   'GRANT_NOT_SHELL_INERT',
-  /** The probe process did not start, timed out, or produced no usable output. */
+  /**
+   * The probe process was never created. **Only that**, and the name is now
+   * true by construction: it is reached solely where `started` is `false`,
+   * which `doctor/exec.ts` defines as the boundary having *proved* the target
+   * never ran. It used to cover a timeout too, and for a process that started,
+   * ran for its whole budget and was killed, that sentence was simply false.
+   */
   'PROBE_DID_NOT_START',
+  /**
+   * The probe process was created and did not complete.
+   *
+   * Which way it did not complete is on the refusal's `probe.outcome`, verbatim
+   * from `CommandOutcome` — timed out, exceeded a stream budget, was not found,
+   * failed to spawn, or lost its containment boundary. The code says the class;
+   * it never renames one ending into another, so a member added to that union
+   * later arrives here as itself.
+   */
+  'PROBE_DID_NOT_COMPLETE',
   /** The probe ran and emitted no session announcement, so nothing was measured. */
   'PROBE_EMITTED_NO_SESSION',
   /** The session announced the server and it is not connected. */
@@ -140,13 +171,51 @@ export type McpCapabilityOutcome =
       readonly registryCode: McpCapabilityRegistryRefusal | null;
       /** The capability that could not be proven. */
       readonly capability: RepositoryCapability;
+      /**
+       * What the probe process actually did, or `null` where none ran.
+       *
+       * Required rather than optional, deliberately. Everything downstream
+       * widens to `readonly string[]`, so this arm is the last place the
+       * compiler can insist that a refusal says which ending it saw — and the
+       * defect this field exists for was precisely an ending nobody wrote down.
+       * `null` here means "no process was started", not "not measured".
+       */
+      readonly probe: CapabilityCommandObservation | null;
+      /**
+       * Where that ending was durably recorded, or `null` where none was
+       * attempted. Reported beside the refusal and never in place of it: a
+       * store that failed leaves the refusal exactly as it was.
+       */
+      readonly record: CapabilityCommandFailureRecord | null;
     };
 
+interface RefusalDetail {
+  readonly registryCode?: McpCapabilityRegistryRefusal | null;
+  readonly probe?: CapabilityCommandObservation | null;
+  readonly record?: CapabilityCommandFailureRecord | null;
+}
+
+/**
+ * The one constructor for a refusal.
+ *
+ * The qualifiers are an options object rather than three positional defaults
+ * on purpose: `registryCode` was already positional, and a fourth and fifth
+ * slot beside it is an invitation to pass an observation into the registry's
+ * parameter and never hear about it.
+ */
 const refused = (
   capability: RepositoryCapability,
   code: McpCapabilityRefusal,
-  registryCode: McpCapabilityRegistryRefusal | null = null,
-): McpCapabilityOutcome => Object.freeze({ state: 'REFUSED' as const, code, registryCode, capability });
+  detail: RefusalDetail = {},
+): McpCapabilityOutcome =>
+  Object.freeze({
+    state: 'REFUSED' as const,
+    code,
+    registryCode: detail.registryCode ?? null,
+    capability,
+    probe: detail.probe ?? null,
+    record: detail.record ?? null,
+  });
 
 /** What a session announced about one MCP server. */
 interface AnnouncedServer {
@@ -312,6 +381,8 @@ export interface McpCapabilityPreflightRequest {
   /** Seams. Production defaults; tests pass their own. */
   readonly loadRegistry?: (provider: PathProvider) => McpCapabilityRegistryOutcome;
   readonly probe?: CapabilityProbeRunner;
+  /** Clock for the durable record's timestamp and its event id. */
+  readonly now?: () => Date;
 }
 
 function productionProbe(timeoutMs: number | undefined): CapabilityProbeRunner {
@@ -321,6 +392,49 @@ function productionProbe(timeoutMs: number | undefined): CapabilityProbeRunner {
       stdin: PROBE_PROMPT,
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     });
+}
+
+/**
+ * The budget the probe was actually given, resolved the same way `runCommand`
+ * resolves it.
+ *
+ * Recorded beside the measurement rather than left for a reader to look up. The
+ * two hypotheses an operator refuted by hand on 2026-09-10 were a duration
+ * against a budget and a byte count against a budget; neither question can be
+ * answered by a number with no denominator beside it.
+ */
+function probeBudget(timeoutMs: number | undefined): CapabilityCommandBudget {
+  return Object.freeze({
+    timeoutMs: timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+    maxStdoutBytes: DEFAULT_MAX_OUTPUT_BYTES,
+    maxStderrBytes: DEFAULT_MAX_OUTPUT_BYTES,
+    terminateOnOutputLimit: true,
+  });
+}
+
+/**
+ * Refuses, and durably records the ending that caused it.
+ *
+ * The record can never change the refusal. It is composed after the verdict is
+ * decided, it is carried beside it, and a store that refused is reported as
+ * itself — so a capability that could not be proven stays unproven whether or
+ * not anything reached the disk.
+ */
+function refusedWithRecord(
+  request: McpCapabilityPreflightRequest,
+  capability: RepositoryCapability,
+  code: McpCapabilityRefusal,
+  observation: CapabilityCommandObservation,
+): McpCapabilityOutcome {
+  const record = recordCapabilityCommandFailure({
+    site: 'MCP_CAPABILITY_PROBE',
+    reason: code,
+    capability,
+    observation,
+    now: (request.now ?? (() => new Date()))(),
+    ...(request.provider === undefined ? {} : { provider: request.provider }),
+  });
+  return refused(capability, code, { probe: observation, record });
 }
 
 /**
@@ -348,7 +462,8 @@ export async function proveMcpCapabilities(
   // reports the specific one that failed.
   const first = required[0] as RepositoryCapability;
 
-  if (registry.state === 'UNUSABLE') return refused(first, 'REGISTRY_UNUSABLE', registry.code);
+  if (registry.state === 'UNUSABLE')
+    return refused(first, 'REGISTRY_UNUSABLE', { registryCode: registry.code });
   if (registry.state === 'NOT_CONFIGURED') return refused(first, 'CAPABILITY_NOT_GRANTED');
 
   const grants: McpCapabilityGrant[] = [];
@@ -393,20 +508,38 @@ export async function proveMcpCapabilities(
   // plus the Windows back-fill, so nothing is added to reach it.
   const result = await probe(args, createProbeEnv('agent:claude', request.parentEnv));
 
-  if (!result.started || result.outcome !== 'COMPLETED') {
-    return refused(first, 'PROBE_DID_NOT_START');
+  const observation = observeCapabilityCommand(result, probeBudget(request.timeoutMs));
+
+  // The two disjuncts, apart. They were one `if` and one code, and the code
+  // asserted the first of them for both — so a probe that ran for its whole
+  // budget and was killed reported that it never started. `started === false`
+  // and "started and did not complete" are different facts about the world and
+  // an operator acts differently on each.
+  if (!result.started) {
+    return refusedWithRecord(request, first, 'PROBE_DID_NOT_START', observation);
+  }
+  if (result.outcome !== 'COMPLETED') {
+    return refusedWithRecord(request, first, 'PROBE_DID_NOT_COMPLETE', observation);
   }
 
   const announcement = readSessionAnnouncement(result.stdout);
-  if (announcement === null) return refused(first, 'PROBE_EMITTED_NO_SESSION');
+  // A process ran, completed, and said nothing this build can read. The cause is
+  // outside the code, so this one earns a record too.
+  if (announcement === null) {
+    return refusedWithRecord(request, first, 'PROBE_EMITTED_NO_SESSION', observation);
+  }
 
+  // Below here the code IS the answer: the session announced what it announced.
+  // These carry the observation for the report and write no record, because a
+  // file repeating a code that is already complete buys nothing and grows a
+  // directory nothing prunes.
   for (const grant of grants) {
     const server = announcement.servers.find((candidate) => candidate.name === serverName(grant));
     if (server === undefined || server.status !== 'connected') {
-      return refused(grant.capability, 'SERVER_NOT_CONNECTED');
+      return refused(grant.capability, 'SERVER_NOT_CONNECTED', { probe: observation });
     }
     if (!announcement.tools.includes(grant.tool)) {
-      return refused(grant.capability, 'GRANTED_TOOL_ABSENT');
+      return refused(grant.capability, 'GRANTED_TOOL_ABSENT', { probe: observation });
     }
   }
 

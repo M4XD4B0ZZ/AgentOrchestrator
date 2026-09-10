@@ -34,7 +34,7 @@
  * (`agent/claude-writer.ts`, `agent/mcp-capability-preflight.ts`), which is
  * where a reader deciding whether to change the argv will be standing.
  */
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
@@ -62,6 +62,10 @@ import {
 } from '../src/config/mcp-capability-registry.js';
 import { isShellInertArgument } from '../src/doctor/exec.js';
 import type { CommandResult } from '../src/doctor/exec.js';
+import {
+  LIFECYCLE_OUTCOME_SENTENCES,
+  MCP_CAPABILITY_REFUSAL_SENTENCES,
+} from '../src/cli/render-lifecycle.js';
 import { attentionForRunCondition } from '../src/core/run-attention.js';
 import { resolveRepository, type ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { driveLifecycle } from '../src/run/lifecycle-driver.js';
@@ -78,11 +82,20 @@ import {
 /* ═══════════════════════ fixtures ═══════════════════════════════════════ */
 
 /** A scratch OS-profile directory, plus the registry path inside it. */
-function makeHome(): { readonly provider: ReturnType<typeof fixedPathProvider>; readonly path: string } {
+function makeHome(): {
+  readonly provider: ReturnType<typeof fixedPathProvider>;
+  readonly path: string;
+  /** The orchestrator home itself, which is where a failure record's root sits. */
+  readonly aoHome: string;
+} {
   const home = makeCanonicalTempDir('ao-m5-home-');
   const provider = fixedPathProvider(home);
   mkdirSync(join(home, '.agent-orchestrator'), { recursive: true });
-  return { provider, path: mcpCapabilityRegistryPath(provider) };
+  return {
+    provider,
+    path: mcpCapabilityRegistryPath(provider),
+    aoHome: join(home, '.agent-orchestrator'),
+  };
 }
 
 const GRANTED = [
@@ -125,6 +138,43 @@ const CONNECTED = probeResult(
   [{ name: 'codegraph', status: 'connected' }],
   ['mcp__codegraph__codegraph_explore'],
 );
+
+/**
+ * A COMPLETE `CommandResult`, built field by field rather than spread from
+ * `probeResult`.
+ *
+ * `probeResult` above is an incomplete cast: it has no `durationMs`, no
+ * `failureCode`, no byte counts and no truncation flags. Spreading it into a
+ * case that asserts those fields would read `undefined`, `JSON.stringify` would
+ * DROP the keys, and a record missing a field would look exactly like a record
+ * whose field was never measured. The numbers here are the ones actually
+ * observed on 2026-09-10, so a failing case reads like the incident it is for.
+ */
+function completeResult(overrides: Partial<CommandResult>): CommandResult {
+  return {
+    display: 'claude',
+    executable: 'claude',
+    args: [],
+    started: true,
+    outcome: 'COMPLETED',
+    exitCode: 0,
+    signal: null,
+    stdout: '',
+    stderr: '',
+    startedAt: '2026-09-10T07:53:36.000Z',
+    finishedAt: '2026-09-10T07:53:40.000Z',
+    durationMs: 3484,
+    failureCode: null,
+    errnoCode: null,
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    stdoutBytesObserved: 5189,
+    stderrBytesObserved: 0,
+    stdinDelivery: 'DELIVERED',
+    processTreeKilled: false,
+    ...overrides,
+  } as unknown as CommandResult;
+}
 
 const REQUIRES_CODEGRAPH = {
   codegraph: { capability: 'codegraph' as const, requirement: 'REQUIRED' as const, status: 'INDEX_PRESENT' as const, satisfied: true },
@@ -376,7 +426,201 @@ describe('a required capability that cannot be proven refuses', () => {
       provider: home.provider,
       probe: async () => dead,
     });
+    // Unchanged in substance, and kept for that reason: `started: false` is
+    // still PROBE_DID_NOT_START. The name is true for this case, and its
+    // survival is the cheapest evidence the split did not renumber the world.
     expect(outcome).toMatchObject({ state: 'REFUSED', code: 'PROBE_DID_NOT_START' });
+  });
+
+  /* ── the split, and the ending it stopped losing ────────────────────────── */
+
+  // Every ending a probe can have, each landing on the code that is TRUE of it
+  // and carrying its own outcome out verbatim. Before the split all five
+  // non-completions answered `PROBE_DID_NOT_START`, so a probe that ran for its
+  // whole budget and was killed reported that it never started -- and which of
+  // the five it had been was not recoverable from anything this build wrote.
+  //
+  // Six classes, which is every member of `CommandOutcome`. BOUNDARY_LOST is
+  // among them deliberately: it is Windows-only, it is reachable from this
+  // probe, and the defect was observed on Windows.
+  const NOT_COMPLETED = [
+    ['TIMED_OUT', 'TIMEOUT'],
+    ['OUTPUT_LIMIT_EXCEEDED', 'OUTPUT_LIMIT_STDOUT'],
+    ['NOT_FOUND', 'EXECUTABLE_NOT_FOUND'],
+    ['SPAWN_FAILED', 'SPAWN_FAILED'],
+    ['BOUNDARY_LOST', 'BOUNDARY_LOST'],
+  ] as const;
+
+  it.each(NOT_COMPLETED)(
+    'carries a started-but-%s probe out as PROBE_DID_NOT_COMPLETE, losing nothing',
+    async (commandOutcome, failureCode) => {
+      const home = withRegistry(GRANTED);
+      const outcome = await proveMcpCapabilities({
+        required: ['codegraph'],
+        parentEnv: {},
+        provider: home.provider,
+        timeoutMs: 20_000,
+        now: () => new Date('2026-09-10T07:53:40.000Z'),
+        probe: async () =>
+          completeResult({ started: true, outcome: commandOutcome, failureCode, exitCode: null }),
+      });
+      expect(outcome).toMatchObject({ state: 'REFUSED', code: 'PROBE_DID_NOT_COMPLETE' });
+      if (outcome.state !== 'REFUSED') throw new Error('unreachable');
+      // The lossless half. Without these the split alone would be untested: a
+      // build that answered the right code and dropped the ending would pass.
+      expect(outcome.probe).toMatchObject({
+        started: true,
+        outcome: commandOutcome,
+        failureCode,
+        durationMs: 3484,
+        stdoutBytesObserved: 5189,
+        exitCode: null,
+      });
+    },
+  );
+
+  it('separates the two disjuncts, so neither can be deleted unnoticed', async () => {
+    const home = withRegistry(GRANTED);
+    // (a) never created, and the outcome field says COMPLETED. Only `started`
+    // decides here, so this case dies if `!result.started` is removed.
+    const never = await proveMcpCapabilities({
+      required: ['codegraph'],
+      parentEnv: {},
+      provider: home.provider,
+      probe: async () => completeResult({ started: false, outcome: 'COMPLETED' }),
+    });
+    expect(never).toMatchObject({ state: 'REFUSED', code: 'PROBE_DID_NOT_START' });
+
+    // (b) created, and did not complete. This case dies if the outcome test is
+    // removed, and it dies if the two branches are folded back into one `if`.
+    const ran = await proveMcpCapabilities({
+      required: ['codegraph'],
+      parentEnv: {},
+      provider: home.provider,
+      probe: async () =>
+        completeResult({ started: true, outcome: 'SPAWN_FAILED', failureCode: 'SPAWN_FAILED' }),
+    });
+    expect(ran).toMatchObject({ state: 'REFUSED', code: 'PROBE_DID_NOT_COMPLETE' });
+  });
+
+  it('records the budget it was given, rather than leaving a bare number', async () => {
+    const home = withRegistry(GRANTED);
+    const outcome = await proveMcpCapabilities({
+      required: ['codegraph'],
+      parentEnv: {},
+      provider: home.provider,
+      timeoutMs: 20_000,
+      probe: async () =>
+        completeResult({ started: true, outcome: 'TIMED_OUT', failureCode: 'TIMEOUT' }),
+    });
+    if (outcome.state !== 'REFUSED' || outcome.probe === null) throw new Error('unreachable');
+    // `3484 ms of 20000 ms` is readable by somebody who has never heard of
+    // DEFAULT_COMMAND_TIMEOUT_MS. `3484 ms` asks them to trust a constant they
+    // cannot see and that may have moved since.
+    expect(outcome.probe.budget.timeoutMs).toBe(20_000);
+    expect(outcome.probe.budget.maxStdoutBytes).toBeGreaterThan(0);
+  });
+
+  it('never carries a byte of what the probe said, anywhere', async () => {
+    const home = withRegistry(GRANTED);
+    const outcome = await proveMcpCapabilities({
+      required: ['codegraph'],
+      parentEnv: {},
+      provider: home.provider,
+      probe: async () =>
+        completeResult({
+          started: true,
+          outcome: 'TIMED_OUT',
+          failureCode: 'TIMEOUT',
+          stdout: 'SENTINEL-STDOUT-3f9a',
+          stderr: 'SENTINEL-STDERR-7c21',
+        }),
+    });
+    if (outcome.state !== 'REFUSED' || outcome.record === null) throw new Error('unreachable');
+    expect(outcome.record.recorded).toBe(true);
+    // Read the FILE, as text. A shape assertion alone would pass a record that
+    // stringified a stream into some other field.
+    const stored = readFileSync(outcome.record.path as string, 'utf8');
+    expect(stored).not.toContain('SENTINEL-STDOUT-3f9a');
+    expect(stored).not.toContain('SENTINEL-STDERR-7c21');
+    expect(stored).not.toContain('stdout"');
+    expect(stored).not.toContain('containment');
+    // The counts survive; only the text does not.
+    expect(JSON.parse(stored).observation.stdoutBytesObserved).toBe(5189);
+  });
+
+  it('writes one record per occurrence, and never folds two into one', async () => {
+    const home = withRegistry(GRANTED);
+    const refuse = async (at: string) =>
+      proveMcpCapabilities({
+        required: ['codegraph'],
+        parentEnv: {},
+        provider: home.provider,
+        now: () => new Date(at),
+        probe: async () =>
+          completeResult({ started: true, outcome: 'TIMED_OUT', failureCode: 'TIMEOUT' }),
+      });
+    const first = await refuse('2026-09-09T21:00:00.000Z');
+    const second = await refuse('2026-09-10T07:53:40.000Z');
+    if (first.state !== 'REFUSED' || second.state !== 'REFUSED') throw new Error('unreachable');
+    // The defect this store exists for happened twice and cleared twice. A
+    // store that kept one of the two would have hidden the fact that mattered.
+    expect(first.record?.eventId).not.toBe(second.record?.eventId);
+    expect(first.record?.path).not.toBe(second.record?.path);
+    expect(readFileSync(first.record?.path as string, 'utf8')).toContain('2026-09-09');
+  });
+
+  it('still refuses when the record could not be written', async () => {
+    const home = withRegistry(GRANTED);
+    // A plain file where the store's root belongs: nothing can be created under
+    // it. Nothing about the store may be able to change a verdict.
+    writeFileSync(join(home.aoHome, 'capability-command-failures'), 'not a directory');
+    const outcome = await proveMcpCapabilities({
+      required: ['codegraph'],
+      parentEnv: {},
+      provider: home.provider,
+      probe: async () =>
+        completeResult({ started: true, outcome: 'TIMED_OUT', failureCode: 'TIMEOUT' }),
+    });
+    expect(outcome).toMatchObject({ state: 'REFUSED', code: 'PROBE_DID_NOT_COMPLETE' });
+    if (outcome.state !== 'REFUSED') throw new Error('unreachable');
+    expect(outcome.probe?.outcome).toBe('TIMED_OUT');
+    expect(outcome.record?.recorded).toBe(false);
+  });
+
+  it('carries the probe out, and writes no record, where the code is the answer', async () => {
+    const home = withRegistry(GRANTED);
+    const outcome = await proveMcpCapabilities({
+      required: ['codegraph'],
+      parentEnv: {},
+      provider: home.provider,
+      probe: async () =>
+        probeResult([{ name: 'codegraph', status: 'failed' }], [
+          'mcp__codegraph__codegraph_explore',
+        ]),
+    });
+    expect(outcome).toMatchObject({ state: 'REFUSED', code: 'SERVER_NOT_CONNECTED' });
+    if (outcome.state !== 'REFUSED') throw new Error('unreachable');
+    // A file repeating a code that is already complete buys nothing, and this
+    // directory has no retention policy.
+    expect(outcome.probe).not.toBeNull();
+    expect(outcome.record).toBeNull();
+  });
+
+  it('measures nothing and records nothing where no process was reached', async () => {
+    const home = withRegistry('{ not: yaml');
+    const outcome = await proveMcpCapabilities({
+      required: ['codegraph'],
+      parentEnv: {},
+      provider: home.provider,
+      probe: async () => {
+        throw new Error('no probe may run for a refusal decided before one');
+      },
+    });
+    if (outcome.state !== 'REFUSED') throw new Error('unreachable');
+    expect(outcome.probe).toBeNull();
+    expect(outcome.record).toBeNull();
+    expect(existsSync(join(home.aoHome, 'capability-command-failures'))).toBe(false);
   });
 
   it('proves a granted capability the session really announced', async () => {
@@ -418,6 +662,50 @@ describe('a required capability that cannot be proven refuses', () => {
 
   it('names every refusal in a closed set', () => {
     expect(new Set(MCP_CAPABILITY_REFUSALS).size).toBe(MCP_CAPABILITY_REFUSALS.length);
+    // Uniqueness alone let the set grow, shrink or be permuted with the suite
+    // green -- which is how the collapsed probe code sat here unremarked. The
+    // membership is now stated, so a tenth arrives as a decision.
+    expect(MCP_CAPABILITY_REFUSALS).toHaveLength(9);
+    expect([...MCP_CAPABILITY_REFUSALS]).toEqual([
+      'REGISTRY_UNUSABLE',
+      'CAPABILITY_NOT_GRANTED',
+      'CONFIG_WRITE_FAILED',
+      'GRANT_NOT_SHELL_INERT',
+      'PROBE_DID_NOT_START',
+      'PROBE_DID_NOT_COMPLETE',
+      'PROBE_EMITTED_NO_SESSION',
+      'SERVER_NOT_CONNECTED',
+      'GRANTED_TOOL_ABSENT',
+    ]);
+  });
+
+  it('explains every refusal to an operator, with no sentence left over', () => {
+    // The refusal widens to `readonly string[]` one layer up, so this map is
+    // the only place a new refusal is forced to say what it means. Keys are
+    // compared against the vocabulary in both directions: `Record<K, V>` proves
+    // none is missing, and this proves none is extra -- which a `satisfies` on
+    // a frozen object cannot see.
+    expect(Object.keys(MCP_CAPABILITY_REFUSAL_SENTENCES).sort()).toEqual(
+      [...MCP_CAPABILITY_REFUSALS].sort(),
+    );
+    const sentences = Object.values(MCP_CAPABILITY_REFUSAL_SENTENCES);
+    expect(new Set(sentences).size).toBe(sentences.length);
+    for (const sentence of sentences) {
+      expect(sentence.length).toBeGreaterThan(20);
+      // eslint-disable-next-line no-control-regex
+      expect(/^[\x20-\x7e\n]+$/.test(sentence)).toBe(true);
+    }
+  });
+
+  it('stops telling the operator to go and repair a grant that is not broken', () => {
+    const sentence = LIFECYCLE_OUTCOME_SENTENCES.REQUIRED_CAPABILITY_UNPROVEN;
+    // Three defects in one paragraph, and a generic length pin caught none of
+    // them: it pointed "above" at a line that prints below it, it enumerated
+    // two halves over what are now nine refusals, and it ordered a repair for a
+    // cause that cleared on its own twice.
+    expect(sentence).not.toContain('above');
+    expect(sentence).not.toContain('the granted server did not');
+    expect(sentence).toContain('Capability line');
   });
 });
 
@@ -626,12 +914,19 @@ describe('a repository that requires a capability gets no writer without it', ()
         now: () => new Date().toISOString(),
         git: runGitCommand,
         authPreflight: async () => provenAuthEvidence(),
+        // The two new fields are REQUIRED rather than optional, and this stub
+        // is the one place the compiler says so. Everything downstream widens
+        // to `readonly string[]`, so this arm is the last chance to insist that
+        // a refusal states which ending it saw. `null` here is the honest
+        // answer: no process ran, because the grant was missing.
         mcpPreflight: async () =>
           Object.freeze({
             state: 'REFUSED' as const,
             code: 'CAPABILITY_NOT_GRANTED' as const,
             registryCode: null,
             capability: 'codegraph' as const,
+            probe: null,
+            record: null,
           }),
         agent: async () => {
           agentStarts += 1;

@@ -8575,9 +8575,23 @@ The preflight sits where the auth preflight sits — after auth, before the firs
 drive, on every path that is about to execute. It runs with `--tools ""`, so it
 holds no `Read`, no `Write` and no `Edit` and cannot modify a repository even in
 principle. A repository that requires a capability and cannot prove it gets
-`REQUIRED_CAPABILITY_UNPROVEN`, no agent is started, the lease is given back, and
-the condition is raised to the operator outbox — it leaves no durable task state,
-which is exactly when `core/run-attention.ts` raises a repository-subject item.
+`REQUIRED_CAPABILITY_UNPROVEN`, no agent is started and the lease is given back.
+
+It leaves no durable task state, because it refuses before `startTask` — and that
+is what `core/run-attention.ts` reads when it raises a repository-subject item.
+But the outbox is written by `repositories`, which is the only caller of
+`settleAttention`, so a refusal met by `run --attended` or `block --attended`
+never reaches it. Those two used to leave nothing durable at all: the refusal
+was on a console and nowhere else, which is how the same failure happened twice
+and was still not explainable the second time.
+
+An ending that is *ambiguous without a record* — a probe that never started, one
+that started and did not complete, one that completed and announced no session —
+now writes one under `<user profile>/.agent-orchestrator/capability-command-failures`,
+one directory per occurrence, carrying the command's own outcome and failure
+code against the budget it was given, and never a byte of what it printed. The
+run report's `Evidence` line says where it went, or why it did not. Nothing
+prunes that directory; it is the same debt the doctor's run directories carry.
 
 The memo is per *requirement*, not per repository, because what it measures is a
 property of the operator's registry and of this machine. Two repositories that
@@ -14216,6 +14230,48 @@ orchestrator, some by the person it escalated to — has nothing left to do.
   cannot cut it, but the changed-path list is capped at 40 entries and says so.
   A repository whose task genuinely touches hundreds of paths gets a count and a
   sample, not a manifest.
+
+### Carried forward from the capability-outcome fix, deliberately
+
+That fix reopened this repository for one observed defect and stayed inside it.
+What it found on the way and did **not** do is here rather than in a chat
+transcript, because a remark nobody can grep is not a backlog.
+
+- **L-CO-1 — an attended refusal still raises no operator-attention item.**
+  `settleAttention` has exactly one caller, `cli/repositories-command.ts`, so a
+  capability refusal met by `run --attended` or `block --attended` reaches the
+  console and the new failure record and nothing else. Closing it means editing
+  `notify/`, which this change fenced off, and the record covers the case that
+  actually occurred. The README sentence that claimed otherwise was narrowed
+  rather than left standing.
+- **L-CO-2 — two different causes under one outcome still dedupe to one
+  attention record.** `notify/internal/attention-location.ts` builds a record's
+  identity from the outcome and no qualifier, so a probe that timed out and a
+  grant that is missing fold together where the outbox is written at all. The
+  doc beside it promises otherwise. Fixing it invalidates existing record names,
+  which is a migration and not a diagnostics fix.
+- **L-CO-3 — the failure-record directory is unbounded.** One directory per
+  ambiguous capability-command ending, and nothing prunes it. It is the same
+  debt `L-V4-14-1` records for the head-publication audit and the doctor's run
+  directories; recording is restricted to *ambiguous* endings precisely so the
+  growth is bounded by trouble rather than by traffic. Declared, not solved.
+- **L-CO-4 — `satisfies` on a frozen object cannot see a stray key.** The dead
+  `REQUIRED_CAPABILITY_UNPROVEN` key in `START_TASK_EXIT_CODES` was deleted and
+  both maps in that file now have their **shipped** keys asserted against their
+  vocabularies, which is the check that catches the class. Every other
+  `Object.freeze({...}) satisfies Record<K, V>` in this build has the same blind
+  spot and is **not** audited here. The pattern to prefer is an annotation —
+  `const X: Readonly<Record<K, V>> = Object.freeze({...})` — which keeps
+  freshness and rejects a stray key at the point it is written.
+
+L-M8-1 gains one fact from the same incident, and it is a better recovery route
+than the one recorded there: a lost finding's `path` and `rule` survive in the
+**reviewer's own transcript** under `~/.codex/sessions/YYYY/MM/DD`, and a
+candidate recovered from it can be *proven* against the stored fingerprint
+rather than merely believed. On `RESOLVER-V3-034R` that reproduced all four
+known findings as a control and then matched the unknown one exactly. It does
+not close L-M8-1 — AO still persists nothing itself — but it means an escalated
+task is recoverable in practice today.
 
 ### What M8 does not do
 

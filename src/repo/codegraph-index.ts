@@ -60,7 +60,17 @@
  */
 
 import { runCommand, UnsafeArgumentError, type CommandResult } from '../doctor/exec.js';
+import {
+  observeCapabilityCommand,
+  type CapabilityCommandBudget,
+  type CapabilityCommandObservation,
+} from '../agent/capability-command-failure.js';
+import {
+  recordCapabilityCommandFailure,
+  type CapabilityCommandFailureRecord,
+} from '../agent/capability-command-failure-store.js';
 import { createProbeEnv } from '../auth/env-guard.js';
+import type { PathProvider } from '../config/internal/path-provider.js';
 import type { McpCapabilityGrant } from '../config/mcp-capability-registry.js';
 import { askRuntimeIgnored } from '../state/runtime-ignored.js';
 import type { GitRunner } from '../worktree/git-command.js';
@@ -121,10 +131,32 @@ export interface CodegraphProvisionResult {
   readonly outcome: CodegraphProvisionOutcome;
   /** The capability status of the worktree after this call. */
   readonly status: CapabilityStatus;
-  /** Whether a process was started. Never inferred from `outcome` by a caller. */
+  /**
+   * Whether a process was started. Never inferred from `outcome` by a caller.
+   *
+   * It used to be hard-coded `true` on every path that reached the runner,
+   * which made it false for exactly the two endings where the question matters
+   * — a binary that was not found and a spawn that failed. It now carries the
+   * result's own `started`, which `doctor/exec.ts` answers conservatively.
+   */
   readonly commandRan: boolean;
   /** The command's exit code, or `null` when none ran or none was produced. */
   readonly exitCode: number | null;
+  /**
+   * What the command actually did, or `null` where none ran.
+   *
+   * `COMMAND_FAILED` keeps its name — it is silent about the cause rather than
+   * wrong about it — and this is where the cause now lives, verbatim. A
+   * timeout, a missing binary, a failed spawn, an exceeded stream budget and a
+   * non-zero exit were one word between them; they are still one outcome, and
+   * they are no longer one fact.
+   */
+  readonly observation: CapabilityCommandObservation | null;
+  /**
+   * Where that ending was durably recorded, or `null` where none was attempted.
+   * Reported beside the outcome, never instead of it.
+   */
+  readonly record: CapabilityCommandFailureRecord | null;
 }
 
 export interface CodegraphProvisionRequest {
@@ -160,6 +192,34 @@ export interface CodegraphProvisionRequest {
     args: readonly string[],
     cwd: string,
   ) => Promise<CommandResult | null>;
+  /** Clock for a failure record's timestamp and its event id. */
+  readonly now?: () => Date;
+  /**
+   * Where the failure record's root is resolved from.
+   *
+   * The operator home, never this worktree. A record under a repository would
+   * put an artefact into a tree whose contents this module spends its whole
+   * header promising not to touch.
+   */
+  readonly provider?: PathProvider;
+}
+
+/**
+ * The budget a preparation command was actually given.
+ *
+ * Read from this module's own constants rather than from `runCommand`'s
+ * defaults, because this is the one command in the build that overrides all
+ * three — ten minutes, 64 KiB per stream, and **not** terminated for exceeding
+ * them. That last one matters to a reader of a record: an over-verbose indexer
+ * reports `OUTPUT_LIMIT_EXCEEDED` and may well have finished its work.
+ */
+function prepareBudget(): CapabilityCommandBudget {
+  return Object.freeze({
+    timeoutMs: CODEGRAPH_PREPARE_TIMEOUT_MS,
+    maxStdoutBytes: CODEGRAPH_PREPARE_MAX_OUTPUT_BYTES,
+    maxStderrBytes: CODEGRAPH_PREPARE_MAX_OUTPUT_BYTES,
+    terminateOnOutputLimit: false,
+  });
 }
 
 function result(
@@ -167,8 +227,10 @@ function result(
   status: CapabilityStatus,
   commandRan = false,
   exitCode: number | null = null,
+  observation: CapabilityCommandObservation | null = null,
+  record: CapabilityCommandFailureRecord | null = null,
 ): CodegraphProvisionResult {
-  return Object.freeze({ outcome, status, commandRan, exitCode });
+  return Object.freeze({ outcome, status, commandRan, exitCode, observation, record });
 }
 
 /**
@@ -243,20 +305,42 @@ export async function provisionCodegraphIndex(
 
   const run = request.run ?? defaultRunner;
   const ran = await run(prepare.command, prepare.args, request.worktreePath);
-  if (ran === null) return result('COMMAND_FAILED', probeCodegraphCapability(request.worktreePath));
+  // The runner refused the arguments and started nothing. Explicit nulls rather
+  // than defaults: there is no observation, because there was no process.
+  if (ran === null) {
+    return result('COMMAND_FAILED', probeCodegraphCapability(request.worktreePath), false, null);
+  }
 
   const after = probeCodegraphCapability(request.worktreePath);
   if (ran.outcome !== 'COMPLETED' || ran.exitCode !== 0) {
-    return result('COMMAND_FAILED', after, true, ran.exitCode);
+    // `COMMAND_FAILED` keeps its name and gains its cause. The outcome was
+    // silent about which of five endings this was — a timeout, a missing
+    // binary, a failed spawn, an exceeded stream budget, a lost boundary, or a
+    // plain non-zero exit — and `commandRan` asserted a process for all of
+    // them. Both are now answered from the result itself.
+    const observation = observeCapabilityCommand(ran, prepareBudget());
+    const record = recordCapabilityCommandFailure({
+      site: 'CODEGRAPH_PREPARE',
+      reason: 'COMMAND_FAILED',
+      capability: 'codegraph',
+      observation,
+      now: (request.now ?? (() => new Date()))(),
+      ...(request.provider === undefined ? {} : { provider: request.provider }),
+    });
+    return result('COMMAND_FAILED', after, ran.started, ran.exitCode, observation, record);
   }
 
   // The effect is measured, not taken from the exit code. A command that exits 0
   // and leaves no index has not prepared anything, and reporting its exit code
   // as success would be the reconstructed evidence this repository refuses.
+  // The observation rides on the success paths too, so the seam table and the
+  // real-process cases cannot disagree about the same class, and so `commandRan`
+  // is the result's own `started` on every path rather than on some of them.
   return result(
     after === 'INDEX_PRESENT' ? 'PREPARED' : 'STILL_ABSENT',
     after,
-    true,
+    ran.started,
     ran.exitCode,
+    observeCapabilityCommand(ran, prepareBudget()),
   );
 }

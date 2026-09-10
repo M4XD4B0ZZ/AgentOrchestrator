@@ -648,6 +648,10 @@ describe('the lifecycle report still says what it said', () => {
       {
         outcome: 'LEASE_RELEASE_FAILED',
         taskId: 'T-1',
+        // Required by `LifecycleResult`, and absent here until the capability
+        // block was added: this fixture reaches the renderer through a cast, so
+        // the compiler never asked. Stated rather than left to a guard.
+        capability: null,
         acquire: null,
         recovery: null,
         release,
@@ -664,6 +668,37 @@ describe('the lifecycle report still says what it said', () => {
     // And not the per-code sentence: this report has its own outcome sentence,
     // and printing a second one would say the same thing twice.
     expect(text).not.toContain(LEASE_RELEASE_SENTENCES.LEASE_REMOVE_FAILED);
+  });
+
+  it('renders a result whose capability field never arrived, instead of throwing', () => {
+    // Measured, not hypothesised: the case above did exactly this and the
+    // renderer threw, because the guard was `capability !== null` and
+    // `undefined !== null` is TRUE. A result reaches this renderer through a
+    // cast in more than one place, and a REPORT that throws is worse than a
+    // report missing a line -- it is the one surface an operator has left when
+    // everything else has already gone wrong.
+    const release: LeaseReleaseResult = { code: 'RELEASED', detail: null };
+    const render = () =>
+      renderLifecycleRun(
+        { id: 'fixture', root: 'D:\\nowhere', defaultBranch: 'main' } as ResolvedRepository,
+        {
+          outcome: 'REQUIRED_CAPABILITY_UNPROVEN',
+          taskId: 'T-1',
+          acquire: null,
+          recovery: null,
+          release,
+          start: null,
+          runs: [],
+          invocations: 0,
+          steps: 0,
+          reasonCodes: ['PROBE_DID_NOT_COMPLETE'],
+          permissionDenials: [],
+          // `capability` deliberately absent.
+        } as unknown as Parameters<typeof renderLifecycleRun>[1],
+        'ATTENDED',
+      );
+    expect(render).not.toThrow();
+    expect(render()).toContain('PROBE_DID_NOT_COMPLETE');
   });
 });
 
