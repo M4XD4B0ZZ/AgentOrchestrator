@@ -1713,7 +1713,11 @@ export async function runReviewStep(
       {
         worktreePath: authorisedWorktreePath,
         round,
-        payload: buildReviewPayload(brief.brief, round, briefing),
+        // The same value the reviewer is spawned in, one line above, and now
+        // also said out loud inside the payload. `authorised()` has already
+        // proved it absolute and equal to `state.worktreePath`, so the prompt
+        // and the process cannot disagree about which tree is under review.
+        payload: buildReviewPayload(brief.brief, round, briefing, authorisedWorktreePath),
         now,
       },
       { agent: leasedAgent(deps) },

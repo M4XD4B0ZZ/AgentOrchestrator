@@ -29,7 +29,9 @@
  */
 
 import type { ReviewFinding } from '../agent/codex-reviewer.js';
+import { INSTRUMENT_FAILURE_TOKEN } from '../agent/internal/codex-review-transcript.js';
 import type { ExecutionBrief } from '../plan/task-brief.js';
+import { lineSafe } from '../core/line-safe-text.js';
 import type { TaskState } from '../core/task-state.js';
 import { clampPayload, MAX_AGENT_PAYLOAD_CHARS } from './payload-budget.js';
 import type { VerificationAttemptRecord } from '../verify/verification-attempt.js';
@@ -94,6 +96,68 @@ export function appendFindings(
 }
 
 /**
+ * Tells the reviewer which project its code intelligence must answer for.
+ *
+ * ── The defect this exists for ─────────────────────────────────────────────
+ *
+ * On 2026-09-12 a reviewer of `healthapp/CAPTURE-003` called CodeGraph six
+ * times without a project path. Every call was answered from a *different*
+ * repository's index, because the tool resolves a project from somewhere the
+ * caller did not name — a server working directory, in that case, pinned to
+ * another checkout. The reviewer noticed, refused to substitute `grep`, and so
+ * never read a line of the code it was reviewing.
+ *
+ * What AO had told it: that an index existed. Not which tree. Every spatial
+ * referent in this payload was deictic — "this repository", "this worktree" —
+ * and `buildReviewPayload` could not have named a path if it wanted to, because
+ * it was not given one. The path is the fix's whole substance; naming the
+ * parameter that carries it is the rest.
+ *
+ * ── What is always said, and what is conditional ───────────────────────────
+ *
+ * The *targeting* instruction is unconditional: it is true wherever a
+ * code-intelligence tool exists, costs six lines, and a reviewer that has no
+ * such tool simply has nothing to apply it to. The *obligation to stop* is
+ * gated on the repository declaring the capability `REQUIRED`, which is the
+ * same condition `loop-step.ts` refuses to start a review under when it is
+ * unsatisfied. Telling a reviewer to abort over an optional tool would
+ * manufacture blocks in repositories that never asked for one.
+ *
+ * The verdict itself is defined in the reply schema unconditionally, so prompt
+ * and parser state one vocabulary in every payload. What the gate adds is *when
+ * the reviewer must reach for it*, not whether it exists.
+ */
+function codeIntelligenceTargetingLines(
+  brief: ExecutionBrief,
+  tree: string,
+): readonly string[] {
+  const lines = [
+    'CODE INTELLIGENCE — WHICH PROJECT IT MUST ANSWER FOR',
+    '  Every code-intelligence call that accepts a project path must be given',
+    `  ${tree} as that path (for CodeGraph the argument is named "projectPath").`,
+    '  Omit it and the tool resolves a project from somewhere you did not name,',
+    '  then answers confidently for the wrong repository.',
+    '  Before you rely on any symbol it returns, confirm the files it names lie',
+    '  inside that tree. A graph that is not this tree’s is not evidence about',
+    '  this task.',
+  ];
+
+  if (brief.codegraph.requirement === 'REQUIRED') {
+    lines.push(
+      '  This repository declares that capability REQUIRED. If you cannot bind it',
+      '  to the tree above, or what comes back is another project’s, STOP: reply',
+      `  with the "${INSTRUMENT_FAILURE_TOKEN}" verdict defined below.`,
+      '  Do NOT fall back to text search, file reading or recollection, and do NOT',
+      '  report findings inferred from handoff notes, task text or any other prose',
+      '  in place of findings observed in source. A review you could not perform',
+      '  is not a review with fewer findings.',
+    );
+  }
+
+  return lines;
+}
+
+/**
  * The instructions handed to the reviewer, on stdin.
  *
  * It quotes the canonical review document from `README.md` ("The review
@@ -134,10 +198,22 @@ export function buildReviewPayload(
   brief: ExecutionBrief,
   round: number,
   briefing: OrchestratorBriefing,
+  worktreePath: string,
 ): string {
+  // `lineSafe` at the source, which is where this repository puts that rule.
+  // The value is the orchestrator's own authorised worktree path rather than
+  // repository-authored prose — `loop-step.ts` has already proved it equal to
+  // the task state's — but it is quoted into instructions, and anything quoted
+  // into instructions must not be able to start a line of its own.
+  const tree = lineSafe(worktreePath);
+
   const lines = [
-    `Review the working tree of this repository against task ${brief.taskId}`,
+    `Review the working tree at ${tree} against task ${brief.taskId}`,
     `(review round ${round}). You are read-only: do not modify any file.`,
+    '',
+    'That absolute path is the ONLY tree this review is about. It is a worktree',
+    'of this repository, not the repository root, and a sibling checkout of the',
+    'same repository is a DIFFERENT tree holding different work.',
     '',
     'Answer two questions, and treat a failure of either as a finding:',
     '  1. does the working tree SATISFY the task as stated below? Work that is',
@@ -145,12 +221,19 @@ export function buildReviewPayload(
     '     an empty change satisfies nothing.',
     '  2. does it introduce defects?',
     '',
+    ...codeIntelligenceTargetingLines(brief, tree),
+    '',
     // Placed BEFORE the task body, and that position is load-bearing twice over.
     // `clampPayload` cuts the TAIL, so a block appended after a maximal body
     // would be the first thing truncated away — and the orchestrator's own frame
-    // belongs above the repository's text rather than below it. The block is a
-    // fixed handful of short lines with no repository-derived length in it, so
-    // it cannot crowd out the reply schema either.
+    // belongs above the repository's text rather than below it.
+    //
+    // This comment used to claim the head block had "no repository-derived
+    // length in it". An absolute worktree path falsified that, so it is
+    // corrected rather than left standing: the head now carries one bounded,
+    // orchestrator-supplied path, repeated a fixed number of times. It is still
+    // a fixed handful of short lines against a 16 384-character budget, so it
+    // cannot crowd out the reply schema.
     ...reviewerBriefingLines(briefing),
     '',
     'TASK',
@@ -181,7 +264,7 @@ export function buildReviewPayload(
     '',
     '{',
     '  "reviewVersion": 1,',
-    '  "verdict": "PASS" | "FINDINGS",',
+    `  "verdict": "PASS" | "FINDINGS" | "${INSTRUMENT_FAILURE_TOKEN}",`,
     '  "findings": [',
     '    { "severity": "critical|high|medium|low|info",',
     '      "path": "repository/relative/posix/path.ts",',
@@ -192,6 +275,14 @@ export function buildReviewPayload(
     'Rules, all enforced:',
     '- "verdict" must agree with the list: PASS requires an empty findings array,',
     '  FINDINGS requires a non-empty one.',
+    `- "${INSTRUMENT_FAILURE_TOKEN}" means the code intelligence you were required`,
+    '  to use could not be bound to the tree named at the top of these',
+    '  instructions, or answered for a different project, so no review was',
+    '  performed. It requires an EMPTY findings array: a review you could not',
+    '  carry out has nothing to report about the source. It is not a pass, it is',
+    '  not a failure of the work, and it does not spend a review round — it says',
+    '  the instrument was wrong, and it is always the right answer when it is',
+    '  true. Never substitute findings inferred from prose for it.',
     '- at most 64 findings.',
     '- "path" is repository-relative POSIX, built only from [A-Za-z0-9] and',
     '  ". _ : @ = + / -", at most 1 024 characters: no leading "/", no drive',
