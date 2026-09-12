@@ -113,14 +113,19 @@ finished entry; a failure a person watched happen twice is not.
     escalated it, and an exhausted review budget was a **closed loop**: no
     number of operator continuations could finish the task. Observed on
     RESOLVER-V3-034R, 2026-09-10.
-  - `REVIEW-INSTRUMENT-001` — **open, and no `src/` change has been made.** A
-    reviewer whose mandatory CodeGraph preflight answered for a *different
-    repository* refused to read source, as it should — and then produced
-    ordinary findings anyway, sourced from handoff prose. They spent the review
-    budget and forced `HUMAN_DECISION_REQUIRED` on work no reviewer had read.
-    Observed on healthapp/CAPTURE-003, 2026-09-12. The read-only investigation,
-    the smallest measured repair boundary and what it deliberately excludes are
-    in `.agent-orchestrator/tasks/REVIEW-INSTRUMENT-001.md`.
+  - `REVIEW-INSTRUMENT-001` — a reviewer whose mandatory CodeGraph preflight
+    answered for a *different repository* refused to read source, as it should —
+    and then produced ordinary findings anyway, sourced from handoff prose. They
+    spent the review budget and forced `HUMAN_DECISION_REQUIRED` on work no
+    reviewer had read. Observed on healthapp/CAPTURE-003, 2026-09-12. The
+    read-only investigation, the smallest measured repair boundary and what it
+    deliberately excludes are in
+    `.agent-orchestrator/tasks/REVIEW-INSTRUMENT-001.md`; the repair names the
+    worktree in the review prompt and gives an unusable instrument a verdict of
+    its own. What it deliberately did *not* fix: AO still cannot **verify** that
+    a reviewer bound its instrument — it parses `turn.completed` and the final
+    agent message, never MCP tool traffic — so the obligation is stated and the
+    refusal is expressible, and compliance is neither.
 
 The first two were not hardening rounds, and both stayed inside the defect they
 named. What each deliberately did *not* fix is in its own register below, which
@@ -2575,10 +2580,10 @@ The reviewer runs `codex exec --json --sandbox read-only` — the sandbox flag
 because the reviewer is contractually read-only, which is why
 `REVIEWING → SCOPE_VIOLATION` exists at all. Its transcript must carry a
 completed turn, and its final agent message must validate as a review document:
-a version, a `PASS`/`FINDINGS` verdict, and a finding list that *agrees* with
-that verdict. A document claiming to pass while listing findings is not a pass
-with a caveat; it is unreadable, and the safe reading of an unreadable review
-is never "no problems found".
+a version, a `PASS`/`FINDINGS`/`INSTRUMENT_FAILURE` verdict, and a finding list
+that *agrees* with that verdict. A document claiming to pass while listing
+findings is not a pass with a caveat; it is unreadable, and the safe reading of
+an unreadable review is never "no problems found".
 
 Each finding supplies a severity, a repository-relative path and a rule id, all
 validated against closed vocabularies — an unrecognised severity invalidates
@@ -2608,8 +2613,22 @@ prompt, and it needs something stable to quote that is not a private constant:
 
 - `reviewVersion` — exactly `1`. A later version is unrecognised, not assumed
   compatible.
-- `verdict` — `"PASS"` or `"FINDINGS"`, and it must agree with the list:
-  `PASS` requires an empty `findings`, `FINDINGS` requires a non-empty one.
+- `verdict` — `"PASS"`, `"FINDINGS"` or `"INSTRUMENT_FAILURE"`, and it must
+  agree with the list: `PASS` requires an empty `findings`, `FINDINGS` requires
+  a non-empty one, and `INSTRUMENT_FAILURE` requires an empty one — or no
+  `findings` key at all, which is the shortest honest refusal a reviewer can
+  write and is read as empty.
+- `INSTRUMENT_FAILURE` is the reviewer saying the code intelligence it was
+  *required* to use could not be bound to the worktree it was told to review, or
+  answered for a different project, so **no review was performed**. It is not a
+  pass and not a failure of the work: it becomes
+  `AGENT_REVIEW_INSTRUMENT_FAILED`, which appends no finding and spends no
+  review round. It exists because a reviewer that can only report results will
+  report results — measured on healthapp/CAPTURE-003, where one graded a
+  repository it had never read and the findings it invented from handoff prose
+  exhausted the budget. The measurement, the repair boundary and what it
+  deliberately excludes are in
+  `.agent-orchestrator/tasks/REVIEW-INSTRUMENT-001.md`.
 - `severity` — one of `critical`, `high`, `medium`, `low`, `info`.
 - `path` — repository-relative POSIX, at most 1 024 characters, built only from
   `[A-Za-z0-9]` and `._:@=+/-`: no drive letter, no leading `/`, no `\`, no
@@ -2622,8 +2641,12 @@ prompt, and it needs something stable to quote that is not a private constant:
 
 Anything else — a missing field, an unknown severity, a document wrapped in
 prose, more than the cap — is `AGENT_RESULT_MALFORMED`, which is
-`HUMAN_DECISION_REQUIRED`. **Exit 0 alone is never a review pass**: the absence
-of a valid document is not the absence of findings.
+`HUMAN_DECISION_REQUIRED`. The one thing that is *not* "anything else" is a
+well-formed `INSTRUMENT_FAILURE`: it is a valid document, and it is kept apart
+precisely so that "the reviewer could not bind its instrument" and "the CLI
+printed garbage" do not reach a human as the same sentence. Both park the task;
+only one of them is the agent's fault. **Exit 0 alone is never a review pass**:
+the absence of a valid document is not the absence of findings.
 
 ### Usage exhaustion is a governed pause
 
