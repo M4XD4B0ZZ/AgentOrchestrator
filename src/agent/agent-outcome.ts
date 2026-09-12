@@ -12,7 +12,7 @@
  * direction only. `src/core/transitions.ts` offers no "the agent ran and
  * produced nothing usable" state — `BLOCKED_VERIFY` is reachable from
  * `VERIFYING` alone, and inventing a new state is a product-contract change,
- * not something a runner slice is entitled to do. So four different diagnoses
+ * not something a runner slice is entitled to do. So five different diagnoses
  * all lead to `HUMAN_DECISION_REQUIRED`, and the code is what preserves the
  * difference between them for the person who has to make that decision.
  *
@@ -60,8 +60,14 @@ export const AGENT_FAILURE_CODES = [
    * arrive under, because the two are different facts and only one of them is
    * the agent's fault. Malformed means "there is nothing here to read"; this
    * means "the agent read its instructions, did the honest thing, and is
-   * telling you its instrument was pointed at the wrong repository". An
-   * operator who cannot tell those apart cannot fix either.
+   * telling you its instrument was pointed at the wrong repository".
+   *
+   * How far that distinction actually travels, stated rather than implied:
+   * `code` and `detail` are read at this boundary and by whoever inspects the
+   * outcome object. `loop-step.ts` forwards only the disposition and the block
+   * to the durable record, so the two codes park the task identically and an
+   * operator reading the state alone still cannot tell them apart. The gain is
+   * diagnosis fidelity at the boundary, not a different lifecycle.
    *
    * The defect that produced it: on 2026-09-12 a reviewer's CodeGraph calls
    * were answered from a *different* repository's index. It refused to

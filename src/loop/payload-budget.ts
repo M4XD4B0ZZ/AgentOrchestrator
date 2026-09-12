@@ -26,6 +26,34 @@ export const MAX_AGENT_PAYLOAD_CHARS = 16_384;
  * reading the prompt — can see that it was cut.
  */
 export function clampPayload(text: string, marker = '\n[truncated]'): string {
-  if (text.length <= MAX_AGENT_PAYLOAD_CHARS) return text;
-  return `${text.slice(0, MAX_AGENT_PAYLOAD_CHARS - marker.length)}${marker}`;
+  return clampTo(text, MAX_AGENT_PAYLOAD_CHARS, marker);
+}
+
+/**
+ * Clamps `text` to `maxChars`, marker and all.
+ *
+ * {@link clampPayload} is this with the whole budget, and remains the right
+ * call for a payload that is one variable block. This is for the other shape: a
+ * payload with a **fixed part it may not lose**, where the budget has to be
+ * spent on the variable middle instead of on whatever happens to come last.
+ *
+ * The defect it exists for. `buildReviewPayload` ends with the reply schema —
+ * the document shape the reviewer's answer is parsed against — and clamped the
+ * whole payload, so the schema was the FIRST thing a long task body pushed off
+ * the end. Measured on 2026-09-12 against the shipped build: a schema-legal
+ * profile (a maximal 8 192-character body plus 64 canonical sources) produced a
+ * payload ending in `[truncated]` with no `"reviewVersion": 1` in it at all. A
+ * reviewer handed that cannot reply in a shape this repository can read, so
+ * every round of that task parks at `HUMAN_DECISION_REQUIRED` having spent a
+ * real reviewer call on nothing.
+ *
+ * `maxChars <= 0` yields the empty string rather than a marker: a caller with
+ * no room left is saying it has nothing to spend, and a marker would itself
+ * overrun the budget it was called to respect.
+ */
+export function clampTo(text: string, maxChars: number, marker = '\n[truncated]'): string {
+  if (maxChars <= 0) return '';
+  if (text.length <= maxChars) return text;
+  if (maxChars <= marker.length) return marker.slice(0, maxChars);
+  return `${text.slice(0, maxChars - marker.length)}${marker}`;
 }

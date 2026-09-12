@@ -267,6 +267,16 @@ export function readReviewDocument(text: string): CodexTranscriptReading {
     return UNRECOGNISED;
   }
 
+  // Checked before the array requirement below, because the most economical
+  // honest refusal a reviewer can write is
+  // `{"reviewVersion":1,"verdict":"INSTRUMENT_FAILURE"}` — no `findings` key at
+  // all. Requiring the key there would report the one document we most want to
+  // read as "the CLI printed garbage". An ABSENT list is empty; a present one
+  // still has to be an empty array, which is checked with the others below.
+  if (parsed['verdict'] === INSTRUMENT_FAILURE_TOKEN && parsed['findings'] === undefined) {
+    return INSTRUMENT_FAILURE;
+  }
+
   const raw = parsed['findings'];
   if (!Array.isArray(raw)) return UNRECOGNISED;
   if (raw.length > MAX_FINDINGS_PER_REVIEW) return UNRECOGNISED;

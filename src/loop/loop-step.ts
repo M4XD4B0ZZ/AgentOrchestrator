@@ -1713,10 +1713,12 @@ export async function runReviewStep(
       {
         worktreePath: authorisedWorktreePath,
         round,
-        // The same value the reviewer is spawned in, one line above, and now
-        // also said out loud inside the payload. `authorised()` has already
-        // proved it absolute and equal to `state.worktreePath`, so the prompt
-        // and the process cannot disagree about which tree is under review.
+        // The same value passed as `worktreePath` above, and now also said out
+        // loud inside the payload. `authorised()` has already proved it
+        // absolute and equal to `state.worktreePath`, so the prompt and the
+        // process cannot disagree about which tree is under review. This one
+        // expression is the whole of invariant 1; `tests/review-instrument-001.test.ts`
+        // reads the recorded payload back to gate it.
         payload: buildReviewPayload(brief.brief, round, briefing, authorisedWorktreePath),
         now,
       },

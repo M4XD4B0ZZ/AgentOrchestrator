@@ -33,7 +33,7 @@ import { INSTRUMENT_FAILURE_TOKEN } from '../agent/internal/codex-review-transcr
 import type { ExecutionBrief } from '../plan/task-brief.js';
 import { lineSafe } from '../core/line-safe-text.js';
 import type { TaskState } from '../core/task-state.js';
-import { clampPayload, MAX_AGENT_PAYLOAD_CHARS } from './payload-budget.js';
+import { clampPayload, clampTo, MAX_AGENT_PAYLOAD_CHARS } from './payload-budget.js';
 import type { VerificationAttemptRecord } from '../verify/verification-attempt.js';
 import {
   reviewerBriefingLines,
@@ -116,12 +116,16 @@ export function appendFindings(
  * ── What is always said, and what is conditional ───────────────────────────
  *
  * The *targeting* instruction is unconditional: it is true wherever a
- * code-intelligence tool exists, costs six lines, and a reviewer that has no
- * such tool simply has nothing to apply it to. The *obligation to stop* is
- * gated on the repository declaring the capability `REQUIRED`, which is the
- * same condition `loop-step.ts` refuses to start a review under when it is
- * unsatisfied. Telling a reviewer to abort over an optional tool would
- * manufacture blocks in repositories that never asked for one.
+ * code-intelligence tool exists, and a reviewer that has no such tool simply
+ * has nothing to apply it to. The *obligation to stop* is gated on the
+ * repository declaring the capability `REQUIRED`, because telling a reviewer to
+ * abort over an optional tool would manufacture blocks in repositories that
+ * never asked for one.
+ *
+ * Measured, since the size is the cost argument for emitting the block at all:
+ * 8 lines unconditionally, 15 when `REQUIRED`. Neither part is repository-
+ * authored — the only variable in it is the worktree path — and since the
+ * budget defect below, neither part competes with the reply schema for room.
  *
  * The verdict itself is defined in the reply schema unconditionally, so prompt
  * and parser state one vocabulary in every payload. What the gate adds is *when
@@ -161,9 +165,17 @@ function codeIntelligenceTargetingLines(
  * The instructions handed to the reviewer, on stdin.
  *
  * It quotes the canonical review document from `README.md` ("The review
- * document, canonically") because the parser that enforces that shape is
- * internal and a prompt may not reach into it. The two are expected to change
- * together; `codex-review-transcript.ts` names this dependency explicitly.
+ * document, canonically"): the parser that enforces that shape is internal, so
+ * the README is the anchor the three copies are kept equal against, and
+ * `codex-review-transcript.ts` names that dependency explicitly.
+ *
+ * The one thing this module does import from that internal parser is
+ * `INSTRUMENT_FAILURE_TOKEN`, and the exception is deliberate. This comment
+ * used to say a prompt "may not reach into" the parser at all, which stopped
+ * being true when the third verdict arrived: a duplicated literal on each side
+ * is free to drift, and a prompt offering a token the parser rejects is a
+ * silent refusal while a parser accepting one no prompt offers is dead code.
+ * One shared constant, and nothing else.
  *
  * Nothing here interpolates repository text into a command line — this is a
  * stdin payload, and the reviewer's argv is the frozen `CODEX_REVIEWER_ARGS`.
@@ -207,7 +219,10 @@ export function buildReviewPayload(
   // into instructions must not be able to start a line of its own.
   const tree = lineSafe(worktreePath);
 
-  const lines = [
+  // The orchestrator's own frame. Above the repository's text, because that is
+  // where a frame belongs — and now also *reserved* against the budget, for the
+  // reason the tail is.
+  const head = [
     `Review the working tree at ${tree} against task ${brief.taskId}`,
     `(review round ${round}). You are read-only: do not modify any file.`,
     '',
@@ -223,25 +238,15 @@ export function buildReviewPayload(
     '',
     ...codeIntelligenceTargetingLines(brief, tree),
     '',
-    // Placed BEFORE the task body, and that position is load-bearing twice over.
-    // `clampPayload` cuts the TAIL, so a block appended after a maximal body
-    // would be the first thing truncated away — and the orchestrator's own frame
-    // belongs above the repository's text rather than below it.
-    //
-    // This comment used to claim the head block had "no repository-derived
-    // length in it". An absolute worktree path falsified that, so it is
-    // corrected rather than left standing: the head now carries one bounded,
-    // orchestrator-supplied path, repeated a fixed number of times. It is still
-    // a fixed handful of short lines against a 16 384-character budget, so it
-    // cannot crowd out the reply schema.
     ...reviewerBriefingLines(briefing),
-    '',
-    'TASK',
-    brief.body,
   ];
 
+  // The repository-authored middle: the only part whose length the repository
+  // controls, and therefore the only part the budget is spent on.
+  const middle = ['', 'TASK', brief.body];
+
   if (brief.bodyTruncated) {
-    lines.push(
+    middle.push(
       '',
       '[The task text above was truncated at the payload budget. Read the task',
       'file in the repository for the remainder.]',
@@ -249,16 +254,15 @@ export function buildReviewPayload(
   }
 
   if (brief.contextSources.length > 0) {
-    lines.push('', 'CONTEXT SOURCES (paths in this worktree — open them yourself as needed)');
+    middle.push('', 'CONTEXT SOURCES (paths in this worktree — open them yourself as needed)');
     for (const source of brief.contextSources) {
-      lines.push(
+      middle.push(
         source.status === 'PRESENT' ? `- ${source.path}` : `- ${source.path} [${source.status}]`,
       );
     }
   }
 
-  return clampPayload([
-    ...lines,
+  const tail = [
     '',
     'Reply with exactly one JSON document as your final message, and nothing else:',
     '',
@@ -292,7 +296,31 @@ export function buildReviewPayload(
     '- "rule" is a slug of [A-Za-z0-9] with inner "._:-", at most 128 characters.',
     '- any other shape, any unknown severity, any surrounding prose makes the',
     '  document unreadable, which is never read as "no problems found".',
-  ].join('\n'));
+  ];
+
+  // ── Why this is not one `clampPayload` over one array ────────────────────
+  //
+  // It was, and the reply schema was the tail, so the schema was the first
+  // thing a long task body pushed off the end. Measured against the shipped
+  // build on 2026-09-12: a schema-legal profile — a maximal 8 192-character
+  // body beside 64 canonical sources — produced 18 080 characters clamped to
+  // 16 384, with `"reviewVersion": 1` absent and every grammar rule gone. A
+  // reviewer handed that cannot answer in a readable shape, so the round parks
+  // at HUMAN_DECISION_REQUIRED having spent a real reviewer call on nothing;
+  // and after this slice it would also have been told to reply with a verdict
+  // whose definition had just been cut away.
+  //
+  // So the head and the tail are reserved, and only the middle is clamped. The
+  // budget is unchanged and still hard: `clampTo` gets exactly what is left,
+  // and the final guard below keeps the ceiling even when the fixed parts
+  // alone exhaust it — a case that needs an absurd worktree path, and which
+  // loses the middle rather than the shape.
+  const headText = head.join('\n');
+  const tailText = `\n${tail.join('\n')}`;
+  const room = MAX_AGENT_PAYLOAD_CHARS - headText.length - tailText.length;
+  if (room < 0) return clampPayload(`${headText}${tailText}`);
+
+  return `${headText}${clampTo(middle.join('\n'), room)}${tailText}`;
 }
 
 function severityTally(findings: readonly { readonly severity: string }[]): string {
