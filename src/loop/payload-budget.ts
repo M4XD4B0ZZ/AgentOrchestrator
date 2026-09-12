@@ -47,9 +47,17 @@ export function clampPayload(text: string, marker = '\n[truncated]'): string {
  * every round of that task parks at `HUMAN_DECISION_REQUIRED` having spent a
  * real reviewer call on nothing.
  *
- * `maxChars <= 0` yields the empty string rather than a marker: a caller with
- * no room left is saying it has nothing to spend, and a marker would itself
- * overrun the budget it was called to respect.
+ * Two degenerate cases, both stated because a small-budget caller meets them
+ * first and neither returns what the paragraph above would lead you to expect:
+ *
+ * - `maxChars <= 0` yields the empty string rather than a marker. A caller with
+ *   no room left is saying it has nothing to spend, and a marker would itself
+ *   overrun the budget it was called to respect.
+ * - `maxChars <= marker.length` yields a *fragment* of the marker — neither the
+ *   text nor a complete marker. {@link clampPayload}'s promise that a clamped
+ *   result always ends with the marker therefore holds for `clampPayload`,
+ *   whose budget dwarfs every marker in use, and **not** for `clampTo` at a
+ *   small budget. Anyone giving this a small `maxChars` is choosing that.
  */
 export function clampTo(text: string, maxChars: number, marker = '\n[truncated]'): string {
   if (maxChars <= 0) return '';

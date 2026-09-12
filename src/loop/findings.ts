@@ -241,9 +241,17 @@ export function buildReviewPayload(
     ...reviewerBriefingLines(briefing),
   ];
 
-  // The repository-authored middle: the only part whose length the repository
-  // controls, and therefore the only part the budget is spent on.
-  const middle = ['', 'TASK', brief.body];
+  // The repository-authored middle: the part whose length the repository
+  // controls without bound, and therefore the only part the budget is spent on.
+  // (The head is not *entirely* fixed — it interpolates `brief.taskId`, capped
+  // at 128 characters by `MAX_TASK_ID_LENGTH`. That is bounded, so it is not
+  // what the budget has to defend against, but "fixed" would be false.)
+  //
+  // Two leading blanks, not one. `headText` carries no trailing newline, so the
+  // first supplies the line break and the second the empty line that set TASK
+  // off before this was three arrays instead of one. Written down because the
+  // split silently ate that blank line once already.
+  const middle = ['', '', 'TASK', brief.body];
 
   if (brief.bodyTruncated) {
     middle.push(
@@ -311,10 +319,18 @@ export function buildReviewPayload(
   // whose definition had just been cut away.
   //
   // So the head and the tail are reserved, and only the middle is clamped. The
-  // budget is unchanged and still hard: `clampTo` gets exactly what is left,
-  // and the final guard below keeps the ceiling even when the fixed parts
-  // alone exhaust it — a case that needs an absurd worktree path, and which
-  // loses the middle rather than the shape.
+  // budget is unchanged and still hard: `clampTo` gets exactly what is left.
+  //
+  // The `room < 0` guard is the degenerate case, and it is worth being exact
+  // about what it does rather than flattering it. It fires only when the head
+  // and the reply schema *alone* exceed the budget, which needs a worktree path
+  // of roughly 6 400 characters — the head interpolates it twice — and it then
+  // clamps head+tail from the END, so the reply schema is cut after all. It is
+  // not a rescue; it is the ceiling being held when the guarantee above it can
+  // no longer be. Just below that threshold there is a narrow band where `room`
+  // is smaller than the truncation marker and the whole task body is replaced
+  // by a marker fragment. Both are unreachable on any path a filesystem will
+  // hand out, and both are stated here rather than discovered later.
   const headText = head.join('\n');
   const tailText = `\n${tail.join('\n')}`;
   const room = MAX_AGENT_PAYLOAD_CHARS - headText.length - tailText.length;

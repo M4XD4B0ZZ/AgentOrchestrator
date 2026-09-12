@@ -33,10 +33,13 @@
  * obligation stated and the refusal expressible. It does not make compliance
  * measurable, and a test claiming otherwise would be the overclaim.
  *
- * ── Two mutants this file is built to catch ────────────────────────────────
+ * ── The mutants this file is built to catch ────────────────────────────────
  *
  * Each is named at the case that catches it, because a mutant nobody can locate
- * is a sentence rather than a gate.
+ * is a sentence rather than a gate. Five have been run against it: the parser
+ * refusing the third verdict, the reply schema dropping it, an instrument
+ * failure read as a passing review, the payload clamped as one block again, and
+ * the loop passing the repository root instead of the worktree.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -49,7 +52,7 @@ import {
   readReviewDocument,
 } from '../src/agent/internal/codex-review-transcript.js';
 import { buildReviewPayload } from '../src/loop/findings.js';
-import { MAX_AGENT_PAYLOAD_CHARS } from '../src/loop/payload-budget.js';
+import { clampPayload, clampTo, MAX_AGENT_PAYLOAD_CHARS } from '../src/loop/payload-budget.js';
 import { runReviewStep } from '../src/loop/loop-step.js';
 import { createReviewerProviderGate } from '../src/loop/reviewer-provider-gate.js';
 import { readExecutionBrief, type ExecutionBrief } from '../src/plan/task-brief.js';
@@ -122,8 +125,9 @@ describe('§1 the reviewer is told which tree it is reviewing', () => {
     const payload = buildReviewPayload(requiredBrief(), 1, briefingFixture(), TREE);
 
     expect(payload).toContain(TREE);
-    // The opening sentence, specifically. A path buried below a maximal task
-    // body would be the first thing `clampPayload` cuts.
+    // In the opening sentence, above the task body. That position is now also
+    // budget-reserved (see the maximal case below), so it is a statement about
+    // where the reviewer reads it rather than about surviving the clamp.
     expect(payload.indexOf(TREE)).toBeLessThan(payload.indexOf('TASK'));
   });
 
@@ -234,18 +238,22 @@ describe('§1 the reviewer is told which tree it is reviewing', () => {
   /**
    * The blocker this slice shipped and then had to repair, kept as a gate.
    *
-   * The first version of this case passed `requiredBrief()` — a 55-character
-   * body and no context sources — and only lengthened the path. Measured: 4 499
-   * characters against a 16 384 budget, so `clampPayload` never fired and both
-   * assertions held for every possible implementation, including the broken one.
+   * The first version of this case passed `requiredBrief()` — a 56-character
+   * body and no context sources — and only lengthened the path. Measured on
+   * this builder: **4 305** characters against a 16 384 budget, so the clamp
+   * never fired and both assertions held for every possible implementation,
+   * including the broken one.
    *
    * This is the input that actually reaches the cliff, and every part of it is
    * schema-legal: the documented maximum body (`MAX_TASK_BODY_BYTES`, 8 192) and
    * 64 canonical sources of 91 characters, which
    * `repo-profile-object-schema.ts` permits (64 entries, 1 024 characters each).
-   * Measured against the shipped build before the repair: 18 080 characters
-   * clamped to exactly 16 384, with `"reviewVersion": 1` **absent** — the
-   * reviewer told to answer in a shape it had never been shown.
+   * Measured against the shipped build **before** the repair, on exactly this
+   * input: 16 384 characters, ending in `[truncated]`, with
+   * `"reviewVersion": 1` **absent** and the closing grammar gone — the reviewer
+   * told to answer in a shape it had never been shown. After the repair, on
+   * exactly this input: 16 384 characters, schema and grammar both present, and
+   * the task body is what gave way.
    */
   it('keeps the whole reply schema beside a maximal body and maximal context', () => {
     const sources = Array.from({ length: 64 }, (_, i) => ({
@@ -268,6 +276,72 @@ describe('§1 the reviewer is told which tree it is reviewing', () => {
     expect(payload).toMatch(/never read as "no problems found"/);
     // And the middle really was the part that gave way.
     expect(payload).toContain('[truncated]');
+  });
+});
+
+/**
+ * The clamp the repair rests on, at the edges the payload cannot reach.
+ *
+ * `buildReviewPayload`'s own guard needs a worktree path of roughly 6 400
+ * characters to fire, which no filesystem will hand out, so nothing in §1 can
+ * reach it — the review that found this said so, and it was right. Reserving a
+ * budget and then never testing what happens when there is none left is the
+ * same shape of gap as the one this whole slice exists to close, so the edges
+ * are pinned directly on `clampTo` instead of through an absurd path.
+ */
+describe('§1b the clamp holds at zero room and below', () => {
+  it('spends nothing when there is nothing to spend', () => {
+    expect(clampTo('hello', 0)).toBe('');
+    expect(clampTo('hello', -1)).toBe('');
+    expect(clampTo('hello', -10_000)).toBe('');
+  });
+
+  it('never exceeds the room it was given, at any budget', () => {
+    for (const room of [1, 5, 11, 12, 13, 20, 100]) {
+      expect(clampTo('x'.repeat(500), room).length).toBeLessThanOrEqual(room);
+    }
+  });
+
+  it('returns the text untouched when it fits, marker and all', () => {
+    expect(clampTo('short', 100)).toBe('short');
+    expect(clampTo('exact', 5)).toBe('exact');
+  });
+
+  it('agrees with clampPayload at the whole budget, in both directions', () => {
+    const under = 'y'.repeat(MAX_AGENT_PAYLOAD_CHARS - 1);
+    const over = 'y'.repeat(MAX_AGENT_PAYLOAD_CHARS + 500);
+    expect(clampTo(under, MAX_AGENT_PAYLOAD_CHARS)).toBe(clampPayload(under));
+    expect(clampTo(over, MAX_AGENT_PAYLOAD_CHARS)).toBe(clampPayload(over));
+    expect(clampPayload(over).length).toBe(MAX_AGENT_PAYLOAD_CHARS);
+    expect(clampPayload(over).endsWith('[truncated]')).toBe(true);
+  });
+
+  /**
+   * The degenerate branch the docstring now names out loud: below the marker's
+   * own length there is no room for a marker, and the caller gets a fragment.
+   * Pinned so the sentence and the code cannot drift apart.
+   */
+  it('returns a marker fragment rather than overrunning a tiny budget', () => {
+    const clamped = clampTo('a very long body indeed', 4);
+    expect(clamped.length).toBeLessThanOrEqual(4);
+    expect('\n[truncated]'.startsWith(clamped)).toBe(true);
+  });
+
+  /**
+   * The `room < 0` guard in `buildReviewPayload`, reached the only way a test
+   * can: a worktree path long enough that the head and the reply schema alone
+   * exhaust the budget. It holds the ceiling — and, as the comment beside it
+   * now says rather than denies, it does so by cutting the schema too.
+   */
+  it('holds the ceiling even when the fixed parts alone exhaust it', () => {
+    const payload = buildReviewPayload(
+      requiredBrief(),
+      1,
+      briefingFixture(),
+      `D:\\${'d'.repeat(9_000)}`,
+    );
+    expect(payload.length).toBe(MAX_AGENT_PAYLOAD_CHARS);
+    expect(payload.endsWith('[truncated]')).toBe(true);
   });
 });
 
@@ -317,6 +391,28 @@ describe('§2 the review document parses three verdicts', () => {
     );
     expect(reading.verdict).toBe('UNRECOGNISED');
     expect(reading.findings).toEqual([]);
+  });
+
+  /**
+   * The most economical honest refusal a reviewer can write, and until this
+   * case it was exercised by nothing: every document in this file carried a
+   * `findings` key, so reverting the acceptance changed no test result.
+   */
+  it('accepts an instrument failure that omits the findings key entirely', () => {
+    const reading = readReviewDocument('{"reviewVersion":1,"verdict":"INSTRUMENT_FAILURE"}');
+    expect(reading.verdict).toBe('INSTRUMENT_FAILURE');
+    expect(reading.findings).toEqual([]);
+  });
+
+  it('does not extend that leniency to a null list, or to the other two verdicts', () => {
+    expect(
+      readReviewDocument('{"reviewVersion":1,"verdict":"INSTRUMENT_FAILURE","findings":null}')
+        .verdict,
+    ).toBe('UNRECOGNISED');
+    expect(readReviewDocument('{"reviewVersion":1,"verdict":"PASS"}').verdict).toBe('UNRECOGNISED');
+    expect(readReviewDocument('{"reviewVersion":1,"verdict":"FINDINGS"}').verdict).toBe(
+      'UNRECOGNISED',
+    );
   });
 
   it('still refuses a verdict nobody defined', () => {
@@ -476,11 +572,13 @@ describe('§4 an instrument failure spends nothing and claims nothing', () => {
    * Everything in §1 calls `buildReviewPayload` with a path the test itself
    * chose, so all of it stays green if the production call site passes the
    * wrong one. The whole invariant rests on a single expression at
-   * `loop-step.ts:1720`, and swapping `authorisedWorktreePath` there for
-   * `state.repositoryRoot` reproduces the CAPTURE-003 incident inside the
-   * prompt while `authorised()` and the spawn `cwd` keep their correct values —
-   * measured, and nothing reddened. This reads the payload the reviewer was
-   * actually handed, off the recorded call.
+   * `runReviewStep`'s `payload:` argument, and swapping `authorisedWorktreePath`
+   * there for `state.repositoryRoot` reproduces the CAPTURE-003 incident inside
+   * the prompt while `authorised()` and the spawn `cwd` keep their correct
+   * values — measured, and nothing reddened. (No line number: the citation this
+   * replaces was already stale in the commit that wrote it, because the same
+   * commit grew the comment above that expression.) This reads the payload the
+   * reviewer was actually handed, off the recorded call.
    */
   it('hands the reviewer the authorised worktree path, not the repository root', async () => {
     const { started, current } = await atTheLastRound('RI-001-PAYLOAD');
