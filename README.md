@@ -97,12 +97,13 @@ merged to `main`, no milestone is planned after it, and nothing is open. What
 stands under [Not implemented yet](#not-implemented-yet) stays unimplemented on
 purpose, and that section is the answer to "why does it not do X", not a backlog.
 
-**Reopened twice since, narrowly, and closed again on 2026-09-10.** Both times
-for the same reason and under the rule stated three paragraphs down: a *fresh
-decision with its own reason*, and in both cases the reason was a defect
-**observed in real operation** driving another repository — not a residual
-somebody re-read. That distinction is the whole gate. A theoretical finding in a
-register is a finished entry; a failure a person watched happen twice is not.
+**Reopened three times since, narrowly. The first two closed again on
+2026-09-10; the third, opened 2026-09-12, is still open.** Each time for the
+same reason and under the rule stated three paragraphs down: a *fresh decision
+with its own reason*, and in each case the reason was a defect **observed in
+real operation** driving another repository — not a residual somebody re-read.
+That distinction is the whole gate. A theoretical finding in a register is a
+finished entry; a failure a person watched happen twice is not.
 
   - `#97` — a capability command's ending was collapsed into one refusal code
     whose name asserted the wrong one of its causes, and nothing durable was
@@ -112,10 +113,19 @@ register is a finished entry; a failure a person watched happen twice is not.
     escalated it, and an exhausted review budget was a **closed loop**: no
     number of operator continuations could finish the task. Observed on
     RESOLVER-V3-034R, 2026-09-10.
+  - `REVIEW-INSTRUMENT-001` — **open, and no `src/` change has been made.** A
+    reviewer whose mandatory CodeGraph preflight answered for a *different
+    repository* refused to read source, as it should — and then produced
+    ordinary findings anyway, sourced from handoff prose. They spent the review
+    budget and forced `HUMAN_DECISION_REQUIRED` on work no reviewer had read.
+    Observed on healthapp/CAPTURE-003, 2026-09-12. The read-only investigation,
+    the smallest measured repair boundary and what it deliberately excludes are
+    in `.agent-orchestrator/tasks/REVIEW-INSTRUMENT-001.md`.
 
-Neither was a hardening round, and both stayed inside the defect they named.
-What each deliberately did *not* fix is in its own register below, which is the
-same treatment every other residual gets.
+The first two were not hardening rounds, and both stayed inside the defect they
+named. What each deliberately did *not* fix is in its own register below, which
+is the same treatment every other residual gets. The third carries that
+exclusion list in its task file rather than here, because it has not been built.
 
 **Every register in this file headed "Carried forward, deliberately" is an
 accepted residual.** Each entry is a limitation that was measured, named and
