@@ -39,16 +39,16 @@
  * committing the operator's diff under AO's own commit controls — and performs
  * it only against an assessment that already said yes.
  *
- * It is **agent-free** by construction: nothing here imports an agent runner,
- * builds a payload, or has a seam that could carry one. The three optional
- * seams it does take — {@link OperatorRepairAssessmentInput.loadAttempts},
- * `observeClean` and `assessScope` — are a store read and two observations,
- * and production passes none of them.
+ * It is **agent-free** by construction, and the construction is narrow enough
+ * to state exactly: nothing here imports an agent runner or builds a payload.
  *
- * Not "starts no process": the observations run Git, which is a process, and an
- * injected seam is an arbitrary function. The claim that is true and is the one
- * the grant needs is narrower — no agent runner reaches this module, and the
- * production path starts no agent.
+ * Not "no seam could carry one", which an earlier draft of this said and the
+ * next paragraph then took back. The three optional seams it takes —
+ * {@link OperatorRepairAssessmentInput.loadAttempts}, `observeClean` and
+ * `assessScope` — are arbitrary functions, so a caller inside `src/` could pass
+ * anything; what is true is that production passes none of them, and that the
+ * production implementations behind them are a store read and two Git
+ * observations. Git is a process, so "starts no process" would be false too.
  *
  * What follows the adoption is the ordinary loop, in full. This module starts
  * no agent; the invocation that calls it goes on to re-verify and, if that
@@ -155,6 +155,17 @@ export interface OperatorRepairAllowed {
    * catch and would agree with itself.
    */
   readonly approvedPaths: readonly string[];
+  /**
+   * The base pin the scope verdict was measured against, proven present here.
+   *
+   * Carried rather than re-read at the commit so that the type says what the
+   * gate established. `TaskState.basePinnedCommit` is nullable, and the commit
+   * helper's is not; the alternative was `?? ''` at the call, which would
+   * commit first and only then fail the helper's own scope control on
+   * `diff '' <commit>` — a write followed by a refusal, the one ordering this
+   * module exists to avoid.
+   */
+  readonly basePinnedCommit: string;
 }
 
 export interface OperatorRepairRefused {
@@ -246,11 +257,19 @@ export async function assessOperatorRepair(
   });
   if (scope.verdict === 'VIOLATION') return refuse('REPAIR_OUT_OF_SCOPE');
   if (scope.verdict !== 'WITHIN_SCOPE') return refuse('SCOPE_INDETERMINATE');
+  // Belt and braces on a fact `WITHIN_SCOPE` already implies: `observeTaskDelta`
+  // answers `NO_BASE_PIN` -> `INDETERMINATE` for a task with no pin, so this is
+  // unreachable through the line above. It is written anyway because the commit
+  // below needs a `string`, and the honest way to get one is a gate that proves
+  // it rather than a coercion that invents it. Same refusal code, because it is
+  // the same fact: the scope of this repair could not be established.
+  if (state.basePinnedCommit === null) return refuse('SCOPE_INDETERMINATE');
 
   return Object.freeze({
     allowed: true as const,
     attempt,
     approvedPaths: scope.approvedPaths,
+    basePinnedCommit: state.basePinnedCommit,
   });
 }
 
@@ -276,7 +295,15 @@ export const OPERATOR_REPAIR_COMMIT_OUTCOMES = [
   /**
    * Nothing was recorded although the assessment saw a dirty tree.
    *
-   * Reachable when everything dirty is ignored — `add --all` stages none of it.
+   * The obvious explanation is the wrong one, and it was written here before
+   * being checked: "everything dirty is ignored" cannot produce this, because
+   * `WORKTREE_CLEANLINESS_ARGS` passes no `--ignored`, so an ignored-only tree
+   * reads *clean* at the assessment and answers `NOTHING_TO_ADOPT` long before
+   * a commit is attempted. What does produce it: a submodule that
+   * `--ignore-submodules=none` calls dirty while its gitlink is unchanged, the
+   * gitlink probe disagreeing with `status`, or the operator reverting their
+   * own edit between the assessment and the commit.
+   *
    * Its own outcome rather than a success with no commit, because a caller that
    * read this as adopted would move a task to `VERIFYING` over an unchanged
    * tree and re-learn the failure it already had.
@@ -288,7 +315,16 @@ export type OperatorRepairCommitOutcome = (typeof OPERATOR_REPAIR_COMMIT_OUTCOME
 
 export interface OperatorRepairCommitted {
   readonly outcome: 'ADOPTED';
-  /** The commit the repair now sits on. The subject the fresh verification will run against. */
+  /**
+   * The commit the repair now sits on, as `commitTaskWork` read it back.
+   *
+   * Reported, not consumed: the driver does not carry it into the state, and
+   * the fresh verification observes HEAD for itself rather than being told —
+   * which is the same rule every other entry into `VERIFYING` follows, and the
+   * reason none of them records a `currentCommit` either. It is here because a
+   * caller that adopted something is entitled to know what it adopted, and the
+   * tests assert on it.
+   */
   readonly commit: string;
 }
 
@@ -355,7 +391,14 @@ export async function commitOperatorRepair(
     // undo, so the value comes from the task's own two numbers.
     round: currentRound(state),
     approvedPaths: allowed.approvedPaths,
-    basePinnedCommit: state.basePinnedCommit ?? '',
+    // Not `?? ''`. An empty base pin would reach `commitTaskWork`, commit, and
+    // only then fail its own scope control on `diff '' <commit>` — a commit
+    // made and a refusal afterwards, which is the one ordering this module is
+    // built to avoid. It is unreachable today because a task with no base pin
+    // answers `SCOPE_INDETERMINATE` in the assessment above, so this is the
+    // sibling's explicit shape (`loop-step.ts` refuses on `=== null`) rather
+    // than a coercion that would turn a future reachable case into a write.
+    basePinnedCommit: allowed.basePinnedCommit,
   });
 
   switch (committed.outcome) {

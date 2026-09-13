@@ -2147,9 +2147,14 @@ describe('a failed verification is continued only on an explicit decision', () =
     expect(reload(root).state.state).not.toBe('BLOCKED_VERIFY');
   });
 
-  it('grants no review round and appends no finding', async () => {
+  it('grants no review round, through a run that really reaches review', async () => {
     const root = repoRoot();
-    blocked(root, { reviewRound: 1, maxReviewRounds: 2, grantedReviewRounds: 0 });
+    const before = blocked(root, {
+      reviewRound: 1,
+      maxReviewRounds: 2,
+      grantedReviewRounds: 0,
+      findingHistory: [DURABLE_FINDING],
+    });
     await recordedFailure(root);
 
     await runTask(
@@ -2166,7 +2171,13 @@ describe('a failed verification is continued only on an explicit decision', () =
     // The grant buys no round. A review that follows is the ordinary lifecycle
     // spending the budget the task already had, never one this decision added.
     expect(after.grantedReviewRounds).toBe(0);
-    expect(after.findingHistory).toEqual([]);
+    // Seeded rather than empty, and this is the difference from the version
+    // that stood here: starting at `[]` and asserting `[]` also passes for an
+    // implementation that clears the history, which a review named as a
+    // surviving mutant. The sibling case at the end of this block asserts the
+    // same property on a run stopped at the adoption; this one lets the loop
+    // run on into review, which is where a finding could actually be written.
+    expect(after.findingHistory).toEqual(before.state.findingHistory);
   });
 
   it('refuses when the worktree carries no repair, and spends nothing', async () => {
@@ -2492,6 +2503,55 @@ describe('a failed verification is continued only on an explicit decision', () =
     expect(after.grantedReviewRounds).toBe(before.state.grantedReviewRounds);
     expect(after.reviewRound).toBe(before.state.reviewRound);
   });
+
+/**
+   * A commit that landed but reached past the approved set does not become a
+   * verification, and the guard that stops it is measured here.
+   *
+   * A review found it unreached: in every other driver case the commit
+   * succeeds, and every refusal case stops earlier, in the assessment. So
+   * deleting `if (adopted.outcome !== 'ADOPTED') return stop(...)` compiled and
+   * broke no test — leaving the sentence it enforces, that a task can never
+   * enter `VERIFYING` claiming a repair that is not in the tree, unpinned at
+   * the one line that enforces it.
+   *
+   * The scenario is the real window: `commitTaskWork` stages with `add --all`
+   * and compares what landed against the approved set afterwards, so a path
+   * that appears between the assessment and the staging is committed and only
+   * then noticed. The commit is kept — it is evidence, and undoing it is not
+   * this build's business — but the task must not move.
+   */
+  it('does not enter VERIFYING when the commit reached past the approved paths', async () => {
+    const root = repoRoot();
+    blocked(root, { reviewRound: 1 });
+    await recordedFailure(root);
+    const scripted = scriptedGit(root, { writingPass: true, status: OK(' M src/work.ts') });
+
+    const run = await runTask(
+      request(root, { verifyOperatorRepair: true }),
+      deps(root, {
+        git: async (cwd, args) => {
+          // What the commit actually contains, read back after `add --all`: a
+          // second path the scope gate never approved.
+          if (args.includes('diff') && args.includes('--name-only')) {
+            return OK('src/work.ts\0src/elsewhere.ts\0');
+          }
+          return scripted(cwd, args);
+        },
+        verify: cappedVerify(0).runner,
+        agent: cappedAgent(agentCommandResult({ stdout: '' }), 0).runner,
+      }),
+    );
+
+    // Reported as itself, not folded into a generic refusal: an operator needs
+    // to know a commit exists.
+    expect(run.reasonCodes).toContain('COMMITTED_BEYOND_APPROVED_SCOPE');
+    expect(run.outcome).toBe('CONTINUATION_NOT_AUTHORISED');
+    // The task did not move, and the verification never ran.
+    expect(reload(root).state.state).toBe('BLOCKED_VERIFY');
+    expect(run.verifiedOperatorRepair).toBe(false);
+  });
+
 
   /**
    * The commit itself is fenced, not merely the state write that follows it.
@@ -3141,7 +3201,7 @@ describe('M2-06 — --continue-usage-limit moves a quota pause that nothing else
         deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
       );
 
-      // Three decisions, three flags, and none buys another. Every one of these
+      // Four decisions, four flags, and none buys another. Every one of these
       // states also records `reportedResetAt: null`, so the state term is the
       // only thing refusing them — which is exactly what has to be pinned.
       expect(run.outcome).toBe(state);

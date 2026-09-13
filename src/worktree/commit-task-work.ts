@@ -203,7 +203,7 @@ export interface CommitTaskWorkRequest {
    * involved (`verify/operator-repair.ts`), and it is a member of this
    * union rather than a second commit path so that the executable-driver
    * refusal, the approved-path control and the identity overrides are the same
-   * ones, not a copy of them. {@link commitMessageFor} is where the difference
+   * ones, not a copy of them. `commitMessageFor` below is where the difference
    * is visible, and it is deliberately visible: an operator repair may not
    * arrive in the log wearing a writing agent's message.
    */

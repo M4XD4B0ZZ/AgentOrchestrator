@@ -136,9 +136,11 @@ export const TRANSITION_TABLE: Readonly<Record<TaskStateName, readonly TaskState
     // verification without a change would just fail again" — was right about
     // its own premise and wrong about the conclusion. *Without a change* it
     // would fail again. The edge exists for the case where there **is** a
-    // change, and exactly one producer may take it:
-    // `verify/operator-repair.ts`, reached only from
-    // `run --attended --verify-operator-repair`, which proves before writing
+    // change, and exactly one producer may take it: the operator-repair branch
+    // of `run/run-driver.ts`, which is the `advanceTaskState` call that writes
+    // this transition. It is reached only from
+    // `run --attended --verify-operator-repair`, and only through
+    // `verify/operator-repair.ts`, which proves before writing
     // anything that HEAD is still the failed attempt's own subject commit, that
     // the worktree carries a repair, and that the repair is inside the task's
     // declared scope — then commits that repair. So the tree entering

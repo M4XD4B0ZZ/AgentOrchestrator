@@ -338,8 +338,10 @@ describe('the commit says an operator made it', () => {
    */
   it('writes a message that is not a writing agent’s, and never AO:REMEDIATE', async () => {
     const seen: string[] = [];
+    const vectors: (readonly string[])[] = [];
     const git = (async (_cwd: string, args: readonly string[]) => {
       seen.push(args.join(' '));
+      vectors.push([...args]);
       if (args.includes('status')) {
         return { outcome: 'OK' as const, exitCode: 0, stdout: ' M src/a.ts', stderr: '' };
       }
@@ -353,6 +355,7 @@ describe('the commit says an operator made it', () => {
       allowed: true,
       attempt: attempt(),
       approvedPaths: ['src/a.ts'],
+      basePinnedCommit: BASE,
     };
 
     // `reviewRound: 1` deliberately, and it is the whole point of the fixture.
@@ -375,9 +378,16 @@ describe('the commit says an operator made it', () => {
     expect(message).not.toContain('AO:TASK-001');
     expect(message).not.toContain('REMEDIATE');
     expect(message).not.toContain('IMPLEMENT');
-    // Still one shell-inert token: `-m` takes one argument.
+    // Still one shell-inert token: `-m` takes one argument. Asked of the
+    // message the CALL carried, not of a literal typed here — the previous
+    // version asserted `'OPERATOR-REPAIR:TASK-001:VERIFY:r1'.includes(' ')`,
+    // which is a claim about the test file and cannot fail for any
+    // implementation.
     expect(OPERATOR_REPAIR_COMMIT_PHASE).toBe('OPERATOR-REPAIR');
-    expect('OPERATOR-REPAIR:TASK-001:VERIFY:r1'.includes(' ')).toBe(false);
+    const commitArgs = vectors.find((args) => args.includes('commit')) ?? [];
+    const subject = commitArgs[commitArgs.indexOf('-m') + 1] ?? '';
+    expect(subject).toBe('OPERATOR-REPAIR:TASK-001:VERIFY:r1');
+    expect(subject.includes(' ')).toBe(false);
   });
 
   /**
@@ -403,6 +413,7 @@ describe('the commit says an operator made it', () => {
       allowed: true,
       attempt: failed,
       approvedPaths: ['src/a.ts'],
+      basePinnedCommit: BASE,
     });
 
     expect(result.outcome).toBe('ADOPTED');
@@ -410,6 +421,58 @@ describe('the commit says an operator made it', () => {
     expect(result.commit).toBe(LATER);
     expect(result.commit).not.toBe(failed.subjectCommit);
   });
+
+/**
+   * A commit that landed but reached beyond what the gate approved is NOT an
+   * adoption, and this is the case that says so.
+   *
+   * A review found the arm unpinned and named the sharp mutant: rewriting
+   * `case 'COMMITTED_BEYOND_APPROVED_SCOPE': return ADOPTED` killed no test,
+   * and that arm is the only thing between a commit containing unapproved
+   * paths and the task entering `VERIFYING`.
+   *
+   * The window it exists for is real rather than theoretical. `commitTaskWork`
+   * stages with `add --all` and compares what landed against the approved set
+   * *afterwards*, so a path appearing between the assessment and the staging —
+   * a background formatter, an editor writing a sibling file, the operator
+   * carrying on working — is committed and then noticed. The commit is kept as
+   * evidence and deliberately not undone; what must not happen is the task
+   * treating it as the operator's approved repair and verifying on it.
+   */
+  it('refuses a commit that reached beyond the approved paths', async () => {
+    const git = (async (_cwd: string, args: readonly string[]) => {
+      // Dirty, so the commit path runs at all.
+      if (args.includes('status')) {
+        return { outcome: 'OK' as const, exitCode: 0, stdout: ' M src/a.ts', stderr: '' };
+      }
+      // What the commit actually contains: a second path nobody approved.
+      if (args.includes('diff') && args.includes('--name-only')) {
+        return {
+          outcome: 'OK' as const,
+          exitCode: 0,
+          stdout: 'src/a.ts\0src/elsewhere.ts\0',
+          stderr: '',
+        };
+      }
+      if (args[0] === 'rev-parse') {
+        return { outcome: 'OK' as const, exitCode: 0, stdout: LATER, stderr: '' };
+      }
+      return { outcome: 'OK' as const, exitCode: 0, stdout: '', stderr: '' };
+    }) as unknown as GitRunner;
+
+    const result = await commitOperatorRepair(git, WORKTREE, blockedState(), {
+      allowed: true,
+      attempt: attempt(),
+      approvedPaths: ['src/a.ts'],
+      basePinnedCommit: BASE,
+    });
+
+    expect(result.outcome).toBe('COMMITTED_BEYOND_APPROVED_SCOPE');
+    // The distinction that matters to the driver: anything but `ADOPTED` stops
+    // the transition, so the task stays where it was and a person looks.
+    expect(result.outcome).not.toBe('ADOPTED');
+  });
+
 
   it('reports nothing recorded rather than a success when the commit staged nothing', async () => {
     const git = (async (_cwd: string, args: readonly string[]) => {
@@ -423,6 +486,7 @@ describe('the commit says an operator made it', () => {
       allowed: true,
       attempt: attempt(),
       approvedPaths: [],
+      basePinnedCommit: BASE,
     });
 
     // Never `ADOPTED` with no commit: a caller reading that would move the task

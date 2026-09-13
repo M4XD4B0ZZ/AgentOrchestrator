@@ -815,7 +815,7 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
           remediateVerifyFailure: request.remediateVerifyFailure,
           continueHumanDecision: request.continueHumanDecision,
           continueUsageLimit: request.continueUsageLimit,
-      verifyOperatorRepair: request.verifyOperatorRepair,
+          verifyOperatorRepair: request.verifyOperatorRepair,
         },
       });
       return lifecycleResult();

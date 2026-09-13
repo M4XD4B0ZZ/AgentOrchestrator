@@ -273,7 +273,9 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       '  invocation. `run --task <id>` prints whether a reset time was recorded.',
     BLOCKED_VERIFY:
       'The repository\'s verification commands failed and were not retried. Two decisions\n' +
-      '  continue it, and neither is an automatic retry. If YOU have already repaired the\n' +
+      '  continue it and a third ends it, and none of them is an automatic retry. The\n' +
+      '  third is `resolve`, which ends the task rather than continuing it; `attention`\n' +
+      '  names all three. If YOU have already repaired the\n' +
       '  tree, re-run with --attended and --verify-operator-repair: that commits your own\n' +
       '  repair and verifies again without asking any agent to repair anything, and is\n' +
       '  refused unless HEAD is still the failed attempt\'s own commit and the repair is in\n' +

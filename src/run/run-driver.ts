@@ -1365,16 +1365,34 @@ export async function runTask(
     // operator-only edge — and the whole content of this grant is that
     // remediation is not what is wanted: the repair already exists.
     //
-    // Placed here — after the lease, the reconciliation, the authorised
-    // worktree and the capability, before any write — because it performs an
-    // effect on the repository. Every gate that decides whether this run may
-    // act has already run. Nothing below it is reached on this path.
+    // Placed here — after the lease, the reconciliation and the authorised
+    // worktree, before any write — because it performs an effect on the
+    // repository. Every gate that decides whether THIS run may act on THIS
+    // repository has already run, and nothing below it is reached on this path.
+    //
+    // Not "every gate": the MCP capability gate lives inside `runLoopStep` and
+    // is never reached from `BLOCKED_VERIFY`, and step 5a above is a
+    // provisioning attempt that decides nothing. Neither is a gap here — both
+    // exist to bound what an AGENT may be started with, and this branch starts
+    // none — but the earlier wording claimed a completeness it did not have.
     //
     // The order inside is the guarantee: assess, then commit, then write. The
     // assessment observes and writes nothing, so a refusal costs the operator
     // nothing and leaves the task exactly where it was; and the state write
     // happens only after a commit that reported an object name, so a task can
     // never enter `VERIFYING` claiming a repair that is not in the tree.
+    //
+    // The mirror of that guarantee, stated because it is the case an operator
+    // will actually meet. Commit-then-write is the only honest order, so there
+    // is a window where the commit LANDED and the task did not move: the state
+    // write losing the lease or hitting a conflict, and a commit that reached
+    // past the approved paths. Both leave HEAD off the failed attempt's
+    // `subjectCommit` with the record still `BLOCKED_VERIFY` — so this same
+    // grant then answers `HEAD_MOVED`, correctly, and the way on is `resolve`
+    // or a hand-made `git reset` and a fresh attempt. That is worse than a
+    // refusal and better than either alternative: undoing a commit in someone
+    // else's repository is not this build's business, and writing the state
+    // first would let a task claim a repair no commit carries.
     if (verifyingOperatorRepair) {
       // Fenced, exactly as both sibling commit sites are. `leasedGit`'s own
       // header states the rule this obeys: the reads that decide *whether* to

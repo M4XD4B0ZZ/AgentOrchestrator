@@ -33,9 +33,17 @@
  *  2. **that the repository is at fault.** `UNAVAILABLE` is in this record's
  *     vocabulary precisely because "the build is broken" and "we could not run
  *     the build" are different sentences;
- *  3. **that remediation is authorised.** Authority to continue a blocked task
- *     comes from an operator, through `run --remediate-verify-failure`, and from
- *     nowhere else. This record is read *after* that decision, never as it;
+ *  3. **that a continuation is authorised.** Authority to continue a blocked
+ *     task comes from an operator, through `run --remediate-verify-failure` or
+ *     `run --verify-operator-repair`, and from nowhere else. Neither decision is
+ *     taken by reading this.
+ *
+ *     The second of those does read it, and the distinction is worth keeping
+ *     straight because this record now gates a repository write. It is asked
+ *     whether the adoption is *applicable* — is there a failure at all, is the
+ *     latest one a `FAILED`, and is HEAD still that attempt's own subject — and
+ *     it can only ever narrow what the operator asked for. It never supplies
+ *     the asking;
  *  4. **that a retry is authorised.** `verify/run-verification.ts` runs one
  *     process per phase and never a second. Writing an attempt down does not
  *     make another one permissible;

@@ -8542,11 +8542,14 @@ be allowed to sound alike.
 ### The three decisions worth recording
 
 **A selector may remove a dead object, and may still not depart from a record.**
-The permission that moved is not the same kind of thing as the three beside it.
-`--remediate-verify-failure`, `--continue-human-decision` and
+The permission that moved is not the same kind of thing as the others beside
+it. `--remediate-verify-failure`, `--continue-human-decision` and
 `--continue-usage-limit` each overrule something durable — a verification the
 record calls failed, a decision reserved for a human, a quota decision only a
-human may spend — and they remain refused on every admission. Stale-lease
+human may spend — and they remain refused on every admission. There were three
+of them at M4; `--verify-operator-repair` later became a fourth of the same
+kind, refused on every admission for the same reason, which is why this
+paragraph counts by kind rather than by number. Stale-lease
 recovery overrules nothing: `SAFE_TO_RECOVER` is the only verdict that reaches
 the removal, and the processes the launch register names are re-probed *at* the
 removal. There is deliberately no option for it, because self-recovery an
