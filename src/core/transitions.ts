@@ -215,6 +215,37 @@ export function listAllTransitions(): readonly (readonly [TaskStateName, TaskSta
   return pairs;
 }
 
+/**
+ * Edges a **resume** may never take, however the table declares them.
+ *
+ * The table says what is *possible*. A resume is one particular producer of a
+ * transition — it takes the phase a task's own `resumeFrom` names — and it is
+ * not the only one. `BLOCKED_VERIFY -> VERIFYING` exists for
+ * `verify/operator-repair.ts`, which proves that HEAD is still the failed
+ * attempt's subject commit, that the worktree carries a repair and that the
+ * repair is in scope, and then commits it. None of that is evidence a resume
+ * has or could get.
+ *
+ * Without this list the edge leaks: `core/resume-policy.ts` derives a blocking
+ * state's allowed resume phases *from the table*, so declaring the edge silently
+ * made `VERIFY` a resume phase for `BLOCKED_VERIFY` — and a resume point naming
+ * it would have re-entered verification with no proof of anything. Two pinned
+ * tests caught it, which is why they are pinned.
+ *
+ * Kept here rather than in the resume policy because the property is a fact
+ * about the edge, not about resumes: anything else that later derives producers
+ * from this table needs the same exclusion, and should read it from one place.
+ */
+export const OPERATOR_ONLY_EDGES: Readonly<Partial<Record<TaskStateName, readonly TaskStateName[]>>> =
+  Object.freeze({
+    BLOCKED_VERIFY: Object.freeze<TaskStateName[]>(['VERIFYING']),
+  });
+
+/** Whether this declared edge is one only an explicit operator act may take. */
+export function isOperatorOnlyEdge(from: TaskStateName, to: TaskStateName): boolean {
+  return (OPERATOR_ONLY_EDGES[from] ?? []).includes(to);
+}
+
 export function canTransition(from: TaskStateName, to: TaskStateName): boolean {
   return TRANSITION_TABLE[from].includes(to);
 }

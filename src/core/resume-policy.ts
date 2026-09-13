@@ -49,7 +49,7 @@ import {
   type ResumePhase,
   type TaskStateName,
 } from './states.js';
-import { canTransition } from './transitions.js';
+import { canTransition, isOperatorOnlyEdge } from './transitions.js';
 import { InvalidResumePointError } from './errors.js';
 import {
   RESUME_POINT_DISPLAY_PATTERN,
@@ -111,9 +111,24 @@ export interface BlockedStatePolicy {
   readonly rationale: string;
 }
 
-/** Phases whose work state is a declared successor of `state`. */
+/**
+ * Phases whose work state is a declared successor of `state` **and reachable by
+ * a resume**.
+ *
+ * The second half is not decoration. A resume takes the phase the task's own
+ * `resumeFrom` names, on the evidence the record already carries; an edge that
+ * exists for an operator act which proves something else entirely is not one a
+ * resume may take. `BLOCKED_VERIFY -> VERIFYING` is exactly that, and without
+ * the exclusion declaring it made `VERIFY` a resume phase here — so a resume
+ * point naming it would have re-entered verification having proven nothing.
+ * `core/transitions.ts` owns the list, because the property belongs to the edge.
+ */
 function directResumePhases(state: BlockingState): readonly ResumePhase[] {
-  return RESUME_PHASES.filter((phase) => canTransition(state, PHASE_TO_STATE[phase]));
+  return RESUME_PHASES.filter(
+    (phase) =>
+      canTransition(state, PHASE_TO_STATE[phase]) &&
+      !isOperatorOnlyEdge(state, PHASE_TO_STATE[phase]),
+  );
 }
 
 /** Phases whose work state can enter `state`, i.e. could have been interrupted. */

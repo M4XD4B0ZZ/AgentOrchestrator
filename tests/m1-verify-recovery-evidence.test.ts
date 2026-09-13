@@ -57,10 +57,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { agentDiagnostics, DIAGNOSTIC_EXCERPT_LIMIT } from '../src/agent/agent-outcome.js';
 import { isLineSafe, lineSafe } from '../src/core/line-safe-text.js';
 import type { TaskStateInput } from '../src/core/task-state.js';
-import { TRANSITION_TABLE } from '../src/core/transitions.js';
+import { TRANSITION_TABLE, isOperatorOnlyEdge } from '../src/core/transitions.js';
 import { getStateKind } from '../src/core/states.js';
 import {
-  getBlockedStatePolicy,
+  allowedResumePhases, getBlockedStatePolicy,
   isAutomaticResumeEligible,
 } from '../src/core/resume-policy.js';
 import { buildVerificationRemediationPayload } from '../src/loop/findings.js';
@@ -1134,23 +1134,41 @@ describe('a remediating writer is briefed from the record, or not at all', () =>
 /* ═══════ F — the contract this fix did not change, pinned as unchanged ═══ */
 
 describe('the declared contract is unchanged; only the executor caught up', () => {
-  it('still declares exactly one productive edge out of BLOCKED_VERIFY', () => {
+  /**
+   * This case asserted `not.toContain('VERIFYING')` and said "re-running the
+   * same verification without a change would just fail again". The premise was
+   * right and the conclusion outlived it: the operator-repair grant re-runs it
+   * over a change, proven before anything is committed.
+   *
+   * What the case now pins is the thing that actually mattered and is still
+   * true — **no productive edge is reachable without an explicit operator act**
+   * — and it pins it through the predicate rather than by counting names, which
+   * is what the old spelling could not do.
+   */
+  it('declares no productive edge out of BLOCKED_VERIFY that a resume may take', () => {
     expect(TRANSITION_TABLE.BLOCKED_VERIFY).toEqual([
+      // Only `verify/operator-repair.ts` takes this, and only after proving
+      // HEAD is still the failed attempt's subject, that the worktree carries a
+      // repair, and that the repair is in scope. Declared operator-only, so it
+      // is excluded from the resume policy's derivation.
+      'VERIFYING',
       'REMEDIATING',
       'HUMAN_DECISION_REQUIRED',
       'ABORTED',
-      // M8's fourth successor, and it does not widen what the loop may do:
+      // M8's successor, and it does not widen what the loop may do:
       // `OPERATOR_RESOLVED` is terminal and only an operator's own command
-      // writes it. The claim in this case's name is unchanged — exactly one
-      // successor is productive, and it is still `REMEDIATING`.
+      // writes it.
       'OPERATOR_RESOLVED',
     ]);
     expect(
       TRANSITION_TABLE.BLOCKED_VERIFY.filter((state) => getStateKind(state) === 'REGULAR'),
-    ).toEqual(['REMEDIATING']);
-    // Emphatically not `VERIFYING`. Re-running the same verification without a
-    // change would just fail again, and this fix does not add a retry.
-    expect(TRANSITION_TABLE.BLOCKED_VERIFY).not.toContain('VERIFYING');
+    ).toEqual(['VERIFYING', 'REMEDIATING']);
+    // The load-bearing half. `VERIFYING` is declared and is operator-only, so
+    // the resume policy still offers exactly one phase — a resume point naming
+    // VERIFY would otherwise have re-entered verification having proven nothing.
+    expect(isOperatorOnlyEdge('BLOCKED_VERIFY', 'VERIFYING')).toBe(true);
+    expect(isOperatorOnlyEdge('BLOCKED_VERIFY', 'REMEDIATING')).toBe(false);
+    expect([...allowedResumePhases('BLOCKED_VERIFY')]).toEqual(['REMEDIATE']);
   });
 
   it('keeps BLOCKED_VERIFY resumable, human-decided and never automatic', () => {
