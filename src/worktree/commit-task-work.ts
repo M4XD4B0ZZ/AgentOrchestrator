@@ -195,8 +195,19 @@ export type CommitTaskWorkResult =
 export interface CommitTaskWorkRequest {
   /** The task whose work this is. Repository-authored, so it is checked, not trusted. */
   readonly taskId: string;
-  /** Which writing pass produced it. */
-  readonly phase: 'IMPLEMENT' | 'REMEDIATE';
+  /**
+   * Which pass produced it.
+   *
+   * The first two are a writing agent's. `OPERATOR-REPAIR` is not — it is the
+   * operator's own repair of a failed verification, adopted with no agent
+   * involved (`verify/operator-repair.ts`), and it is a member of this
+   * union rather than a second commit path so that the executable-driver
+   * refusal, the approved-path control and the identity overrides are the same
+   * ones, not a copy of them. `commitMessageFor` below is where the difference
+   * is visible, and it is deliberately visible: an operator repair may not
+   * arrive in the log wearing a writing agent's message.
+   */
+  readonly phase: 'IMPLEMENT' | 'REMEDIATE' | 'OPERATOR-REPAIR';
   /** The review round it belongs to. */
   readonly round: number;
   /**
@@ -310,6 +321,15 @@ function pathSet(paths: readonly string[]): string[] {
  * the seam.
  */
 function commitMessageFor(request: CommitTaskWorkRequest): string {
+  // The `AO:` prefix means "a writing agent this orchestrator ran produced
+  // this". An operator repair is the one commit this module makes that no agent
+  // produced, so it does not get that prefix — a reader of `git log --oneline`
+  // can tell the two apart at the first character, without knowing the
+  // vocabulary. Still one shell-inert token, because `-m` takes one argument.
+  if (request.phase === 'OPERATOR-REPAIR') {
+    return `OPERATOR-REPAIR:${request.taskId}:VERIFY:r${request.round}`;
+  }
+
   return `AO:${request.taskId}:${request.phase}:r${request.round}`;
 }
 
@@ -375,7 +395,15 @@ export async function commitTaskWork(
   if (committed.outcome !== 'OK') {
     // Git says "nothing to commit" with exit 1. The effect gate above has
     // already answered that question, so reaching it here means the tree was
-    // dirty with something `add --all` does not stage — an ignored file, say.
+    // dirty with something `add --all` does not stage.
+    //
+    // Not "an ignored file, say", which stood here and is wrong:
+    // `WORKTREE_CLEANLINESS_ARGS` passes no `--ignored`, so an ignored-only tree
+    // reads clean at the gate above and returns before this line. What does
+    // reach it is a submodule `--ignore-submodules=none` calls dirty while its
+    // gitlink is unchanged, the gitlink probe disagreeing with `status`, or the
+    // tree changing back between the two reads.
+    //
     // Reported as the honest "nothing was recorded" rather than as a failure.
     const after = await git(worktreePath, [...WORKTREE_CLEANLINESS_ARGS, '-z']);
     if (after.outcome === 'OK' && committed.exitCode === 1) {

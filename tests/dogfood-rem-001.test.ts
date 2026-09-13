@@ -186,6 +186,7 @@ function runResultWithDenials(denials: { count: number; tools: readonly string[]
     capabilityProvision: null,
     reasonCodes: Object.freeze([]),
     remediatedVerifyFailure: false,
+    verifiedOperatorRepair: false,
     continuedUsageLimit: false,
     usageLimitContinuation: null,
     continuedHumanDecision: false,

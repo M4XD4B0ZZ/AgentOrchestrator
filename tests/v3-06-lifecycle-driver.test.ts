@@ -75,7 +75,7 @@ import {
 import { loadTaskState, saveTaskState } from '../src/state/state-store.js';
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
 import { leaseFor, releaseTestLeases } from './helpers/lease.js';
-import { removeRepoFixtures } from './helpers/repo-fixtures.js';
+import { removeRepoFixtures, writeRepoFile, git } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces } from './helpers/worktree-fixtures.js';
 import {
   e2eProfile,
@@ -97,6 +97,9 @@ import {
   STALE_RECOVERY_SENTENCES,
 } from '../src/cli/render-lease.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
+import { verificationAttemptFrom } from '../src/verify/verification-attempt.js';
+import { recordVerificationAttempt } from '../src/verify/verification-attempt-store.js';
+import { verificationProfileDigest } from '../src/verify/verification-profile.js';
 import { passingReview } from './fixtures.js';
 
 const TASK_ID = 'V3-06';
@@ -478,6 +481,7 @@ describe('a quota pause stops the run rather than being waited out', () => {
       maxSteps: null,
       maxInvocations: null,
       remediateVerifyFailure: null,
+      verifyOperatorRepair: null,
       continueHumanDecision: null,
       // Added by M2 slice 6. It is an operator *decision*, not a wait: the
       // driver forwards it and `run-driver.ts` refuses it for any block that
@@ -1002,5 +1006,158 @@ describe('a live owner is refused before recovery is even attempted', () => {
     expect(result.recovery).toBeNull();
     expectNothingExecuted(scene);
     if (held.ok) releaseRepositoryExecutionLease(held.evidence);
+  });
+});
+
+/* ════════ 5. the operator's own repair, end to end against real Git ═══════ */
+
+describe('an operator repair is adopted through the lifecycle, with real Git', () => {
+  /**
+   * Everything above this point drives the operator-repair grant through the
+   * run driver with a scripted Git. That is the right instrument for the
+   * refusals — a synthetic root can be put into states a real repository
+   * cannot — and the wrong one for the two claims that are about *effects*:
+   *
+   *  - the commit is real, lands in the target repository's history, and says
+   *    in its message that no writer made it;
+   *  - the grant is spent once per **lifecycle**, not once per driver run.
+   *
+   * The second one needed measuring rather than assuming. `runTask`'s own
+   * `operatorRepairSpent` guard turned out not to be what ends the cycle inside
+   * one driver run — deleting it changes nothing, because the loop stops at the
+   * block anyway, and the same is true of the sibling `verifyRemediationSpent`.
+   * The ledger that is load-bearing is `driveLifecycle`'s, across the
+   * invocations `--max-invocations` buys, and that is what this measures.
+   */
+  async function blockedOnRealVerification(): Promise<{
+    readonly scene: Scenario;
+    readonly worktree: string;
+    readonly failedAt: string;
+  }> {
+    const scene = await scenario({
+      stateOverrides: {
+        state: 'BLOCKED_VERIFY',
+        blockedAgent: null,
+        resumeFrom: { phase: 'REMEDIATE', round: 1 },
+        currentCommit: null,
+        worktreeCleanAtCheckpoint: false,
+        reviewRound: 1,
+      },
+    });
+    const worktree = scene.started.workspace.worktreePath;
+    const failedAt = git(worktree, ['rev-parse', 'HEAD']).trim();
+
+    // The evidence the grant is about: a real attempt record naming the real
+    // HEAD, so the `HEAD_MOVED` conjunct is satisfied by a measurement rather
+    // than by a stub.
+    const attempt = verificationAttemptFrom(
+      {
+        verdict: 'FAILED',
+        stoppedAt: 'VERIFY',
+        phases: [
+          {
+            phase: 'VERIFY',
+            outcome: 'RAN',
+            exitCode: 1,
+            signal: null,
+            outputTruncated: false,
+            failureCode: null,
+            errnoCode: null,
+            durationMs: 5,
+          },
+        ],
+        diagnostics: { stdoutExcerpt: '', stderrExcerpt: '', trusted: false as const },
+      },
+      {
+        attemptedAt: '2026-09-13T09:00:00.000Z',
+        subjectCommit: failedAt,
+        profileDigest: verificationProfileDigest({
+          phases: [{ phase: 'VERIFY' as const, command: ['npm', 'run', 'verify'] }],
+        }),
+      },
+    );
+    const written = await recordVerificationAttempt({
+      repositoryRoot: scene.started.repository.root,
+      taskId: TASK_ID,
+      attempt: attempt!,
+      leaseHolds: () => true,
+      checkIgnored: async () => 'IGNORED',
+    });
+    expect(written.recorded).toBe(true);
+
+    // The operator's own repair: a real edit, inside the scope the profile
+    // declares, left uncommitted exactly as a person would leave it.
+    writeRepoFile(worktree, 'src/delivered.ts', 'export const delivered = true; // repaired\n');
+
+    return { scene, worktree, failedAt };
+  }
+
+  it('commits the repair itself and says no writer made it', async () => {
+    const { scene, worktree, failedAt } = await blockedOnRealVerification();
+
+    const result = await driveLifecycle(
+      scene.request({ verifyOperatorRepair: true, maxSteps: 2 }),
+      scene.deps(),
+    );
+
+    const head = git(worktree, ['rev-parse', 'HEAD']).trim();
+    // A real commit, in the real repository.
+    expect(head).not.toBe(failedAt);
+    expect(git(worktree, ['rev-parse', `${head}^`]).trim()).toBe(failedAt);
+
+    const subject = git(worktree, ['log', '-1', '--pretty=%s']).trim();
+    // The identity is the whole of the honesty claim: it names the adoption,
+    // and it does not use either phase that means "an agent wrote this".
+    expect(subject).toBe(`OPERATOR-REPAIR:${TASK_ID}:VERIFY:r1`);
+    expect(subject).not.toContain('REMEDIATE');
+    expect(subject).not.toContain('IMPLEMENT');
+    expect(subject.startsWith('AO:')).toBe(false);
+
+    // And the repair is what landed.
+    expect(git(worktree, ['show', '--pretty=format:', '--name-only', head])).toContain(
+      'src/delivered.ts',
+    );
+    // No writing agent, anywhere in the invocation.
+    expect(scene.agent.calls.filter((call) => call.agent === 'claude')).toEqual([]);
+    expect(result.outcome).not.toBe('BLOCKED_VERIFY');
+  });
+
+  /**
+   * One commit, however many passes the budget buys — and an honest note about
+   * what is holding that up.
+   *
+   * Two invocations are permitted and the gate keeps failing, so the run really
+   * does return to `BLOCKED_VERIFY` with the flag still on the request. What
+   * this measures is the outcome: exactly one `OPERATOR-REPAIR` commit reaches
+   * the repository.
+   *
+   * It does **not** isolate the `operatorRepairSpent` ledgers, and saying so is
+   * better than implying otherwise. Deleting either of them — `runTask`'s or
+   * `driveLifecycle`'s — leaves this passing, because by then the predicate
+   * itself refuses: the adoption committed the repair, so the worktree is clean
+   * and `NOTHING_TO_ADOPT` answers a second attempt. The same mutant survives
+   * the sibling `verifyRemediationSpent`'s own "buys exactly one departure"
+   * case, so the ledgers are defence-in-depth for both grants rather than the
+   * thing that ends the cycle, and no test in this repository currently
+   * distinguishes them. Reaching a second adoption needs the tree dirtied again
+   * between passes by something outside the run.
+   *
+   * What IS pinned here is the property an operator cares about: one decision,
+   * one commit.
+   */
+  it('adopts once even when the invocation budget allows a second pass', async () => {
+    const { scene, worktree } = await blockedOnRealVerification();
+
+    await driveLifecycle(
+      scene.request({ verifyOperatorRepair: true, maxInvocations: 2, maxSteps: 4 }),
+      // A gate that always refuses, so the task returns to the block and the
+      // second invocation starts from exactly where the first departed.
+      { ...scene.deps(), verify: recordedVerify(() => ({ exitCode: 1 })).runner },
+    );
+
+    const adoptions = git(worktree, ['log', '--pretty=%s'])
+      .split('\n')
+      .filter((line) => line.startsWith('OPERATOR-REPAIR:'));
+    expect(adoptions.length).toBe(1);
   });
 });

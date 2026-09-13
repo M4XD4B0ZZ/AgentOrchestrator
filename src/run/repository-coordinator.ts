@@ -641,19 +641,22 @@ function admit(
         // The grant, and only this one. `run --attended` means an operator
         // started this foreground process and can stop it, and that is exactly
         // what is true here. The grants that authorise a *destructive departure
-        // from the record* — verify remediation and continuing a human decision,
-        // and beside them the one-use quota decision — are not offered by the
-        // command that reaches this and are hard-refused here, so a selector can
-        // never become the subject of one.
+        // from the record* — verify remediation, adopting an operator's own
+        // repair, and continuing a human decision, and beside them the one-use
+        // quota decision — are not offered by the command that reaches this and
+        // are hard-refused here, so a selector can never become the subject of
+        // one. Four now, and the list is kept complete because the refusals it
+        // describes are the four `false`s written immediately below it.
         continuationGrant: 'ATTENDED',
         remediateVerifyFailure: false,
+        verifyOperatorRepair: false,
         continueHumanDecision: false,
         continueUsageLimit: false,
         // Stale-lease recovery is the one that changed, and it is a
         // product-contract decision rather than a widening of the paragraph
         // above (`L-M3-F-1`, closed here).
         //
-        // The three refusals beside it share a shape this one does not have:
+        // The four refusals beside it share a shape this one does not have:
         // each of them *departs from what the record says* — it remediates a
         // verification the record calls failed, continues a decision the record
         // reserved for a human, or spends a quota decision only a human may

@@ -2933,6 +2933,8 @@ describe('positive reconciliation is applied only where it is forced', () => {
 import { beforeEach, vi } from 'vitest';
 import { Command } from 'commander';
 
+import { SILENT_NOTIFIER } from './helpers/silent-notifier.js';
+
 import { registerBlockCommand, type BlockCommandSeams } from '../src/cli/block-command.js';
 import { BLOCK_OUTCOME_SENTENCES, BLOCK_STOP_SENTENCES } from '../src/cli/render-block-run.js';
 import {
@@ -2976,7 +2978,8 @@ afterEach(() => {
 async function invokeBlock(args: readonly string[], seams: BlockCommandSeams = {}): Promise<void> {
   const program = new Command();
   program.exitOverride();
-  registerBlockCommand(program, seams);
+  // Never the real notifier — see `helpers/silent-notifier.ts`.
+  registerBlockCommand(program, { notifier: SILENT_NOTIFIER, ...seams });
   await program.parseAsync(['block', ...args], { from: 'user' });
 }
 

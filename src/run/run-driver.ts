@@ -90,6 +90,7 @@ import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import {
   mayContinueHumanDecision,
   mayContinueUsageLimit,
+  mayVerifyOperatorRepair,
   mayRemediateVerifyFailure,
   permitsContinuation,
   type InvocationGrant,
@@ -105,6 +106,8 @@ import {
   type UsageLimitContinuationReading,
 } from '../core/usage-limit-continuation.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
+import { assessOperatorRepair, commitOperatorRepair } from '../verify/operator-repair.js';
+import { leasedGit } from '../loop/leased-spawns.js';
 import {
   isLoopDrivenState,
   runLoopStep,
@@ -352,6 +355,14 @@ export interface RunResult {
    */
   readonly remediatedVerifyFailure: boolean;
   /**
+   * Whether this call spent the operator's `--verify-operator-repair` departure.
+   *
+   * Its own field beside `remediatedVerifyFailure`, never folded into it: the
+   * two are different acts with different evidence, and a caller that could not
+   * tell them apart could not tell whether an agent ran.
+   */
+  readonly verifiedOperatorRepair: boolean;
+  /**
    * What this run did about a capability the repository requires in the task's
    * worktree, or `null` when it never reached the point of asking.
    *
@@ -469,6 +480,34 @@ export interface RunRequest {
    * tasks.
    */
   readonly remediateVerifyFailure?: boolean;
+  /**
+   * Whether the operator asked, on this invocation, to adopt their **own**
+   * repair of a failed verification and verify again, without asking any agent
+   * to repair anything. The adoption starts no writer; the loop that follows it
+   * is the ordinary one and may reach the reviewer.
+   *
+   * A different decision from `remediateVerifyFailure`, not a wider spelling of
+   * it, and the difference is who does the work. That field hands the recorded
+   * failure to a writing agent. This one says the repair is already in the
+   * worktree and the operator made it.
+   *
+   * Measured on healthapp/CAPTURE-004, which is why it exists: verification
+   * failed on a formatter check, the repair was three characters, and neither
+   * existing door fitted. Committing the repair first moved HEAD off
+   * `attempt.subjectCommit`, so the stored failure stopped being evidence about
+   * the tree and the remediation brief correctly refused it. Leaving it
+   * uncommitted meant a writing agent — which had no shell, could not run the
+   * formatter, did not recognise an already-correct diff, and spent its budget
+   * parking the task.
+   *
+   * It is conjoined with `mayVerifyOperatorRepair(continuationGrant)`, so it does
+   * nothing without `ATTENDED`, and it is spent after one use — see
+   * `operatorRepairSpent`. Every evidential condition is proven in
+   * `verify/operator-repair.ts` before anything is committed.
+   *
+   * Defaulting is deliberate: absent means no.
+   */
+  readonly verifyOperatorRepair?: boolean;
   /**
    * Whether the operator asked, on this invocation, to continue a
    * `HUMAN_DECISION_REQUIRED` task from the resume point it recorded.
@@ -689,6 +728,7 @@ function runResult(
     resume: null,
     lastStep: null,
     remediatedVerifyFailure: false,
+    verifiedOperatorRepair: false,
     continuedHumanDecision: false,
     continuedUsageLimit: false,
     usageLimitContinuation: null,
@@ -773,6 +813,15 @@ export async function runTask(
    */
   let verifyRemediationSpent = false;
   /**
+   * Whether this call has already taken the operator's one adoption.
+   *
+   * Its own local for the reason its siblings have their own: two decisions,
+   * two ledgers. A shared one would let a task that used its remediation also
+   * lose its adoption, or the reverse. Never persisted — it is a fact about one
+   * call.
+   */
+  let operatorRepairSpent = false;
+  /**
    * Whether this call has already taken the operator's one departure from
    * `HUMAN_DECISION_REQUIRED`.
    *
@@ -821,6 +870,7 @@ export async function runTask(
       taskId,
       permissionDenials,
       remediatedVerifyFailure: verifyRemediationSpent,
+      verifiedOperatorRepair: operatorRepairSpent,
       continuedHumanDecision: humanDecisionContinuationSpent,
       continuedUsageLimit: usageLimitContinuationSpent,
       capabilityProvision,
@@ -1053,11 +1103,51 @@ export async function runTask(
       state.resumeFrom.phase === 'REMEDIATE' &&
       !verifyRemediationSpent;
 
+    // The operator's own repair, adopted with no agent. The same five conjuncts
+    // as its sibling above and for the same reasons — `BLOCKED_VERIFY` is the
+    // only state a verification failure blocks; the operator asked on *this*
+    // invocation; `ATTENDED`, so nothing unattended reaches it; the resume point
+    // still names the one *resume* phase this state declares — `BLOCKED_VERIFY`
+    // has two declared successors now, and the second is the operator-only edge
+    // this branch takes, which no resume may — so a hand-edited record does not
+    // get to choose; and one departure per call.
+    //
+    // What it does NOT share is where it goes. `remediatingVerifyFailure`
+    // resumes to `REMEDIATING` and starts a writer. This proves its evidence in
+    // `verify/operator-repair.ts`, commits the operator's diff, and enters
+    // `VERIFYING` — the branch below, which is deliberately not the resume
+    // write, because the resume point names a phase this decision is not
+    // entering.
+    //
+    // The two are mutually exclusive at the CLI (`run-command.ts` refuses both
+    // together), and the exclusivity is not re-derived here: if a caller ever
+    // set both, the adoption branch runs first and spends only its own ledger,
+    // so the remediation is still there to be asked for again.
+    const verifyingOperatorRepair =
+      state.state === 'BLOCKED_VERIFY' &&
+      request.verifyOperatorRepair === true &&
+      mayVerifyOperatorRepair(request.continuationGrant) &&
+      state.resumeFrom !== null &&
+      state.resumeFrom.phase === 'REMEDIATE' &&
+      // Defence in depth, and measured as such rather than claimed. Deleting
+      // this changes no test, because after an adoption the predicate itself
+      // refuses a second one: the repair is committed, so the worktree is clean
+      // and `assessOperatorRepair` answers `NOTHING_TO_ADOPT`. The identical
+      // mutant survives the sibling `verifyRemediationSpent` too. It is kept
+      // because the property it states is the one an operator was promised --
+      // one decision, one departure -- and because the condition that would
+      // make it load-bearing (the tree dirtied again between passes, by a
+      // person or another process) is exactly the situation nobody would want
+      // it absent for. See the note in `v3-06-lifecycle-driver.test.ts`.
+      !operatorRepairSpent;
+
     // The same shape for `HUMAN_DECISION_REQUIRED`, and every conjunct is
     // load-bearing for the same reasons — with one deliberate difference.
     //
     // There is **no phase term**. Its sibling above pins `REMEDIATE` because
-    // `BLOCKED_VERIFY` declares exactly one outgoing edge, so a record naming
+    // that is the one *resume* phase `BLOCKED_VERIFY` declares — it now has a
+    // second declared successor, the `VERIFYING` the adoption grant enters, but
+    // that edge is operator-only and no resume may take it — so a record naming
     // any other phase is a record that has been tampered with. This state
     // declares four, and which one applies is the record's to say, not the
     // operator's and not this line's. What replaces the pin is the check that
@@ -1124,6 +1214,7 @@ export async function runTask(
       isBlockingState(state.state) &&
       resume.continuation !== 'AUTOMATIC_ALLOWED' &&
       !remediatingVerifyFailure &&
+      !verifyingOperatorRepair &&
       !continuingHumanDecision &&
       !continuingUsageLimit
     ) {
@@ -1262,6 +1353,160 @@ export async function runTask(
         authorisedWorktreePath,
         repository.capabilities.codegraph.requirement,
       );
+    }
+
+    // --- 5b. The operator's own repair, adopted with no agent ---------------
+    //
+    // Deliberately NOT the resume write below, and the difference is the point.
+    // A resume takes the phase the record names; this decision does not go
+    // there. The record names `REMEDIATE` because that is the one *resume*
+    // phase `BLOCKED_VERIFY` declares — the `VERIFYING` this branch enters is
+    // its other declared successor, kept out of the resume set as an
+    // operator-only edge — and the whole content of this grant is that
+    // remediation is not what is wanted: the repair already exists.
+    //
+    // Placed here — after the lease, the reconciliation and the authorised
+    // worktree, before any write — because it performs an effect on the
+    // repository. Every gate that decides whether THIS run may act on THIS
+    // repository has already run, and nothing below it is reached on this path.
+    //
+    // Not "every gate": the MCP capability gate lives inside `runLoopStep` and
+    // is never reached from `BLOCKED_VERIFY`, and step 5a above is a
+    // provisioning attempt that decides nothing. Neither is a gap here — both
+    // exist to bound what an AGENT may be started with, and this branch starts
+    // none — but the earlier wording claimed a completeness it did not have.
+    //
+    // The order inside is the guarantee: assess, then commit, then write. The
+    // assessment observes and writes nothing, so a refusal costs the operator
+    // nothing and leaves the task exactly where it was; and the state write
+    // happens only after a commit that reported an object name, so a task can
+    // never enter `VERIFYING` claiming a repair that is not in the tree.
+    //
+    // The mirror of that guarantee, stated because it is the case an operator
+    // will actually meet. Commit-then-write is the only honest order, so there
+    // is a window where the commit LANDED and the task did not move. Two ways
+    // in leave the record exactly as it was — the state write losing the lease,
+    // and a commit that reached past the approved paths — and both then leave
+    // HEAD off the failed attempt's `subjectCommit` with the state still
+    // `BLOCKED_VERIFY`, so this same grant answers `HEAD_MOVED` on the next
+    // invocation, correctly, and the way on is `resolve` or a hand-made
+    // `git reset` and a fresh attempt.
+    //
+    // `STATE_CONFLICT` is not one of those and is not described by that
+    // sentence: a conflict means the durable record changed under this run, so
+    // what the task is afterwards is whatever the other writer made it, and
+    // nothing here can say. It is reported as itself for that reason.
+    //
+    // Worse than a refusal, better than either alternative: undoing a commit in
+    // someone else's repository is not this build's business, and writing the
+    // state first would let a task claim a repair no commit carries.
+    if (verifyingOperatorRepair) {
+      // Fenced, exactly as both sibling commit sites are. `leasedGit`'s own
+      // header states the rule this obeys: the reads that decide *whether* to
+      // commit and the commit itself must be fenced by one authority, because
+      // a run that has lost the lease must not even ask -- the answer would be
+      // used to justify a write it may not make.
+      //
+      // Measured as a review blocker, and the race is concrete. Raw `deps.git`
+      // let run A assess the operator's dirty `src/a.ts`, lose the lease, and
+      // still reach `git add --all` + `git commit`; run B, now the writer,
+      // could rewrite that same already-approved path in the window, and A
+      // would commit B's bytes under `OPERATOR-REPAIR`. `advanceTaskState`
+      // re-proves the lease and would have refused the state write afterwards
+      // -- but the target repository's commit is permanent by then, and this
+      // grant's whole claim is that what lands is the operator's own repair.
+      const fencedGit = leasedGit({
+        lease: advance.lease,
+        ...(deps.git !== undefined ? { git: deps.git } : {}),
+      });
+
+      const assessment = await assessOperatorRepair({
+        state,
+        git: fencedGit,
+        authorisedWorktreePath,
+      });
+
+      if (!assessment.allowed) {
+        return stop({
+          outcome: 'CONTINUATION_NOT_AUTHORISED',
+          state: state.state,
+          steps,
+          reasonCodes: Object.freeze([assessment.refusal]),
+          reconciliation,
+          resume,
+        });
+      }
+
+      const adopted = await commitOperatorRepair(
+        fencedGit,
+        authorisedWorktreePath,
+        state,
+        assessment,
+      );
+
+      if (adopted.outcome !== 'ADOPTED') {
+        return stop({
+          outcome: 'CONTINUATION_NOT_AUTHORISED',
+          state: state.state,
+          steps,
+          reasonCodes: Object.freeze([adopted.outcome]),
+          reconciliation,
+          resume,
+        });
+      }
+
+      // Spent on the write that is about to land, not on the attempt: every
+      // refusal above returned before reaching here, so the operator still has
+      // their departure after one.
+      operatorRepairSpent = true;
+
+      const save = advanceTaskState(
+        load,
+        {
+          ...state,
+          state: 'VERIFYING',
+          stateEnteredAt: deps.now(),
+          blockedAgent: null,
+          // Spent, as every resume spends them. The resume point named
+          // `REMEDIATE` and this is not going there, so leaving it would offer
+          // a later run a phase this decision declined.
+          ...RESUME_EVIDENCE_SPENT,
+          // Both checkpoint claims withdrawn, and neither replaced. The tree
+          // just changed, so a stored claim about the pre-repair tree is now
+          // false — and the honest replacement would have to be *measured*,
+          // which is a different observation from the commit that just
+          // happened. `observeSettledWorktree`'s own note says exactly this:
+          // inferring "the tree must be clean, we just committed" is the
+          // substitution this build refuses. `VERIFYING` needs neither.
+          currentCommit: null,
+          worktreeCleanAtCheckpoint: false,
+        },
+        advance,
+      );
+
+      if (!save.ok) {
+        return stop({
+          outcome:
+            save.code === 'EXECUTION_LEASE_LOST'
+              ? 'EXECUTION_LEASE_LOST'
+              : save.code === 'STATE_CONFLICT'
+                ? 'STATE_CONFLICT'
+                : 'STATE_NOT_RECORDED',
+          state: state.state,
+          steps,
+          reasonCodes: Object.freeze([save.code]),
+          reconciliation,
+          resume,
+        });
+      }
+
+      // The write is itself a durable step, and `VERIFYING` is what the next
+      // iteration reconciles and drives. Nothing was executed here beyond the
+      // commit, and the loop re-reads the state it just wrote rather than
+      // carrying this one forward.
+      steps += 1;
+      remediationPayload = undefined;
+      continue;
     }
 
     // --- 6. A blocked task's resume, once every gate above has passed -------

@@ -237,6 +237,31 @@ export function mayRemediateVerifyFailure(grant: InvocationGrant): boolean {
 }
 
 /**
+ * Whether this invocation may adopt an operator's own repair of a failed
+ * verification and re-verify, without asking any agent to repair anything.
+ *
+ * The adoption starts no writer and reads no finding. The invocation is not
+ * agent-free: the ordinary loop continues afterwards, so a verification that
+ * now passes goes on to REVIEW, which runs the reviewer.
+ *
+ * `ATTENDED` only, and for a plainer reason than its siblings: the sentence
+ * this grant carries is "I have repaired this tree myself". Nobody is present
+ * on `AUTOMATIC_RESUME_ONLY`, so there is nobody whose repair it could be, and
+ * a machine adopting an uncommitted diff it did not make and cannot explain is
+ * exactly the silent-fallback shape this build refuses everywhere else.
+ *
+ * Answering `true` here decides nothing on its own. `verify/operator-repair.ts`
+ * still has to prove that a failed attempt exists, that it is the latest one,
+ * that HEAD is still its subject commit, that the worktree carries a repair and
+ * that the repair is inside the task's declared scope — and `run-driver.ts`
+ * still requires the state, the resume point, the authorised worktree, the
+ * reconciliation and the lease. This is one conjunct of many.
+ */
+export function mayVerifyOperatorRepair(grant: InvocationGrant): boolean {
+  return grant === 'ATTENDED';
+}
+
+/**
  * Whether this invocation may continue a `HUMAN_DECISION_REQUIRED` task.
  *
  * ── Why a second predicate and not a reuse of the one above ────────────────
@@ -253,8 +278,11 @@ export function mayRemediateVerifyFailure(grant: InvocationGrant): boolean {
  * ── What this one continues ───────────────────────────────────────────────
  *
  * `HUMAN_DECISION_REQUIRED` differs from `BLOCKED_VERIFY` in one way that
- * matters here. `BLOCKED_VERIFY` declares exactly one outgoing edge, so its flag
- * can name the destination. This state declares four — `IMPLEMENTING`,
+ * matters here. `BLOCKED_VERIFY` declares exactly one outgoing edge a **resume**
+ * may take, so its flag can name the destination — the operator-repair grant's
+ * `VERIFYING` edge is declared operator-only (`core/transitions.ts`) and is
+ * excluded from the resume policy's derivation for precisely that reason. This
+ * state declares four — `IMPLEMENTING`,
  * `VERIFYING`, `REVIEWING`, `REMEDIATING` — and which one applies is not the
  * operator's to pick: it is recorded in the task's own `resumeFrom`, which
  * `resume-policy.ts` makes `REQUIRED` for this state. So the decision this

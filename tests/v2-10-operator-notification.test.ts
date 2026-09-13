@@ -32,6 +32,8 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 
+import { SILENT_NOTIFIER } from './helpers/silent-notifier.js';
+
 import { BLOCK_STOP_REASONS, type BlockStopReason } from '../src/block/block-ledger.js';
 import {
   BLOCK_RUN_OUTCOMES,
@@ -704,7 +706,16 @@ afterEach(() => {
 async function invokeBlock(args: readonly string[], seams: BlockCommandSeams = {}): Promise<void> {
   const program = new Command();
   program.exitOverride();
-  registerBlockCommand(program, seams);
+  // The default is the SILENT one, not the command's own. `seams` defaults to
+  // `{}`, and a caller that supplies none -- there is one below, deliberately,
+  // for the run that ends with nothing to report -- would otherwise fall
+  // through to `createOperatorNotifier()` and read the operator's real
+  // `notify.yaml`. That is the exact shape that sent six pushes to a phone from
+  // `npm run verify`; it is silent here only because that one case omits
+  // `--attended`, which is an accident of the case rather than a property of
+  // the helper. A caller that wants the recording fake still passes one, and
+  // spreading `seams` last keeps that override working.
+  registerBlockCommand(program, { notifier: SILENT_NOTIFIER, ...seams });
   await program.parseAsync(['block', ...args], { from: 'user' });
 }
 

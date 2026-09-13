@@ -26,7 +26,12 @@
  *  - `DIRECT`              — the loop transitions straight to the resume
  *                            target, so a phase is legitimate exactly when its
  *                            work state is a declared successor of the blocking
- *                            state.
+ *                            state **and that edge is not operator-only**. The
+ *                            second half is not decoration: an operator-only
+ *                            edge is one no resume may take, and subtracting it
+ *                            here is the whole of what keeps
+ *                            `BLOCKED_VERIFY → VERIFYING` out of the resume
+ *                            contract. See `OPERATOR_ONLY_EDGES`.
  *  - `VIA_AUTH_PREFLIGHT`  — the operator re-authenticates first, so the loop
  *                            re-enters at `AUTH_PREFLIGHT` and carries the
  *                            *stored* resume point through. A phase is
@@ -49,7 +54,7 @@ import {
   type ResumePhase,
   type TaskStateName,
 } from './states.js';
-import { canTransition } from './transitions.js';
+import { canTransition, isOperatorOnlyEdge } from './transitions.js';
 import { InvalidResumePointError } from './errors.js';
 import {
   RESUME_POINT_DISPLAY_PATTERN,
@@ -111,9 +116,24 @@ export interface BlockedStatePolicy {
   readonly rationale: string;
 }
 
-/** Phases whose work state is a declared successor of `state`. */
+/**
+ * Phases whose work state is a declared successor of `state` **and reachable by
+ * a resume**.
+ *
+ * The second half is not decoration. A resume takes the phase the task's own
+ * `resumeFrom` names, on the evidence the record already carries; an edge that
+ * exists for an operator act which proves something else entirely is not one a
+ * resume may take. `BLOCKED_VERIFY -> VERIFYING` is exactly that, and without
+ * the exclusion declaring it made `VERIFY` a resume phase here — so a resume
+ * point naming it would have re-entered verification having proven nothing.
+ * `core/transitions.ts` owns the list, because the property belongs to the edge.
+ */
 function directResumePhases(state: BlockingState): readonly ResumePhase[] {
-  return RESUME_PHASES.filter((phase) => canTransition(state, PHASE_TO_STATE[phase]));
+  return RESUME_PHASES.filter(
+    (phase) =>
+      canTransition(state, PHASE_TO_STATE[phase]) &&
+      !isOperatorOnlyEdge(state, PHASE_TO_STATE[phase]),
+  );
 }
 
 /** Phases whose work state can enter `state`, i.e. could have been interrupted. */
@@ -185,7 +205,9 @@ const POLICY_DECLARATIONS: Readonly<Record<BlockingState, PolicyDeclaration>> = 
     state: 'BLOCKED_VERIFY',
     resumable: true,
     // Resuming means handing the failure to the writing agent for
-    // remediation, which is a decision, not an automatic retry.
+    // remediation, which is a decision, not an automatic retry. An operator who
+    // repaired the tree themselves has a second decision that is not a resume
+    // at all — see `OPERATOR_ONLY_EDGES` — and it is equally not automatic.
     automaticResumeEligible: false,
     requiresHumanDecision: true,
     resumeReentry: 'DIRECT',
@@ -196,10 +218,11 @@ const POLICY_DECLARATIONS: Readonly<Record<BlockingState, PolicyDeclaration>> = 
     reportedResetAtRequirement: 'NOT_APPLICABLE',
     rationale:
       'The project verification commands failed in a way the loop could not resolve. ' +
-      'Blindly re-running them would just fail again, so the only continuation is ' +
-      'remediation by the writing agent, on an operator decision. The failure itself ' +
-      'is recorded durably beside the task, which is what makes that remediation ' +
-      'actionable and what an operator reads before deciding.',
+      'Blindly re-running them would just fail again, so the only RESUME is remediation ' +
+      'by the writing agent, on an operator decision — and beside it, not as a resume, ' +
+      'an operator who has already repaired the tree can have that repair adopted and ' +
+      'verified again. The failure itself is recorded durably beside the task, which is ' +
+      'what makes both of those actionable and what an operator reads before deciding.',
   },
   SCOPE_VIOLATION: {
     state: 'SCOPE_VIOLATION',

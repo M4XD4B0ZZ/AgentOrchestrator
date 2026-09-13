@@ -91,6 +91,7 @@ import { passingReview } from './fixtures.js';
 import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { createRepoFixture, removeRepoFixtures } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
+import { SILENT_NOTIFIER } from './helpers/silent-notifier.js';
 
 const RUN_ID = 'run-0001';
 const BLOCK_ID = 'V3-07';
@@ -163,7 +164,9 @@ function drivingSeams() {
 async function invokeBlock(args: readonly string[], seams: BlockCommandSeams = {}): Promise<void> {
   const program = new Command();
   program.exitOverride();
-  registerBlockCommand(program, seams);
+  // Never the real notifier — see `helpers/silent-notifier.ts`. This file was one of
+  // the two the egress scan caught after the first two were sealed.
+  registerBlockCommand(program, { notifier: SILENT_NOTIFIER, ...seams });
   await program.parseAsync(['block', ...args], { from: 'user' });
 }
 

@@ -96,8 +96,9 @@
  * rather than quietly left standing.
  *
  * What is *not* dropped is the rule that sentence was protecting.
- * `--remediate-verify-failure`, `--continue-human-decision` and
- * `--continue-usage-limit` are not options on this command and are passed as
+ * `--remediate-verify-failure`, `--verify-operator-repair`,
+ * `--continue-human-decision` and `--continue-usage-limit` are not options on
+ * this command and are passed as
  * `false` on every admission. A selector may choose what to start; it may still
  * not choose the subject of a decision that **departs from what the record
  * says**, and that is the half of the old rule that was load-bearing.

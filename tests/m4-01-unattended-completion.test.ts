@@ -947,6 +947,7 @@ describe('M4 / U4 — the next cycle continues what the last one left', () => {
     expect(source).toContain('remediateVerifyFailure: false');
     expect(source).toContain('continueHumanDecision: false');
     expect(source).toContain('continueUsageLimit: false');
+    expect(source).toContain('verifyOperatorRepair: false');
     // And no interactive input of any kind reaches this path.
     expect(source).not.toContain('process.stdin');
     expect(source).not.toContain('readline');

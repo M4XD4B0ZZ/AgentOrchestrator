@@ -11,6 +11,8 @@ import { existsSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 import { Command } from 'commander';
+
+import { SILENT_NOTIFIER } from './helpers/silent-notifier.js';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -1376,7 +1378,12 @@ async function runBlockCli(
   try {
     const program = new Command();
     program.exitOverride();
-    registerBlockCommand(program, seams);
+    // Never the real notifier. Without this default the command falls back to
+    // `createOperatorNotifier()`, which reads the operator's own
+    // `~/.agent-orchestrator/notify.yaml` — and this file drove six real pushes
+    // to a phone on 2026-09-13, from `npm run verify`. A caller that wants to
+    // assert on notification passes its own seam and overrides this.
+    registerBlockCommand(program, { notifier: SILENT_NOTIFIER, ...seams });
     await program.parseAsync(['block', ...args], { from: 'user' });
     return { stdout: chunks.join(''), exitCode: process.exitCode as number | undefined };
   } finally {

@@ -93,7 +93,7 @@
  * promise — `BLOCKED_AUTH → AUTH_PREFLIGHT` is declared, and
  * `resume-policy.ts` gives the state `resumeReentry: 'VIA_AUTH_PREFLIGHT'`.
  * Nothing in `src/` ever *writes* `AUTH_PREFLIGHT`: the only resume writer
- * targets a work-loop phase, and the three operator conjuncts are pinned by
+ * targets a work-loop phase, and the four operator conjuncts are pinned by
  * their first terms to other states. So the edge is declared and has no
  * executor, exactly as `BLOCKED_USAGE_LIMIT`'s was until M2 slice 6, and a
  * notification telling an operator to re-run would have named a command that
@@ -120,7 +120,11 @@ export const ATTENTION_REASONS = [
    * that has passed over a withdrawn resume record.
    */
   'QUOTA_CONTINUATION_REQUIRED',
-  /** Verification failed and the only continuation is remediation, on a decision. */
+  /**
+   * Verification failed. Nothing continues it on its own: remediation by the
+   * writing agent, or adopting a repair the operator already made, and both are
+   * decisions. The name predates the second one.
+   */
   'VERIFICATION_REMEDIATION_REQUIRED',
   /** An agent wrote outside its declared scope. Nothing continues it. */
   'SCOPE_REVIEW_REQUIRED',
@@ -183,10 +187,15 @@ export const ATTENTION_ACTIONS = Object.freeze({
     'asserts nothing about the allowance.',
   VERIFICATION_REMEDIATION_REQUIRED:
     'The repository’s verification commands failed and were not retried, because re-running ' +
-    'them unchanged would fail again. Hand the recorded failure to the writing agent with ' +
-    '`agent-loop run --repository <path> --task <id> --attended --remediate-verify-failure`, ' +
-    'or end the task yourself with `agent-loop resolve --repository <path> --task <id> ' +
-    '--attended`.',
+    'them unchanged would fail again. There are three ways on. If YOU have already repaired ' +
+    'the tree, adopt that repair with `agent-loop run --repository <path> --task <id> ' +
+    '--attended --verify-operator-repair`: no agent is asked to repair anything, and it is ' +
+    'refused unless HEAD is still the failed attempt’s own commit and the repair is inside ' +
+    'the task’s scope. That commits your repair and verifies again; the run then continues ' +
+    'normally, so a verification that passes goes on to review, which does start an agent. ' +
+    'To hand the recorded failure to the writing agent instead: `agent-loop run --repository ' +
+    '<path> --task <id> --attended --remediate-verify-failure`. Or end the task yourself with ' +
+    '`agent-loop resolve --repository <path> --task <id> --attended`.',
   SCOPE_REVIEW_REQUIRED:
     'An agent wrote outside the scope this repository declares. No flag in this build ' +
     'continues a scope violation, so the decision is yours: read the worktree the record ' +

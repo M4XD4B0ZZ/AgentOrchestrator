@@ -229,9 +229,27 @@ describe('illegal transitions', () => {
     }
   });
 
-  it('does not re-run a failed verification without a change', () => {
-    expect(canTransition('BLOCKED_VERIFY', 'VERIFYING')).toBe(false);
+  /**
+   * This case used to assert the opposite, and its name was the true half of a
+   * false sentence: re-running the same verification *without a change* would
+   * indeed just fail again. The table now declares the edge for the case where
+   * there is a change — an operator's own repair, adopted with no agent, proven
+   * against the failed attempt's own subject commit before anything is
+   * committed (`verify/operator-repair.ts`).
+   *
+   * The declaration is what is *possible*. What is *permitted* is one producer,
+   * behind `run --attended --verify-operator-repair`, and that is asserted where
+   * the grant is, not here.
+   */
+  it('lets a repaired verification be re-run, and still offers remediation', () => {
+    expect(canTransition('BLOCKED_VERIFY', 'VERIFYING')).toBe(true);
     expect(canTransition('BLOCKED_VERIFY', 'REMEDIATING')).toBe(true);
+  });
+
+  it('still refuses the two states a failed verification may never become', () => {
+    // Not a pass, and not a review of a tree that never verified.
+    expect(canTransition('BLOCKED_VERIFY', 'REVIEWING')).toBe(false);
+    expect(canTransition('BLOCKED_VERIFY', 'READY_FOR_PR')).toBe(false);
   });
 
   it('reports the allowed alternatives in the error message', () => {
@@ -313,6 +331,7 @@ describe('transition-table stability', () => {
         "BLOCKED_USAGE_LIMIT -> RESUME_STATE_DIVERGED",
         "BLOCKED_USAGE_LIMIT -> HUMAN_DECISION_REQUIRED",
         "BLOCKED_USAGE_LIMIT -> ABORTED",
+        "BLOCKED_VERIFY -> VERIFYING",
         "BLOCKED_VERIFY -> REMEDIATING",
         "BLOCKED_VERIFY -> HUMAN_DECISION_REQUIRED",
         "BLOCKED_VERIFY -> ABORTED",

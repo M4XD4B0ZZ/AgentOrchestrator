@@ -133,7 +133,7 @@ import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
 import type { ExecutionBriefResult } from '../plan/task-brief.js';
 import type { TaskState } from '../core/task-state.js';
 import type { ResumePhase, TaskStateName } from '../core/states.js';
-import { reviewBudget } from '../core/review-budget.js';
+import { currentRound, reviewBudget } from '../core/review-budget.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
 import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js';
 import { leaseHolds, leasedAgent, leasedGit, leasedVerify } from './leased-spawns.js';
@@ -530,22 +530,6 @@ function authorised(state: TaskState, authorisedWorktreePath: string): boolean {
     isComparablePath(authorisedWorktreePath) &&
     absolutePathsEqual(authorisedWorktreePath, state.worktreePath)
   );
-}
-
-/**
- * The round a resume point should name for work belonging to the current pass.
- *
- * `ResumePointSchema` requires 1, `reviewRound` starts at 0, and every round on
- * a state is additionally bounded by `maxReviewRounds` — so this clamps at both
- * ends rather than trusting arithmetic to stay inside the contract.
- */
-function currentRound(state: TaskState): number {
-  // The BUDGET, not the declaration. After a granted round parks with
-  // reviewRound above what the repository declared, clamping to the declaration
-  // would name an earlier round — and the remediation step would then brief a
-  // round whose findings are already closed while the new ones sit unread, or
-  // filter to a round with no records at all and refuse to start a writer.
-  return Math.min(Math.max(1, state.reviewRound), reviewBudget(state));
 }
 
 function saved(save: StateSaveResult, state: TaskStateName, outcome: LoopStepOutcome, extra: Partial<LoopStepResult> = {}): LoopStepResult {
@@ -1232,11 +1216,15 @@ export async function runVerifyStep(
   const evidence = await recordVerificationEvidence(current, report, deps);
 
   // The repository answered no. `BLOCKED_VERIFY` carries no blocked agent —
-  // verification runs no agent — and its only continuation is remediation,
-  // which is the one resume phase the contract permits it to name.
+  // verification runs no agent — and remediation is the one resume phase the
+  // contract permits it to name. It is not the only way on: an operator who has
+  // already repaired the tree can have that repair adopted, which enters
+  // `VERIFYING` over an operator-only edge and is deliberately not a resume.
   //
-  // Only where the explanation is durable. A `BLOCKED_VERIFY` whose evidence
-  // never reached disk is a state whose one continuation cannot be taken:
+  // Only where the explanation is durable, and that holds for both ways on: the
+  // adoption grant refuses with `NO_VERIFICATION_ATTEMPT` on exactly the
+  // history this branch would fail to write. A `BLOCKED_VERIFY` whose evidence
+  // never reached disk is a state whose continuations cannot be taken:
   // `runRemediateStep` would have no cause to brief a writer with, and would
   // park the task at `HUMAN_DECISION_REQUIRED` one durable step later having
   // started nothing. Landing there directly says the same true thing, one write
