@@ -195,8 +195,19 @@ export type CommitTaskWorkResult =
 export interface CommitTaskWorkRequest {
   /** The task whose work this is. Repository-authored, so it is checked, not trusted. */
   readonly taskId: string;
-  /** Which writing pass produced it. */
-  readonly phase: 'IMPLEMENT' | 'REMEDIATE';
+  /**
+   * Which pass produced it.
+   *
+   * The first two are a writing agent's. `OPERATOR-REPAIR` is not — it is the
+   * operator's own repair of a failed verification, adopted with no agent
+   * involved (`verify/operator-repair.ts`), and it is a member of this
+   * union rather than a second commit path so that the executable-driver
+   * refusal, the approved-path control and the identity overrides are the same
+   * ones, not a copy of them. {@link commitMessageFor} is where the difference
+   * is visible, and it is deliberately visible: an operator repair may not
+   * arrive in the log wearing a writing agent's message.
+   */
+  readonly phase: 'IMPLEMENT' | 'REMEDIATE' | 'OPERATOR-REPAIR';
   /** The review round it belongs to. */
   readonly round: number;
   /**
@@ -310,6 +321,15 @@ function pathSet(paths: readonly string[]): string[] {
  * the seam.
  */
 function commitMessageFor(request: CommitTaskWorkRequest): string {
+  // The `AO:` prefix means "a writing agent this orchestrator ran produced
+  // this". An operator repair is the one commit this module makes that no agent
+  // produced, so it does not get that prefix — a reader of `git log --oneline`
+  // can tell the two apart at the first character, without knowing the
+  // vocabulary. Still one shell-inert token, because `-m` takes one argument.
+  if (request.phase === 'OPERATOR-REPAIR') {
+    return `OPERATOR-REPAIR:${request.taskId}:VERIFY:r${request.round}`;
+  }
+
   return `AO:${request.taskId}:${request.phase}:r${request.round}`;
 }
 

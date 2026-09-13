@@ -129,9 +129,37 @@ export const TRANSITION_TABLE: Readonly<Record<TaskStateName, readonly TaskState
     ],
 
     // A failed verification is handed to the writing agent for remediation, or
-    // escalated. It never goes straight back to VERIFYING: re-running the same
-    // verification without a change would just fail again.
-    BLOCKED_VERIFY: ['REMEDIATING', 'HUMAN_DECISION_REQUIRED', 'ABORTED', 'OPERATOR_RESOLVED'],
+    // escalated.
+    //
+    // `VERIFYING` is here, and the sentence that used to stand in its place —
+    // "it never goes straight back to VERIFYING: re-running the same
+    // verification without a change would just fail again" — was right about
+    // its own premise and wrong about the conclusion. *Without a change* it
+    // would fail again. The edge exists for the case where there **is** a
+    // change, and exactly one producer may take it:
+    // `verify/operator-repair.ts`, reached only from
+    // `run --attended --verify-operator-repair`, which proves before writing
+    // anything that HEAD is still the failed attempt's own subject commit, that
+    // the worktree carries a repair, and that the repair is inside the task's
+    // declared scope — then commits that repair. So the tree entering
+    // `VERIFYING` is provably not the tree that failed.
+    //
+    // Measured on healthapp/CAPTURE-004: a mechanical formatter failure an
+    // operator could repair in seconds had no way back into verification, and
+    // the only door out of this state started a writing agent that could not
+    // run the formatter, did not recognise an already-correct diff, and spent
+    // its budget parking the task. The declaration below is what that cost.
+    //
+    // This is a declaration of what is *possible*, not of what is permitted:
+    // nothing automatic reaches it, `automaticResumeEligible` for this state is
+    // unchanged, and `--remediate-verify-failure` still goes to `REMEDIATING`.
+    BLOCKED_VERIFY: [
+      'VERIFYING',
+      'REMEDIATING',
+      'HUMAN_DECISION_REQUIRED',
+      'ABORTED',
+      'OPERATOR_RESOLVED',
+    ],
 
     // Never automatically resumable: an agent left its sandbox, so a human has
     // to look at the damage before anything else happens.

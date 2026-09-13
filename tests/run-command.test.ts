@@ -156,6 +156,7 @@ describe('agent-loop run — CLI seam', () => {
       '--max-invocations',
       '--recover-stale-lease',
       '--remediate-verify-failure',
+      '--verify-operator-repair',
       '--continue-human-decision',
       '--continue-usage-limit',
       '--automatic-resume-only',
@@ -353,6 +354,14 @@ describe('the unattended automatic-resume mode refuses unusable combinations fir
       args: ['--automatic-resume-only', '--remediate-verify-failure'],
       code: 'VERIFY_REMEDIATION_WITHOUT_OPERATOR',
     },
+    // The operator's own repair. The sharp row is the second: this grant makes a
+    // COMMIT on the operator's word, so a run stating nobody is present has
+    // nobody whose repair it could be.
+    { args: ['--verify-operator-repair'], code: 'OPERATOR_REPAIR_WITHOUT_OPERATOR' },
+    {
+      args: ['--automatic-resume-only', '--verify-operator-repair'],
+      code: 'OPERATOR_REPAIR_WITHOUT_OPERATOR',
+    },
     { args: ['--continue-human-decision'], code: 'HUMAN_DECISION_CONTINUATION_WITHOUT_OPERATOR' },
     {
       args: ['--automatic-resume-only', '--continue-human-decision'],
@@ -392,6 +401,7 @@ describe('the unattended automatic-resume mode refuses unusable combinations fir
    */
   for (const decision of [
     { flag: '--remediate-verify-failure', code: 'VERIFY_REMEDIATION_WITHOUT_TASK' },
+    { flag: '--verify-operator-repair', code: 'OPERATOR_REPAIR_WITHOUT_TASK' },
     { flag: '--continue-human-decision', code: 'HUMAN_DECISION_CONTINUATION_WITHOUT_TASK' },
     { flag: '--continue-usage-limit', code: 'USAGE_LIMIT_CONTINUATION_WITHOUT_TASK' },
   ] as const) {
@@ -405,6 +415,35 @@ describe('the unattended automatic-resume mode refuses unusable combinations fir
       expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
     });
   }
+
+  /**
+   * The two verify-failure decisions contradict each other, and guessing which
+   * was meant would be this build deciding whether an agent runs.
+   *
+   * `--adopt-verify-repair` was the name this grant nearly shipped under.
+   * `tests/v2-07lr-lease-recovery.test.ts` scans every registered option for
+   * `adopt`, which this repository reserves for taking over a workspace another
+   * run left — so a flag carrying it would have promised an operator something
+   * else entirely. The name is `--verify-operator-repair` because that is what
+   * it does: verify the operator's repair.
+   */
+  it('refuses --verify-operator-repair together with --remediate-verify-failure', async () => {
+    await invoke([
+      '--repository',
+      ABSENT,
+      '--task',
+      'V3-08',
+      '--attended',
+      '--verify-operator-repair',
+      '--remediate-verify-failure',
+    ]);
+
+    const text = stdout.join('');
+    expect(text).toContain('OPERATOR_REPAIR_WITH_REMEDIATION');
+    expect(text).not.toContain('could not be resolved');
+    expect(stderr.join('')).toBe('');
+    expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
+  });
 
   it('refuses an unusable --max-wait-ms with its own code', async () => {
     const root = createRepoFixture({

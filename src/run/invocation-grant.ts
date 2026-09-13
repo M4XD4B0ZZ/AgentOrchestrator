@@ -237,6 +237,27 @@ export function mayRemediateVerifyFailure(grant: InvocationGrant): boolean {
 }
 
 /**
+ * Whether this invocation may adopt an operator's own repair of a failed
+ * verification and re-verify, with no agent involved.
+ *
+ * `ATTENDED` only, and for a plainer reason than its siblings: the sentence
+ * this grant carries is "I have repaired this tree myself". Nobody is present
+ * on `AUTOMATIC_RESUME_ONLY`, so there is nobody whose repair it could be, and
+ * a machine adopting an uncommitted diff it did not make and cannot explain is
+ * exactly the silent-fallback shape this build refuses everywhere else.
+ *
+ * Answering `true` here decides nothing on its own. `verify/operator-repair.ts`
+ * still has to prove that a failed attempt exists, that it is the latest one,
+ * that HEAD is still its subject commit, that the worktree carries a repair and
+ * that the repair is inside the task's declared scope — and `run-driver.ts`
+ * still requires the state, the resume point, the authorised worktree, the
+ * reconciliation and the lease. This is one conjunct of many.
+ */
+export function mayVerifyOperatorRepair(grant: InvocationGrant): boolean {
+  return grant === 'ATTENDED';
+}
+
+/**
  * Whether this invocation may continue a `HUMAN_DECISION_REQUIRED` task.
  *
  * ── Why a second predicate and not a reuse of the one above ────────────────

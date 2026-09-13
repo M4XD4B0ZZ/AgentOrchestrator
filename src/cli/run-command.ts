@@ -153,6 +153,7 @@ interface RunOptions {
   readonly maxInvocations?: string;
   readonly recoverStaleLease?: boolean;
   readonly remediateVerifyFailure?: boolean;
+  readonly verifyOperatorRepair?: boolean;
   readonly continueHumanDecision?: boolean;
   readonly continueUsageLimit?: boolean;
 }
@@ -239,6 +240,34 @@ function refuseArguments(options: RunOptions): ArgumentRefusal | null {
         '--remediate-verify-failure requires --task. The decision is about one blocked ' +
         'task, and letting the selector choose which one to continue would make the ' +
         'operator authorise a task they never named.',
+    };
+  }
+  if (options.verifyOperatorRepair === true && !attended) {
+    return {
+      code: 'OPERATOR_REPAIR_WITHOUT_OPERATOR',
+      sentence:
+        '--verify-operator-repair is an operator decision and requires --attended. The whole ' +
+        'sentence it carries is "I repaired this tree myself", so a run that claims nobody ' +
+        'is present has nobody whose repair it could be.',
+    };
+  }
+  if (options.verifyOperatorRepair === true && options.task === undefined) {
+    return {
+      code: 'OPERATOR_REPAIR_WITHOUT_TASK',
+      sentence:
+        '--verify-operator-repair requires --task. The decision is about one blocked task and ' +
+        'one worktree, and letting the selector choose would commit a diff into a task the ' +
+        'operator never named.',
+    };
+  }
+  if (options.verifyOperatorRepair === true && options.remediateVerifyFailure === true) {
+    return {
+      code: 'OPERATOR_REPAIR_WITH_REMEDIATION',
+      sentence:
+        '--verify-operator-repair and --remediate-verify-failure are contradictory and may ' +
+        'not be combined. The first says the repair already exists and no agent is wanted; ' +
+        'the second hands the failure to a writing agent. Asking for both says nothing, and ' +
+        'guessing which was meant would be this build deciding whether an agent runs.',
     };
   }
   if (options.continueHumanDecision === true && !attended) {
@@ -474,6 +503,7 @@ async function executeAttended(
     readonly maxInvocations: number;
     readonly recoverStaleLease: boolean;
     readonly remediateVerifyFailure: boolean;
+    readonly verifyOperatorRepair: boolean;
     readonly continueHumanDecision: boolean;
     readonly continueUsageLimit: boolean;
   },
@@ -506,6 +536,7 @@ async function executeAttended(
       // that it came with `--attended` and a named task; every remaining
       // condition belongs to the run driver.
       remediateVerifyFailure: lifecycle.remediateVerifyFailure,
+      verifyOperatorRepair: lifecycle.verifyOperatorRepair,
       // Forwarded on the same terms as the field above. `refuseArguments` has
       // established that it came with `--attended` and a named task; the state,
       // the resume point and the one-per-invocation bound are the driver's.
@@ -645,6 +676,23 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
         '--attended and --task, is refused with --automatic-resume-only, and buys exactly ' +
         'one departure from the block per invocation. A task whose verification failure was ' +
         'never durably recorded is not in BLOCKED_VERIFY to begin with.',
+    )
+    .option(
+      '--verify-operator-repair',
+      'Adopt YOUR OWN repair of a failed verification and verify again, with NO agent ' +
+        'involved. For the case --remediate-verify-failure is not: the fix already exists ' +
+        'in the worktree because you made it. AO commits that diff under its own controls ' +
+        'and with a message that says an operator made it, moves the task BLOCKED_VERIFY -> ' +
+        'VERIFYING, and runs the declared verification again on the new commit. It starts no ' +
+        'writer, builds no payload, grants no review round and touches no finding history. ' +
+        'It is refused unless every one of these is proven first: the state is exactly ' +
+        'BLOCKED_VERIFY; the record still resumes from REMEDIATE; a verification attempt ' +
+        'history exists and its LATEST attempt is a FAILED one; HEAD is still EXACTLY that ' +
+        "attempt's subject commit, which is what proves you repaired the tree that failed " +
+        'and not a later one; the worktree actually carries a repair; and the whole delta ' +
+        'from the base pin is within the scope the task declared. Requires --attended and ' +
+        '--task, is refused with --automatic-resume-only and with ' +
+        '--remediate-verify-failure, and buys exactly one adoption per invocation.',
     )
     .option(
       '--continue-human-decision',
@@ -840,6 +888,7 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
             maxInvocations,
             recoverStaleLease: options.recoverStaleLease === true,
             remediateVerifyFailure: options.remediateVerifyFailure === true,
+            verifyOperatorRepair: options.verifyOperatorRepair === true,
             continueHumanDecision: options.continueHumanDecision === true,
             continueUsageLimit: options.continueUsageLimit === true,
           },

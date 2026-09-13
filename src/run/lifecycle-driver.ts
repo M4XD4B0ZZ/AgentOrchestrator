@@ -463,6 +463,12 @@ export interface LifecycleRequest {
    */
   readonly remediateVerifyFailure?: boolean;
   /**
+   * Forwarded verbatim to `RunRequest.verifyOperatorRepair`, and spent the same
+   * way: one adoption per lifecycle, tracked beside the remediation rather than
+   * shared with it, because they are two decisions.
+   */
+  readonly verifyOperatorRepair?: boolean;
+  /**
    * Whether the operator asked to continue a `HUMAN_DECISION_REQUIRED` task
    * from its recorded resume point, forwarded verbatim to
    * `RunRequest.continueHumanDecision`.
@@ -778,6 +784,7 @@ async function driveUnderLease(
    * that was permitted and refused for some other reason has spent nothing.
    */
   let verifyRemediationSpent = false;
+  let operatorRepairSpent = false;
   /**
    * The same bound for the operator's one departure from
    * `HUMAN_DECISION_REQUIRED`, across every invocation this lifecycle makes.
@@ -984,6 +991,8 @@ async function driveUnderLease(
           // stopped by a blocking step ending the run.
           remediateVerifyFailure:
             request.remediateVerifyFailure === true && !verifyRemediationSpent,
+          verifyOperatorRepair:
+            request.verifyOperatorRepair === true && !operatorRepairSpent,
           // The same bound, for the same reason, on the other operator decision.
           continueHumanDecision:
             request.continueHumanDecision === true && !humanDecisionContinuationSpent,
@@ -1007,6 +1016,7 @@ async function driveUnderLease(
       );
       runs.push(run);
       if (run.remediatedVerifyFailure) verifyRemediationSpent = true;
+      if (run.verifiedOperatorRepair) operatorRepairSpent = true;
       if (run.continuedHumanDecision) humanDecisionContinuationSpent = true;
       if (run.continuedUsageLimit) usageLimitContinuationSpent = true;
       steps += run.steps;

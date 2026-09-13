@@ -647,6 +647,7 @@ function admit(
         // never become the subject of one.
         continuationGrant: 'ATTENDED',
         remediateVerifyFailure: false,
+        verifyOperatorRepair: false,
         continueHumanDecision: false,
         continueUsageLimit: false,
         // Stale-lease recovery is the one that changed, and it is a

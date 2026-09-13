@@ -478,6 +478,7 @@ describe('a quota pause stops the run rather than being waited out', () => {
       maxSteps: null,
       maxInvocations: null,
       remediateVerifyFailure: null,
+      verifyOperatorRepair: null,
       continueHumanDecision: null,
       // Added by M2 slice 6. It is an operator *decision*, not a wait: the
       // driver forwards it and `run-driver.ts` refuses it for any block that
