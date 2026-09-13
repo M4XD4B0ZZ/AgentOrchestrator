@@ -73,7 +73,6 @@
  * production silent fails here.
  */
 
-import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -84,15 +83,6 @@ import { SILENT_NOTIFIER } from './helpers/silent-notifier.js';
 
 const TESTS_DIR = fileURLToPath(new URL('.', import.meta.url));
 const SOURCE_DIR = join(TESTS_DIR, '..', 'src');
-
-/**
- * The commit before this branch: the tree that sent the pushes.
- *
- * A tag would drift; a branch name would move. This is the merge base the whole
- * branch was written against, and the case below reads the leaking files out of
- * it so the measurement stays about what actually happened.
- */
-const BEFORE_THE_FIX = '51c8be4';
 
 /** This file. Excluded from its own scan — see the case that says why. */
 const SCANNER = 'notifier-egress-in-tests.test.ts';
@@ -178,6 +168,49 @@ function withoutComments(text: string): string {
 }
 
 /**
+ * Comments **and string literals** removed, for the question "does this file
+ * bind a notifier anywhere".
+ *
+ * A review fed the previous version three files that satisfied it without
+ * binding anything: one whose only `notifier:` sat inside
+ * `expect(src).toContain('notifier: SILENT_NOTIFIER')`, one where it was a type
+ * member, and one that bound a notifier in one case and forgot it in the next.
+ * Rule 0 promised no rule could be satisfied by prose; a string literal is
+ * prose the compiler happens to keep.
+ *
+ * Type members are not addressed by this and are not pretended to be — a
+ * declaration is a value position as far as a regex is concerned. What closes
+ * the case that actually occurred is the seams-default rule below.
+ */
+function withoutCommentsOrStrings(text: string): string {
+  return withoutComments(text)
+    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+    .replace(/`(?:[^`\\]|\\.)*`/g, '``');
+}
+
+/**
+ * Whether a seams argument named `name` is declared with an empty default.
+ *
+ * This is the incident, named exactly. Every one of the five suites that
+ * reached the block CLI wrote the same helper —
+ * `async function invokeBlock(args, seams: BlockCommandSeams = {})` — and
+ * passed `seams` straight through. A caller that supplies none gets `{}`, and
+ * `{}` is the production fallback: the real notifier, reading the operator's
+ * real `notify.yaml`.
+ *
+ * A whole-file "does it mention a notifier" cannot see this, because such a
+ * file usually DOES bind one somewhere — `v2-10` bound recording fakes in most
+ * of its cases and forgot one in another, and that is the file that would have
+ * sent the next push. The default is the thing to refuse.
+ */
+function hasEmptySeamsDefault(text: string, name: string): boolean {
+  const identifier = name.replace(/[^A-Za-z0-9_$]/g, '');
+  if (identifier === '') return false;
+  return new RegExp(`\\b${identifier}\\s*(?::[^=,)]*)?=\\s*\\{\\s*\\}`).test(text);
+}
+
+/**
  * The rule, as a pure function so it can be run against fixtures that must fail
  * as well as against the tree that must pass.
  *
@@ -203,7 +236,8 @@ function offenders(files: readonly ScannedFile[]): readonly string[] {
     // Does this file bind a notifier at all, anywhere? Only ever consulted for
     // a call whose seams are a variable, where the binding is necessarily
     // somewhere other than the call.
-    const bindsANotifier = /\bnotifier\s*:/.test(text) || text.includes('SILENT_NOTIFIER');
+    const values = withoutCommentsOrStrings(file.text);
+    const bindsANotifier = /\bnotifier\s*:/.test(values) || values.includes('SILENT_NOTIFIER');
 
     const callIsUnsealed = calls.some((args) => {
       // Unreadable call: refuse rather than excuse. "I could not read it" must
@@ -218,7 +252,11 @@ function offenders(files: readonly ScannedFile[]): readonly string[] {
       // Written inline: it must name the seam here, where a reader sees it.
       if (seams.startsWith('{')) return !/\bnotifier\s*:/.test(seams);
       // A variable, a spread, a call — THE INCIDENT'S OWN SHAPE. The argument
-      // says nothing by itself, so the file must bind a notifier somewhere.
+      // says nothing by itself, so two things must hold: the file has to bind a
+      // notifier somewhere, and the argument must not be a parameter whose
+      // default is `{}`, because that default IS the production fallback and a
+      // file can bind notifiers in nine cases and forget the tenth.
+      if (hasEmptySeamsDefault(values, seams)) return true;
       return !bindsANotifier;
     });
     if (callIsUnsealed) {
@@ -228,8 +266,14 @@ function offenders(files: readonly ScannedFile[]): readonly string[] {
     // Reached the CLI some other way and ran `block` through it. Asked of every
     // file, not only of files with no direct call: one sealed
     // `registerBlockCommand` and one `buildProgram()`-driven `block` run in the
-    // same file is two routes, and the earlier version examined only the first.
-    if (runsBlockThroughArgv(text) && calls.length === 0 && !bindsANotifier) {
+    // same file is two routes, and an earlier version examined only the first.
+    //
+    // The `calls.length === 0` term that used to stand here made that sentence
+    // false while changing nothing — any file whose direct calls survived the
+    // check above necessarily binds a notifier, so `!bindsANotifier` had
+    // already excluded it. An inert term holding a false comment in place is
+    // the shape this branch has now removed twice.
+    if (runsBlockThroughArgv(text) && !bindsANotifier) {
       bad.push(file.name);
     }
   }
@@ -275,8 +319,22 @@ describe('a test may not reach the operator’s real notification target', () =>
     expect(code).not.toMatch(/from\s+['"][^'"]*src\//);
     expect(code).not.toMatch(/import\s*\(\s*['"][^'"]*src\//);
     // And the one helper it does import is the silent notifier, nothing else.
+    //
+    // An exact list, order included, and that is deliberate rather than
+    // careless: this case exists because the file excludes itself from the
+    // scan, so "what else did it grow an import of" is the question, and a
+    // subset check would answer it only for the imports someone thought of.
+    // The cost is that reordering imports fails a case whose subject is not
+    // import order — which is the right way round for a gate guarding an
+    // exclusion.
     const specifiers = [...code.matchAll(/from\s+['"]([^'"]+)['"]/g)].map((m) => m[1]);
-    expect(specifiers).toEqual(['node:child_process', 'node:fs', 'node:path', 'node:url', 'vitest', './helpers/silent-notifier.js']);
+    expect(specifiers).toEqual([
+      'node:fs',
+      'node:path',
+      'node:url',
+      'vitest',
+      './helpers/silent-notifier.js',
+    ]);
   });
 
 
@@ -287,16 +345,37 @@ describe('a test may not reach the operator’s real notification target', () =>
    *
    * The first two versions would not have, and neither said so. Both refused a
    * `registerBlockCommand(program)` with no second argument and called that
-   * "the incident". It was not. Every one of the four leaking suites called
-   * `registerBlockCommand(program, seams)` from a helper declared
-   * `(args, seams: BlockCommandSeams = {})`, so each call had two arguments and
-   * the missing notifier was a *default* three lines away. A rule that inspects
-   * only argument-less calls and inline object literals never looked at it.
+   * "the incident". It was not. All five suites that reached the block CLI
+   * shared one helper — two arguments, the second a parameter whose default was
+   * `{}` — so a rule that inspected only argument-less calls and inline object
+   * literals never looked at the shape that sent six pushes.
    *
-   * The subjects here are the real files at the real base commit, read out of
-   * Git rather than paraphrased, so this cannot drift from what happened.
+   * The helper is transcribed rather than read out of Git, and that is
+   * deliberate. The first version of this case ran
+   * `git show 51c8be4:tests/<name>`, which is green on a full clone and throws
+   * on CI: `.github/workflows/verify.yml` checks out with `actions/checkout@v4`
+   * and no `fetch-depth`, which is a single-commit clone where that object does
+   * not exist. A gate that only runs on the author's machine is the failure
+   * mode this repository calls reproducing the bare machine. Deepening the
+   * checkout would be a delivery-infrastructure change smuggled in as a test
+   * fix, so the measurement moved instead of the workflow.
+   *
+   * A reader who wants to check the transcription against history can run
+   * `git show 51c8be4:tests/v2-09-dependent-commit-chain.test.ts` on a full
+   * clone; the assertion below keeps it from drifting from what the repository
+   * ships today.
    */
-  it('would have caught the tree that actually sent the pushes', () => {
+  it('would have caught the shape that actually sent the pushes', () => {
+    // Verbatim from the four leaking suites at the commit before this branch.
+    const helper = [
+      'async function invokeBlock(args: readonly string[], seams: BlockCommandSeams = {}): Promise<void> {',
+      '  const program = new Command();',
+      '  program.exitOverride();',
+      '  registerBlockCommand(program, seams);',
+      "  await program.parseAsync(['block', ...args], { from: 'user' });",
+      '}',
+    ].join('\n');
+
     const leaked = [
       'v2-08-attended-block-runner.test.ts',
       'v2-09-dependent-commit-chain.test.ts',
@@ -304,27 +383,46 @@ describe('a test may not reach the operator’s real notification target', () =>
       'v3-07-lease-release-observability.test.ts',
     ];
 
-    const before: ScannedFile[] = leaked.map((name) => ({
-      name,
-      text: execFileSync('git', ['show', `${BEFORE_THE_FIX}:tests/${name}`], {
-        cwd: join(TESTS_DIR, '..'),
-        encoding: 'utf8',
-        maxBuffer: 64 * 1024 * 1024,
-      }),
-    }));
+    expect(offenders(leaked.map((name) => ({ name, text: helper })))).toEqual(leaked);
 
-    // The shape is what it is, not what the fix wishes it had been: two
-    // arguments, second one a variable. Asserted, because if a future edit of
-    // this case reached for one-argument fixtures the measurement would quietly
-    // stop being about the incident.
-    for (const file of before) {
-      expect(file.text, `${file.name} should show the real call`).toContain(
-        'registerBlockCommand(program, seams)',
-      );
+    // The harder one, and the reason the seams-default rule exists rather than
+    // a whole-file "does it mention a notifier". `v2-10`'s subject IS
+    // notification, so it bound recording fakes in most of its cases and forgot
+    // one — a file that mentions notifiers everywhere and still had a call that
+    // would reach the operator's real profile.
+    const notificationSuite = [
+      'const recording = { notifier: recordingNotifier() };',
+      helper,
+      "await invokeBlock(['--repository', root, '--attended'], recording);",
+      "await invokeBlock(['--repository', root, '--attended']);",
+    ].join('\n');
+
+    expect(offenders([{ name: 'v2-10-like.test.ts', text: notificationSuite }])).toEqual([
+      'v2-10-like.test.ts',
+    ]);
+  });
+
+  /**
+   * And the files that leaked are sealed today, asserted against what the
+   * repository actually ships so the transcription above cannot quietly become
+   * a description of nothing.
+   */
+  it('seals all four suites the pushes came from', () => {
+    const files = testFiles();
+    for (const name of [
+      'v2-08-attended-block-runner.test.ts',
+      'v2-09-dependent-commit-chain.test.ts',
+      'v3-07-lease-release-fault.test.ts',
+      'v3-07-lease-release-observability.test.ts',
+    ]) {
+      const file = files.find((candidate) => candidate.name === name);
+      expect(file, `${name} should exist`).toBeDefined();
+      expect(file?.text).toContain('registerBlockCommand(program, { notifier: SILENT_NOTIFIER,');
     }
-
-    // And the rule reports every one of them.
-    expect(offenders(before)).toEqual(leaked);
+    // And the notification suite, which seals at its helper's DEFAULT rather
+    // than at each call, because its cases legitimately override it.
+    const v210 = files.find((f) => f.name === 'v2-10-operator-notification.test.ts');
+    expect(v210?.text).toContain('registerBlockCommand(program, { notifier: SILENT_NOTIFIER, ...seams });');
   });
 
   /**
@@ -355,6 +453,20 @@ describe('a test may not reach the operator’s real notification target', () =>
       },
       // Seams supplied, but not that seam.
       { name: 'other-seams.test.ts', text: 'registerBlockCommand(program, { runner });' },
+      // The only `notifier:` in the file is inside a STRING, so it binds
+      // nothing. A review fed exactly this to the previous version and it
+      // passed: rule 0 promised no rule could be satisfied by prose, and a
+      // string literal is prose the compiler keeps. The seams here has no
+      // empty default, so this fixture isolates the string-stripping rather
+      // than being caught by the seams-default rule.
+      {
+        name: 'notifier-in-a-string.test.ts',
+        text: [
+          "expect(source).toContain('notifier: SILENT_NOTIFIER');",
+          'const seams = buildSeams();',
+          'registerBlockCommand(program, seams);',
+        ].join('\n'),
+      },
       // The indirect route, with the longer argv the narrow needle missed.
       {
         name: 'full-argv.test.ts',
@@ -398,22 +510,6 @@ describe('a test may not reach the operator’s real notification target', () =>
     ];
 
     expect(offenders(fixtures)).toEqual([]);
-  });
-
-  /**
-   * The two suites the incident actually came from, pinned by name at the one
-   * helper each of them drives the CLI through.
-   */
-  it('seals the two suites the pushes came from, at their own helper', () => {
-    for (const name of [
-      'v2-08-attended-block-runner.test.ts',
-      'v2-09-dependent-commit-chain.test.ts',
-    ]) {
-      const file = testFiles().find((candidate) => candidate.name === name);
-      expect(file, `${name} should exist`).toBeDefined();
-      expect(file?.text).toContain('SILENT_NOTIFIER');
-      expect(file?.text).toContain('registerBlockCommand(program, { notifier: SILENT_NOTIFIER,');
-    }
   });
 
   /**

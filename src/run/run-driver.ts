@@ -1384,15 +1384,22 @@ export async function runTask(
     //
     // The mirror of that guarantee, stated because it is the case an operator
     // will actually meet. Commit-then-write is the only honest order, so there
-    // is a window where the commit LANDED and the task did not move: the state
-    // write losing the lease or hitting a conflict, and a commit that reached
-    // past the approved paths. Both leave HEAD off the failed attempt's
-    // `subjectCommit` with the record still `BLOCKED_VERIFY` — so this same
-    // grant then answers `HEAD_MOVED`, correctly, and the way on is `resolve`
-    // or a hand-made `git reset` and a fresh attempt. That is worse than a
-    // refusal and better than either alternative: undoing a commit in someone
-    // else's repository is not this build's business, and writing the state
-    // first would let a task claim a repair no commit carries.
+    // is a window where the commit LANDED and the task did not move. Two ways
+    // in leave the record exactly as it was — the state write losing the lease,
+    // and a commit that reached past the approved paths — and both then leave
+    // HEAD off the failed attempt's `subjectCommit` with the state still
+    // `BLOCKED_VERIFY`, so this same grant answers `HEAD_MOVED` on the next
+    // invocation, correctly, and the way on is `resolve` or a hand-made
+    // `git reset` and a fresh attempt.
+    //
+    // `STATE_CONFLICT` is not one of those and is not described by that
+    // sentence: a conflict means the durable record changed under this run, so
+    // what the task is afterwards is whatever the other writer made it, and
+    // nothing here can say. It is reported as itself for that reason.
+    //
+    // Worse than a refusal, better than either alternative: undoing a commit in
+    // someone else's repository is not this build's business, and writing the
+    // state first would let a task claim a repair no commit carries.
     if (verifyingOperatorRepair) {
       // Fenced, exactly as both sibling commit sites are. `leasedGit`'s own
       // header states the rule this obeys: the reads that decide *whether* to

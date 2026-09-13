@@ -395,7 +395,15 @@ export async function commitTaskWork(
   if (committed.outcome !== 'OK') {
     // Git says "nothing to commit" with exit 1. The effect gate above has
     // already answered that question, so reaching it here means the tree was
-    // dirty with something `add --all` does not stage — an ignored file, say.
+    // dirty with something `add --all` does not stage.
+    //
+    // Not "an ignored file, say", which stood here and is wrong:
+    // `WORKTREE_CLEANLINESS_ARGS` passes no `--ignored`, so an ignored-only tree
+    // reads clean at the gate above and returns before this line. What does
+    // reach it is a submodule `--ignore-submodules=none` calls dirty while its
+    // gitlink is unchanged, the gitlink probe disagreeing with `status`, or the
+    // tree changing back between the two reads.
+    //
     // Reported as the honest "nothing was recorded" rather than as a failure.
     const after = await git(worktreePath, [...WORKTREE_CLEANLINESS_ARGS, '-z']);
     if (after.outcome === 'OK' && committed.exitCode === 1) {

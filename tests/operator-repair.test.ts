@@ -309,6 +309,35 @@ describe('every predicate refuses on its own, and names itself', () => {
     expect(assessment.refusal).toBe('SCOPE_INDETERMINATE');
   });
 
+  /**
+   * A task with no base pin cannot have its repair's scope established, so it
+   * is refused — and the refusal is here rather than at the commit.
+   *
+   * `assessTaskScope` would answer `INDETERMINATE` for this state anyway, which
+   * is why the scope seam is held permitting: the point is that the gate refuses
+   * on its OWN reading of the record, so `OperatorRepairAllowed` can carry a
+   * `string` and the commit needs no `?? ''`. That coercion is what stood here
+   * before, and it would have committed first and failed `commitTaskWork`'s own
+   * scope control second — a write followed by a refusal, which is the one
+   * ordering this module is built to avoid.
+   *
+   * A review pointed out the arm had no test and the coercion was therefore a
+   * surviving mutant. It is not one now.
+   */
+  it('refuses a task whose base pin is absent, before anything is committed', async () => {
+    const assessment = await assessOperatorRepair(
+      input({
+        state: blockedState({ basePinnedCommit: null }),
+        assessScope: async () => withinScope(),
+      }),
+    );
+
+    expect(assessment.allowed).toBe(false);
+    if (assessment.allowed) expect.unreachable();
+    // The same code as any other unestablished scope: it is the same fact.
+    expect(assessment.refusal).toBe('SCOPE_INDETERMINATE');
+  });
+
   it('never approves a path on any refusal', async () => {
     const refusals = await Promise.all([
       assessOperatorRepair(input({ observeClean: async () => true })),
@@ -467,10 +496,11 @@ describe('the commit says an operator made it', () => {
       basePinnedCommit: BASE,
     });
 
-    expect(result.outcome).toBe('COMMITTED_BEYOND_APPROVED_SCOPE');
     // The distinction that matters to the driver: anything but `ADOPTED` stops
-    // the transition, so the task stays where it was and a person looks.
-    expect(result.outcome).not.toBe('ADOPTED');
+    // the transition, so the task stays where it was and a person looks. One
+    // assertion, not two — a `not.toBe('ADOPTED')` under a `toBe(...)` of a
+    // different value cannot fail if the line above passed.
+    expect(result.outcome).toBe('COMMITTED_BEYOND_APPROVED_SCOPE');
   });
 
 
