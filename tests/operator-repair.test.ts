@@ -321,8 +321,12 @@ describe('every predicate refuses on its own, and names itself', () => {
    * scope control second — a write followed by a refusal, which is the one
    * ordering this module is built to avoid.
    *
-   * A review pointed out the arm had no test and the coercion was therefore a
-   * surviving mutant. It is not one now.
+   * A review pointed out the arm had no test. What this case kills is the
+   * PAIR — dropping the gate and coercing at the commit — and the gate is the
+   * load-bearing half, because with it in place `state.basePinnedCommit` and
+   * `state.basePinnedCommit ?? ''` are the same expression in every reachable
+   * case. Restoring the coercion alone still passes, and saying so is more
+   * useful than claiming a mutant that did not die.
    */
   it('refuses a task whose base pin is absent, before anything is committed', async () => {
     const assessment = await assessOperatorRepair(

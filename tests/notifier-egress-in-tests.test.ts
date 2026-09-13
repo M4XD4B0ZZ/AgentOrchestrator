@@ -14,7 +14,7 @@
  *
  * ── Why a scan, and not only the two fixes ─────────────────────────────────
  *
- * The four suites are sealed at their own helpers, which stops today's leak. It
+ * The five suites are sealed at their own helpers, which stops today's leak. It
  * does not stop tomorrow's: the fallback is a *default*, so the failure mode is
  * a file that simply does not mention notification at all, and nothing about
  * writing such a file feels like a mistake. The whole reason this reached a
@@ -37,9 +37,12 @@
  *
  * What the rule is now:
  *
- *   0. comments are stripped before anything is read, so no rule can be
- *      satisfied by prose. That alone closes the one-line bypass structurally,
- *      rather than by adding another substring to look for;
+ *   0. comments **and string literals** are stripped before anything is read,
+ *      so no rule can be satisfied by prose. That alone closes the one-line
+ *      comment bypass structurally, rather than by adding another substring to
+ *      look for. Both halves are needed and the second was learned late: a
+ *      string literal is prose the compiler keeps, and a review satisfied the
+ *      rule with `{ runner: make("notifier: none") }`;
  *   1. every `registerBlockCommand(` call must pass a second argument;
  *   2. a second argument written inline as an object literal must name
  *      `notifier`. `{ runner }` is the same hole with extra steps;
@@ -232,11 +235,18 @@ function offenders(files: readonly ScannedFile[]): readonly string[] {
   const bad: string[] = [];
   for (const file of files) {
     const text = withoutComments(file.text);
-    const calls = registerBlockCommandArguments(text);
+    const values = withoutCommentsOrStrings(file.text);
+    // Calls are read from the STRING-stripped text, not merely the
+    // comment-stripped text. Rule 0 says no rule can be satisfied by prose, and
+    // a string literal is prose the compiler keeps: with only comments removed,
+    // `registerBlockCommand(program, { runner: make("notifier: none") })`
+    // satisfied rule 2 on the word inside that string. Measured. Stripping
+    // strings first also makes the brace counter more accurate, since a brace
+    // inside a string can no longer unbalance it.
+    const calls = registerBlockCommandArguments(values);
     // Does this file bind a notifier at all, anywhere? Only ever consulted for
     // a call whose seams are a variable, where the binding is necessarily
     // somewhere other than the call.
-    const values = withoutCommentsOrStrings(file.text);
     const bindsANotifier = /\bnotifier\s*:/.test(values) || values.includes('SILENT_NOTIFIER');
 
     const callIsUnsealed = calls.some((args) => {
@@ -453,6 +463,17 @@ describe('a test may not reach the operator’s real notification target', () =>
       },
       // Seams supplied, but not that seam.
       { name: 'other-seams.test.ts', text: 'registerBlockCommand(program, { runner });' },
+      // The word inside the INLINE seams object is a string, so rule 2 must
+      // not accept it. This is the second half of the same review finding: the
+      // calls themselves are read from string-stripped text, not only the
+      // whole-file binding question.
+      // No argv line on purpose: with one, rule 4 would report this file for
+      // binding nothing and the case would not isolate rule 2 at all. This way
+      // the direct call is the only thing that can decide it.
+      {
+        name: 'notifier-inside-the-seams-string.test.ts',
+        text: 'registerBlockCommand(program, { runner: make("notifier: none") });',
+      },
       // The only `notifier:` in the file is inside a STRING, so it binds
       // nothing. A review fed exactly this to the previous version and it
       // passed: rule 0 promised no rule could be satisfied by prose, and a
