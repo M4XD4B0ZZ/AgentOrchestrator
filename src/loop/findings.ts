@@ -29,9 +29,11 @@
  */
 
 import type { ReviewFinding } from '../agent/codex-reviewer.js';
+import { INSTRUMENT_FAILURE_TOKEN } from '../agent/internal/codex-review-transcript.js';
 import type { ExecutionBrief } from '../plan/task-brief.js';
+import { lineSafe } from '../core/line-safe-text.js';
 import type { TaskState } from '../core/task-state.js';
-import { clampPayload, MAX_AGENT_PAYLOAD_CHARS } from './payload-budget.js';
+import { clampPayload, clampTo, MAX_AGENT_PAYLOAD_CHARS } from './payload-budget.js';
 import type { VerificationAttemptRecord } from '../verify/verification-attempt.js';
 import {
   reviewerBriefingLines,
@@ -94,12 +96,86 @@ export function appendFindings(
 }
 
 /**
+ * Tells the reviewer which project its code intelligence must answer for.
+ *
+ * ── The defect this exists for ─────────────────────────────────────────────
+ *
+ * On 2026-09-12 a reviewer of `healthapp/CAPTURE-003` called CodeGraph six
+ * times without a project path. Every call was answered from a *different*
+ * repository's index, because the tool resolves a project from somewhere the
+ * caller did not name — a server working directory, in that case, pinned to
+ * another checkout. The reviewer noticed, refused to substitute `grep`, and so
+ * never read a line of the code it was reviewing.
+ *
+ * What AO had told it: that an index existed. Not which tree. Every spatial
+ * referent in this payload was deictic — "this repository", "this worktree" —
+ * and `buildReviewPayload` could not have named a path if it wanted to, because
+ * it was not given one. The path is the fix's whole substance; naming the
+ * parameter that carries it is the rest.
+ *
+ * ── What is always said, and what is conditional ───────────────────────────
+ *
+ * The *targeting* instruction is unconditional: it is true wherever a
+ * code-intelligence tool exists, and a reviewer that has no such tool simply
+ * has nothing to apply it to. The *obligation to stop* is gated on the
+ * repository declaring the capability `REQUIRED`, because telling a reviewer to
+ * abort over an optional tool would manufacture blocks in repositories that
+ * never asked for one.
+ *
+ * Measured, since the size is the cost argument for emitting the block at all:
+ * 8 lines unconditionally, 15 when `REQUIRED`. Neither part is repository-
+ * authored — the only variable in it is the worktree path — and since the
+ * budget defect below, neither part competes with the reply schema for room.
+ *
+ * The verdict itself is defined in the reply schema unconditionally, so prompt
+ * and parser state one vocabulary in every payload. What the gate adds is *when
+ * the reviewer must reach for it*, not whether it exists.
+ */
+function codeIntelligenceTargetingLines(
+  brief: ExecutionBrief,
+  tree: string,
+): readonly string[] {
+  const lines = [
+    'CODE INTELLIGENCE — WHICH PROJECT IT MUST ANSWER FOR',
+    '  Every code-intelligence call that accepts a project path must be given',
+    `  ${tree} as that path (for CodeGraph the argument is named "projectPath").`,
+    '  Omit it and the tool resolves a project from somewhere you did not name,',
+    '  then answers confidently for the wrong repository.',
+    '  Before you rely on any symbol it returns, confirm the files it names lie',
+    '  inside that tree. A graph that is not this tree’s is not evidence about',
+    '  this task.',
+  ];
+
+  if (brief.codegraph.requirement === 'REQUIRED') {
+    lines.push(
+      '  This repository declares that capability REQUIRED. If you cannot bind it',
+      '  to the tree above, or what comes back is another project’s, STOP: reply',
+      `  with the "${INSTRUMENT_FAILURE_TOKEN}" verdict defined below.`,
+      '  Do NOT fall back to text search, file reading or recollection, and do NOT',
+      '  report findings inferred from handoff notes, task text or any other prose',
+      '  in place of findings observed in source. A review you could not perform',
+      '  is not a review with fewer findings.',
+    );
+  }
+
+  return lines;
+}
+
+/**
  * The instructions handed to the reviewer, on stdin.
  *
  * It quotes the canonical review document from `README.md` ("The review
- * document, canonically") because the parser that enforces that shape is
- * internal and a prompt may not reach into it. The two are expected to change
- * together; `codex-review-transcript.ts` names this dependency explicitly.
+ * document, canonically"): the parser that enforces that shape is internal, so
+ * the README is the anchor the three copies are kept equal against, and
+ * `codex-review-transcript.ts` names that dependency explicitly.
+ *
+ * The one thing this module does import from that internal parser is
+ * `INSTRUMENT_FAILURE_TOKEN`, and the exception is deliberate. This comment
+ * used to say a prompt "may not reach into" the parser at all, which stopped
+ * being true when the third verdict arrived: a duplicated literal on each side
+ * is free to drift, and a prompt offering a token the parser rejects is a
+ * silent refusal while a parser accepting one no prompt offers is dead code.
+ * One shared constant, and nothing else.
  *
  * Nothing here interpolates repository text into a command line — this is a
  * stdin payload, and the reviewer's argv is the frozen `CODEX_REVIEWER_ARGS`.
@@ -134,10 +210,25 @@ export function buildReviewPayload(
   brief: ExecutionBrief,
   round: number,
   briefing: OrchestratorBriefing,
+  worktreePath: string,
 ): string {
-  const lines = [
-    `Review the working tree of this repository against task ${brief.taskId}`,
+  // `lineSafe` at the source, which is where this repository puts that rule.
+  // The value is the orchestrator's own authorised worktree path rather than
+  // repository-authored prose — `loop-step.ts` has already proved it equal to
+  // the task state's — but it is quoted into instructions, and anything quoted
+  // into instructions must not be able to start a line of its own.
+  const tree = lineSafe(worktreePath);
+
+  // The orchestrator's own frame. Above the repository's text, because that is
+  // where a frame belongs — and now also *reserved* against the budget, for the
+  // reason the tail is.
+  const head = [
+    `Review the working tree at ${tree} against task ${brief.taskId}`,
     `(review round ${round}). You are read-only: do not modify any file.`,
+    '',
+    'That absolute path is the ONLY tree this review is about. It is a worktree',
+    'of this repository, not the repository root, and a sibling checkout of the',
+    'same repository is a DIFFERENT tree holding different work.',
     '',
     'Answer two questions, and treat a failure of either as a finding:',
     '  1. does the working tree SATISFY the task as stated below? Work that is',
@@ -145,20 +236,25 @@ export function buildReviewPayload(
     '     an empty change satisfies nothing.',
     '  2. does it introduce defects?',
     '',
-    // Placed BEFORE the task body, and that position is load-bearing twice over.
-    // `clampPayload` cuts the TAIL, so a block appended after a maximal body
-    // would be the first thing truncated away — and the orchestrator's own frame
-    // belongs above the repository's text rather than below it. The block is a
-    // fixed handful of short lines with no repository-derived length in it, so
-    // it cannot crowd out the reply schema either.
-    ...reviewerBriefingLines(briefing),
+    ...codeIntelligenceTargetingLines(brief, tree),
     '',
-    'TASK',
-    brief.body,
+    ...reviewerBriefingLines(briefing),
   ];
 
+  // The repository-authored middle: the part whose length the repository
+  // controls without bound, and therefore the only part the budget is spent on.
+  // (The head is not *entirely* fixed — it interpolates `brief.taskId`, capped
+  // at 128 characters by `MAX_TASK_ID_LENGTH`. That is bounded, so it is not
+  // what the budget has to defend against, but "fixed" would be false.)
+  //
+  // Two leading blanks, not one. `headText` carries no trailing newline, so the
+  // first supplies the line break and the second the empty line that set TASK
+  // off before this was three arrays instead of one. Written down because the
+  // split silently ate that blank line once already.
+  const middle = ['', '', 'TASK', brief.body];
+
   if (brief.bodyTruncated) {
-    lines.push(
+    middle.push(
       '',
       '[The task text above was truncated at the payload budget. Read the task',
       'file in the repository for the remainder.]',
@@ -166,22 +262,21 @@ export function buildReviewPayload(
   }
 
   if (brief.contextSources.length > 0) {
-    lines.push('', 'CONTEXT SOURCES (paths in this worktree — open them yourself as needed)');
+    middle.push('', 'CONTEXT SOURCES (paths in this worktree — open them yourself as needed)');
     for (const source of brief.contextSources) {
-      lines.push(
+      middle.push(
         source.status === 'PRESENT' ? `- ${source.path}` : `- ${source.path} [${source.status}]`,
       );
     }
   }
 
-  return clampPayload([
-    ...lines,
+  const tail = [
     '',
     'Reply with exactly one JSON document as your final message, and nothing else:',
     '',
     '{',
     '  "reviewVersion": 1,',
-    '  "verdict": "PASS" | "FINDINGS",',
+    `  "verdict": "PASS" | "FINDINGS" | "${INSTRUMENT_FAILURE_TOKEN}",`,
     '  "findings": [',
     '    { "severity": "critical|high|medium|low|info",',
     '      "path": "repository/relative/posix/path.ts",',
@@ -192,6 +287,14 @@ export function buildReviewPayload(
     'Rules, all enforced:',
     '- "verdict" must agree with the list: PASS requires an empty findings array,',
     '  FINDINGS requires a non-empty one.',
+    `- "${INSTRUMENT_FAILURE_TOKEN}" means the code intelligence you were required`,
+    '  to use could not be bound to the tree named at the top of these',
+    '  instructions, or answered for a different project, so no review was',
+    '  performed. It requires an EMPTY findings array: a review you could not',
+    '  carry out has nothing to report about the source. It is not a pass, it is',
+    '  not a failure of the work, and it does not spend a review round — it says',
+    '  the instrument was wrong, and it is always the right answer when it is',
+    '  true. Never substitute findings inferred from prose for it.',
     '- at most 64 findings.',
     '- "path" is repository-relative POSIX, built only from [A-Za-z0-9] and',
     '  ". _ : @ = + / -", at most 1 024 characters: no leading "/", no drive',
@@ -201,7 +304,39 @@ export function buildReviewPayload(
     '- "rule" is a slug of [A-Za-z0-9] with inner "._:-", at most 128 characters.',
     '- any other shape, any unknown severity, any surrounding prose makes the',
     '  document unreadable, which is never read as "no problems found".',
-  ].join('\n'));
+  ];
+
+  // ── Why this is not one `clampPayload` over one array ────────────────────
+  //
+  // It was, and the reply schema was the tail, so the schema was the first
+  // thing a long task body pushed off the end. Measured against the shipped
+  // build on 2026-09-12: a schema-legal profile — a maximal 8 192-character
+  // body beside 64 canonical sources — produced 18 080 characters clamped to
+  // 16 384, with `"reviewVersion": 1` absent and every grammar rule gone. A
+  // reviewer handed that cannot answer in a readable shape, so the round parks
+  // at HUMAN_DECISION_REQUIRED having spent a real reviewer call on nothing;
+  // and after this slice it would also have been told to reply with a verdict
+  // whose definition had just been cut away.
+  //
+  // So the head and the tail are reserved, and only the middle is clamped. The
+  // budget is unchanged and still hard: `clampTo` gets exactly what is left.
+  //
+  // The `room < 0` guard is the degenerate case, and it is worth being exact
+  // about what it does rather than flattering it. It fires only when the head
+  // and the reply schema *alone* exceed the budget, which needs a worktree path
+  // of roughly 6 400 characters — the head interpolates it twice — and it then
+  // clamps head+tail from the END, so the reply schema is cut after all. It is
+  // not a rescue; it is the ceiling being held when the guarantee above it can
+  // no longer be. Just below that threshold there is a narrow band where `room`
+  // is smaller than the truncation marker and the whole task body is replaced
+  // by a marker fragment. Both are unreachable on any path a filesystem will
+  // hand out, and both are stated here rather than discovered later.
+  const headText = head.join('\n');
+  const tailText = `\n${tail.join('\n')}`;
+  const room = MAX_AGENT_PAYLOAD_CHARS - headText.length - tailText.length;
+  if (room < 0) return clampPayload(`${headText}${tailText}`);
+
+  return `${headText}${clampTo(middle.join('\n'), room)}${tailText}`;
 }
 
 function severityTally(findings: readonly { readonly severity: string }[]): string {

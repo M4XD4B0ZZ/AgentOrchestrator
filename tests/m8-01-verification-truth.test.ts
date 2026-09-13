@@ -426,7 +426,7 @@ describe('the payloads that carry it', () => {
   };
 
   it('puts the block above the task body, where the clamp cannot cut it', () => {
-    const payload = buildReviewPayload(brief, 1, briefingFixture());
+    const payload = buildReviewPayload(brief, 1, briefingFixture(), 'D:\\Trees\\M8-01');
     expect(payload.indexOf('VERIFICATION')).toBeLessThan(payload.indexOf('TASK'));
   });
 
@@ -435,6 +435,7 @@ describe('the payloads that carry it', () => {
       { ...brief, body: 'x'.repeat(8_192), bodyTruncated: true },
       1,
       briefingFixture(),
+      'D:\\Trees\\M8-01',
     );
     expect(payload).toContain('"reviewVersion": 1');
   });

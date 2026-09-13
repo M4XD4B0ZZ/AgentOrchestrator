@@ -265,6 +265,16 @@ export async function runCodexReviewer(
   }
 
   const transcript = readCodexTranscript(result.stdout);
+
+  // Checked BEFORE the catch-all below, and before the success return. An
+  // instrument failure is a well-formed document, so it would otherwise be
+  // neither: not `REVIEWED`, and therefore collapsed into "the CLI printed
+  // garbage". Routing it here — a failure, not a completion — is what keeps it
+  // out of `appendFindings` and out of the review budget: `findings` does not
+  // exist on `CodexReviewFailed`, so there is no member for a caller to read.
+  if (transcript.verdict === 'INSTRUMENT_FAILURE') {
+    return reviewFailure(evidence, 'AGENT_REVIEW_INSTRUMENT_FAILED');
+  }
   if (transcript.verdict !== 'REVIEWED') return reviewFailure(evidence, 'AGENT_RESULT_MALFORMED');
 
   return Object.freeze({

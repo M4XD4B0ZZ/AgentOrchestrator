@@ -74,6 +74,9 @@ import {
   type StartedTask,
 } from './helpers/e2e-fixtures.js';
 
+/** A stand-in for the authorised worktree `buildReviewPayload` now names. */
+const REVIEW_TREE = 'D:\\Trees\\REM-001';
+
 afterAll(() => {
   releaseTestLeases();
   removeTrackedWorkspaces();
@@ -814,11 +817,13 @@ describe('the reviewer is told what the task requires', () => {
       briefFor({ body: 'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.' }),
       1,
       briefingFixture(),
+      REVIEW_TREE,
     );
     const b = buildReviewPayload(
       briefFor({ body: 'Document the widget. ACCEPTANCE: README gains a Widget section.' }),
       1,
       briefingFixture(),
+      REVIEW_TREE,
     );
 
     expect(a).not.toBe(b);
@@ -829,16 +834,16 @@ describe('the reviewer is told what the task requires', () => {
   });
 
   it('tells the reviewer which round it is', () => {
-    expect(buildReviewPayload(briefFor(), 3, briefingFixture())).toContain('round 3');
+    expect(buildReviewPayload(briefFor(), 3, briefingFixture(), REVIEW_TREE)).toContain('round 3');
   });
 
   it('asks whether the tree satisfies the task, not only what it broke', () => {
     // Without this the round-3 PASS recurs: an empty diff introduces no defects.
-    expect(buildReviewPayload(briefFor(), 1, briefingFixture())).toMatch(/satisf/i);
+    expect(buildReviewPayload(briefFor(), 1, briefingFixture(), REVIEW_TREE)).toMatch(/satisf/i);
   });
 
   it('says so when the body was truncated', () => {
-    expect(buildReviewPayload(briefFor({ bodyTruncated: true }), 1, briefingFixture())).toMatch(/truncat/i);
+    expect(buildReviewPayload(briefFor({ bodyTruncated: true }), 1, briefingFixture(), REVIEW_TREE)).toMatch(/truncat/i);
   });
 
   it('parks rather than degrading when the brief is unavailable', async () => {

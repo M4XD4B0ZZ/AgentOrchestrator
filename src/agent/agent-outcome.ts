@@ -12,7 +12,7 @@
  * direction only. `src/core/transitions.ts` offers no "the agent ran and
  * produced nothing usable" state — `BLOCKED_VERIFY` is reachable from
  * `VERIFYING` alone, and inventing a new state is a product-contract change,
- * not something a runner slice is entitled to do. So four different diagnoses
+ * not something a runner slice is entitled to do. So five different diagnoses
  * all lead to `HUMAN_DECISION_REQUIRED`, and the code is what preserves the
  * difference between them for the person who has to make that decision.
  *
@@ -50,6 +50,36 @@ export const AGENT_FAILURE_CODES = [
    * no result here to act on.
    */
   'AGENT_RESULT_MALFORMED',
+  /**
+   * The reviewer ran, produced a well-formed document, and said in it that the
+   * instrumentation this review was required to use could not be established —
+   * unavailable, or answering for a project that is not the worktree under
+   * review.
+   *
+   * Carried apart from `AGENT_RESULT_MALFORMED`, which is the code it used to
+   * arrive under, because the two are different facts and only one of them is
+   * the agent's fault. Malformed means "there is nothing here to read"; this
+   * means "the agent read its instructions, did the honest thing, and is
+   * telling you its instrument was pointed at the wrong repository".
+   *
+   * How far that distinction actually travels, stated rather than implied:
+   * `code` and `detail` are read at this boundary and by whoever inspects the
+   * outcome object. `loop-step.ts` forwards only the disposition and the block
+   * to the durable record, so the two codes park the task identically and an
+   * operator reading the state alone still cannot tell them apart. The gain is
+   * diagnosis fidelity at the boundary, not a different lifecycle.
+   *
+   * The defect that produced it: on 2026-09-12 a reviewer's CodeGraph calls
+   * were answered from a *different* repository's index. It refused to
+   * substitute `grep`, as it should — and then, having no verdict for its own
+   * situation, emitted ordinary FINDINGS built from handoff prose. Those spent
+   * the review budget and forced `HUMAN_DECISION_REQUIRED` on work no reviewer
+   * had read. An agent that can only report results will report results.
+   *
+   * Reachable from the reviewer only. It widens `ClaudeWriterFailed['code']`,
+   * where nothing produces it, and that is the price of one shared closed set.
+   */
+  'AGENT_REVIEW_INSTRUMENT_FAILED',
   /** Quota exhaustion, positively recognised. See `internal/claude-result-stream.ts`. */
   'AGENT_USAGE_LIMIT',
   /** An authentication or session rejection, positively recognised. */
@@ -95,6 +125,8 @@ export const AGENT_FAILURE_TEXT: Readonly<Record<AgentFailureCode, string>> = Ob
   AGENT_NONZERO_EXIT: 'The agent ran and exited with a non-zero status.',
   AGENT_RESULT_MALFORMED:
     'The agent ran but did not produce the structured result this boundary requires.',
+  AGENT_REVIEW_INSTRUMENT_FAILED:
+    'The reviewer reported that the code intelligence this review requires could not be bound to the worktree under review, so no review was performed.',
   AGENT_USAGE_LIMIT: 'The agent reported that its usage allowance is exhausted.',
   AGENT_SESSION_REJECTED: 'The agent reported that it is not authenticated for this run.',
 });
@@ -110,12 +142,16 @@ export const AGENT_FAILURE_DISPOSITION: Readonly<Record<AgentFailureCode, AgentD
   Object.freeze({
     AGENT_USAGE_LIMIT: 'AGENT_BLOCKED_USAGE_LIMIT',
     AGENT_SESSION_REJECTED: 'AGENT_BLOCKED_AUTH',
-    // The remaining four are genuinely different diagnoses that the state
+    // The remaining five are genuinely different diagnoses that the state
     // machine cannot tell apart: there is no state for "the agent misbehaved".
+    // `AGENT_REVIEW_INSTRUMENT_FAILED` shares the edge deliberately — a review
+    // that could not run does still need a human, and inventing a state for it
+    // would be the lifecycle redesign this repair is explicitly not.
     AGENT_ARGUMENT_REFUSED: 'AGENT_NEEDS_ATTENTION',
     AGENT_PROCESS_UNAVAILABLE: 'AGENT_NEEDS_ATTENTION',
     AGENT_NONZERO_EXIT: 'AGENT_NEEDS_ATTENTION',
     AGENT_RESULT_MALFORMED: 'AGENT_NEEDS_ATTENTION',
+    AGENT_REVIEW_INSTRUMENT_FAILED: 'AGENT_NEEDS_ATTENTION',
   });
 
 /**

@@ -110,6 +110,23 @@ export interface ReviewFinding {
 export type CodexTranscriptVerdict =
   /** The turn finished and carried a valid review document. */
   | 'REVIEWED'
+  /**
+   * The turn finished and carried a valid document whose verdict says the
+   * review could **not** be performed: the code intelligence it was required to
+   * use was unavailable, or answered for a project other than the worktree
+   * under review.
+   *
+   * Separate from `UNRECOGNISED`, and the separation is the whole point. Both
+   * mean "no findings to act on", but only this one is a *positive statement by
+   * the reviewer about its own instrument*, and only this one distinguishes an
+   * honest refusal from a CLI that printed garbage. Collapsing them again would
+   * restore the condition this member was added for.
+   *
+   * `findings` is always empty here, enforced in {@link readReviewDocument}: a
+   * reviewer that could not read the source has, by its own account, nothing to
+   * report about the source.
+   */
+  | 'INSTRUMENT_FAILURE'
   /** Anything else. One verdict, because they all mean "no review to act on". */
   | 'UNRECOGNISED';
 
@@ -128,6 +145,21 @@ export interface CodexTranscriptReading {
 
 const UNRECOGNISED: CodexTranscriptReading = Object.freeze({
   verdict: 'UNRECOGNISED' as const,
+  findings: Object.freeze([]) as readonly ReviewFinding[],
+});
+
+/**
+ * The token a reviewer writes in `verdict` to report its own instrument.
+ *
+ * Exported because `loop/findings.ts` quotes the reply schema into the
+ * reviewer's instructions, and a prompt offering a token this parser does not
+ * accept — or a parser accepting one no prompt offers — is a dead branch in one
+ * direction and a silent refusal in the other. The constant is the join.
+ */
+export const INSTRUMENT_FAILURE_TOKEN = 'INSTRUMENT_FAILURE';
+
+const INSTRUMENT_FAILURE: CodexTranscriptReading = Object.freeze({
+  verdict: 'INSTRUMENT_FAILURE' as const,
   findings: Object.freeze([]) as readonly ReviewFinding[],
 });
 
@@ -231,7 +263,19 @@ export function readReviewDocument(text: string): CodexTranscriptReading {
   if (parsed['reviewVersion'] !== REVIEW_DOCUMENT_VERSION) return UNRECOGNISED;
 
   const verdict = parsed['verdict'];
-  if (verdict !== 'PASS' && verdict !== 'FINDINGS') return UNRECOGNISED;
+  if (verdict !== 'PASS' && verdict !== 'FINDINGS' && verdict !== INSTRUMENT_FAILURE_TOKEN) {
+    return UNRECOGNISED;
+  }
+
+  // Checked before the array requirement below, because the most economical
+  // honest refusal a reviewer can write is
+  // `{"reviewVersion":1,"verdict":"INSTRUMENT_FAILURE"}` — no `findings` key at
+  // all. Requiring the key there would report the one document we most want to
+  // read as "the CLI printed garbage". An ABSENT list is empty; a present one
+  // still has to be an empty array, which is checked with the others below.
+  if (parsed['verdict'] === INSTRUMENT_FAILURE_TOKEN && parsed['findings'] === undefined) {
+    return INSTRUMENT_FAILURE;
+  }
 
   const raw = parsed['findings'];
   if (!Array.isArray(raw)) return UNRECOGNISED;
@@ -242,6 +286,15 @@ export function readReviewDocument(text: string): CodexTranscriptReading {
   // read, and the safe reading of an unreadable review is not "no problems".
   if (verdict === 'PASS' && raw.length !== 0) return UNRECOGNISED;
   if (verdict === 'FINDINGS' && raw.length === 0) return UNRECOGNISED;
+
+  // The same agreement rule, applied to the third verdict, and it is the one
+  // that keeps an instrument failure from becoming findings by another route.
+  // A reviewer that says it could not inspect the source may not simultaneously
+  // report defects in it; a document doing both is unreadable, not a compromise.
+  if (verdict === INSTRUMENT_FAILURE_TOKEN) {
+    if (raw.length !== 0) return UNRECOGNISED;
+    return INSTRUMENT_FAILURE;
+  }
 
   const findings: ReviewFinding[] = [];
   for (const entry of raw) {
