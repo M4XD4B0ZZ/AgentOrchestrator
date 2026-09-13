@@ -445,6 +445,38 @@ describe('the unattended automatic-resume mode refuses unusable combinations fir
     expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
   });
 
+  /**
+   * The option reaches the lifecycle, and the lifecycle reaches the driver.
+   *
+   * A source pin, and worth being plain about what that buys. Everything else
+   * about this grant is measured behaviourally — the refusals here, the
+   * predicate in `operator-repair.test.ts`, the adoption in
+   * `run-driver.test.ts`, and a real commit in `v3-06-lifecycle-driver.test.ts`
+   * — but nothing drove the CLI's own `executeAttended` end to end, because
+   * `driveLifecycle` has no seam and giving it one to satisfy a test would be a
+   * production change made for a test's convenience.
+   *
+   * A review named this as a surviving mutant: hard-code either forwarding hop
+   * to `false` and every behavioural test still passed, while the flag became
+   * silently inert. Two substrings close that, and they are not tautological —
+   * they are read out of the shipped source, and either one being deleted or
+   * inverted fails here.
+   */
+  it('forwards the operator-repair grant from the option to the lifecycle', () => {
+    const source = readFileSync(join(process.cwd(), 'src', 'cli', 'run-command.ts'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+    // Parsed option -> the lifecycle argument object.
+    expect(source).toContain('verifyOperatorRepair: options.verifyOperatorRepair === true');
+    // That object -> the `driveLifecycle` request.
+    expect(source).toContain('verifyOperatorRepair: lifecycle.verifyOperatorRepair');
+    // Never invented from something else: the grant is the operator's word, so
+    // it must not be derived from `--attended` or from the sibling flag.
+    expect(source).not.toContain('verifyOperatorRepair: true');
+    expect(source).not.toContain('verifyOperatorRepair: attended');
+  });
+
   it('refuses an unusable --max-wait-ms with its own code', async () => {
     const root = createRepoFixture({
       defaultBranch: 'main',

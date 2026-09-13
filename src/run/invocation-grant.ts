@@ -238,7 +238,11 @@ export function mayRemediateVerifyFailure(grant: InvocationGrant): boolean {
 
 /**
  * Whether this invocation may adopt an operator's own repair of a failed
- * verification and re-verify, with no agent involved.
+ * verification and re-verify, without asking any agent to repair anything.
+ *
+ * The adoption starts no writer and reads no finding. The invocation is not
+ * agent-free: the ordinary loop continues afterwards, so a verification that
+ * now passes goes on to REVIEW, which runs the reviewer.
  *
  * `ATTENDED` only, and for a plainer reason than its siblings: the sentence
  * this grant carries is "I have repaired this tree myself". Nobody is present

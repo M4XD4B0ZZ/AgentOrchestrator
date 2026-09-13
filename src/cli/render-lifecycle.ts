@@ -275,8 +275,10 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       'The repository\'s verification commands failed and were not retried. Two decisions\n' +
       '  continue it, and neither is an automatic retry. If YOU have already repaired the\n' +
       '  tree, re-run with --attended and --verify-operator-repair: that commits your own\n' +
-      '  repair and verifies again with no agent, and is refused unless HEAD is still the\n' +
-      '  failed attempt\'s own commit and the repair is in scope. Otherwise re-run with\n' +
+      '  repair and verifies again without asking any agent to repair anything, and is\n' +
+      '  refused unless HEAD is still the failed attempt\'s own commit and the repair is in\n' +
+      '  scope. The run then continues normally, so a verification that now passes goes on\n' +
+      '  to review, which does start an agent. Otherwise re-run with\n' +
       '  --attended and --remediate-verify-failure to hand the recorded failure to the\n' +
       '  writing agent, after which verification runs again on what the writer leaves.\n' +
       '  Each is spent on one departure per invocation. `run --task <id>` prints what was\n' +

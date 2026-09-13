@@ -2867,7 +2867,10 @@ verification-recovery fix is that an **operator** may now take that edge, with
 
 **A second operator door, added after CAPTURE-004 measured the cost of having
 only the first.** `run --attended --task <id> --verify-operator-repair` adopts a
-repair the *operator* already made and re-verifies, starting no agent. It exists
+repair the *operator* already made and re-verifies, without asking any agent to
+repair anything. The adoption starts no writer and reads no finding; the run
+continues normally afterwards, so a verification that now passes goes on to
+review, which does start one. It exists
 because the mechanical case had nowhere to go: verification failed on a
 formatter check, and committing the repair moved `HEAD` off the failed attempt's
 `subjectCommit` so the stored failure stopped being evidence about the tree,
@@ -2901,6 +2904,17 @@ loop step ends the `runTask` call unconditionally, and `driveLifecycle` re-enter
 the whole lifecycle. One departure per lifecycle therefore holds without anything
 new, and a counter-proof mutant that deleted the new per-invocation limit
 survived every test, which is how this was established rather than assumed.
+
+A second round of the same measurement found the same answer one layer down and
+for a second reason: even where a run *does* come back round, the adoption has
+by then committed the repair, so the worktree is clean and the predicate itself
+answers `NOTHING_TO_ADOPT`. Both `runTask`'s and `driveLifecycle`'s
+`operatorRepairSpent` ledgers are therefore defence in depth — as is the
+sibling `verifyRemediationSpent`, whose identical mutant also survives — and
+they are kept because the situation that would make them load-bearing is a tree
+dirtied again between passes, which is exactly when nobody would want them
+absent. No test in this repository distinguishes them today, and that is said
+here rather than left to be discovered.
 
 `HUMAN_DECISION_REQUIRED` has the same shape and got the same treatment one
 change later, with `run --attended --task <id> --continue-human-decision`. Two
@@ -4191,7 +4205,7 @@ and because the failure mode it describes — a command that cannot start is
   and this slice reports it rather than closing it. `transitions.ts` declares
   `BLOCKED_AUTH → AUTH_PREFLIGHT` and `resume-policy.ts` declares
   `resumeReentry: 'VIA_AUTH_PREFLIGHT'`; nothing in `src/` ever writes
-  `AUTH_PREFLIGHT`, and the three operator conjuncts are pinned by their first
+  `AUTH_PREFLIGHT`, and the four operator conjuncts are pinned by their first
   terms to other states. So restoring the login is necessary and is not
   sufficient, and the attention sentence says exactly that. The first draft of it
   said "log in, then re-run", which is what `render-lifecycle.ts` implies and

@@ -92,3 +92,34 @@ export function reviewBudgetExhausted(
 ): boolean {
   return state.reviewRound >= reviewBudget(state);
 }
+
+/**
+ * The round that names work belonging to the current pass.
+ *
+ * `ResumePointSchema` requires 1, `reviewRound` starts at 0, and every round on
+ * a state is additionally bounded by the budget — so this clamps at both ends
+ * rather than trusting arithmetic to stay inside the contract.
+ *
+ * The BUDGET, not the declaration. After a granted round parks with
+ * `reviewRound` above what the repository declared, clamping to the declaration
+ * would name an earlier round — and the remediation step would then brief a
+ * round whose findings are already closed while the new ones sit unread, or
+ * filter to a round with no records at all and refuse to start a writer.
+ *
+ * ── Why it lives here rather than in `loop/loop-step.ts` ───────────────────
+ *
+ * It was private there, and a second caller appeared: the operator-repair
+ * commit. That caller first grew its own `reviewRound + 1`, which disagreed
+ * with this at every `reviewRound >= 1` and could name a round above the
+ * budget; the fix for that then read `resumeFrom.round` instead, which agrees
+ * with this on every state AO writes — `runVerifyStep` records the block with
+ * exactly this value — but not on a hand-edited one, where a schema-valid
+ * resume round can be anything. Both were review findings, and both existed
+ * only because the computation had one home and two users.
+ *
+ * So: one definition, and every artefact that names a round reads it. A round
+ * appearing in a commit message is permanent, and `commitTaskWork` has no undo.
+ */
+export function currentRound(state: ReviewBudgetInput & { readonly reviewRound: number }): number {
+  return Math.min(Math.max(1, state.reviewRound), reviewBudget(state));
+}

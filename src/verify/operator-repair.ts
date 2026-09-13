@@ -22,22 +22,33 @@
  *
  * What was missing is not a fix for either of those: both behaved as designed.
  * It is the edge neither of them is — *the operator has repaired this exact
- * failed tree; adopt the repair and verify again, with no agent involved.*
+ * failed tree; adopt that repair and verify again, without asking any agent to
+ * repair anything.*
+ *
+ * "Without asking any agent" and not "with no agent involved". The adoption
+ * runs none: no writer is briefed, no finding is read or written. What follows
+ * it is the ordinary loop, so a verification that now passes goes on to REVIEW,
+ * which does run the reviewer. The narrower sentence is the true one, and the
+ * broader one was a review finding.
  *
  * ── What this module is, and what it deliberately is not ───────────────────
  *
  * Two halves, split so the decision can be tested without the effect.
  * {@link assessOperatorRepair} observes and classifies and writes
- * nothing. {@link verifyOperatorRepair} performs the one effect — staging and
+ * nothing. {@link commitOperatorRepair} performs the one effect — staging and
  * committing the operator's diff under AO's own commit controls — and performs
  * it only against an assessment that already said yes.
  *
- * It is **agent-free** by construction: nothing here imports a runner, builds a
- * payload, or has a seam that could carry one. The three optional seams it does
- * take — {@link OperatorRepairAssessmentInput.loadAttempts}, `observeClean` and
- * `assessScope` — are a store read and two observations, none of which can
- * start a process, and production passes none of them. That is the property
- * the whole grant exists for, so it is structural rather than promised.
+ * It is **agent-free** by construction: nothing here imports an agent runner,
+ * builds a payload, or has a seam that could carry one. The three optional
+ * seams it does take — {@link OperatorRepairAssessmentInput.loadAttempts},
+ * `observeClean` and `assessScope` — are a store read and two observations,
+ * and production passes none of them.
+ *
+ * Not "starts no process": the observations run Git, which is a process, and an
+ * injected seam is an arbitrary function. The claim that is true and is the one
+ * the grant needs is narrower — no agent runner reaches this module, and the
+ * production path starts no agent.
  *
  * What follows the adoption is the ordinary loop, in full. This module starts
  * no agent; the invocation that calls it goes on to re-verify and, if that
@@ -57,9 +68,13 @@
  *
  *  - the state is exactly `BLOCKED_VERIFY`, the only state whose block a
  *    verification failure produces;
- *  - the resume point still names `REMEDIATE`, which is the one phase that
- *    state declares. A record naming anything else has been edited, and an
- *    operator decision does not get to pick which phase it enters;
+ *  - the resume point still names `REMEDIATE`, which is the one *resume* phase
+ *    that state declares. `BLOCKED_VERIFY` now has two declared successors —
+ *    `REMEDIATING`, and the `VERIFYING` this grant enters — but the second is
+ *    an operator-only edge that `resume-policy.ts` subtracts, so the set of
+ *    phases a resume point may name is still exactly one. A record naming
+ *    anything else has been edited, and an operator decision does not get to
+ *    pick which phase it enters;
  *  - a verification attempt history exists and can be read as this task's;
  *  - its **latest** attempt is the subject. Not any historical failure: a task
  *    that failed, was remediated, and failed again has two records, and
@@ -89,6 +104,7 @@ import { assessTaskScope } from '../scope/assess-scope.js';
 import { commitTaskWork } from '../worktree/commit-task-work.js';
 import type { GitRunner } from '../worktree/git-command.js';
 import { observeWorktreeCleanliness } from '../worktree/worktree-cleanliness.js';
+import { currentRound } from '../core/review-budget.js';
 import type { TaskState } from '../core/task-state.js';
 import {
   latestVerificationAttempt,
@@ -297,9 +313,19 @@ export const OPERATOR_REPAIR_COMMIT_PHASE = 'OPERATOR-REPAIR' as const;
  * Stages and commits the operator's repair.
  *
  * Takes the assessment rather than re-deriving it, so the permission and the
- * effect cannot disagree about which tree, which paths or which failure. There
- * is no argument by which a caller could ask this to commit something the gate
- * did not approve.
+ * effect cannot disagree about which tree, which paths or which failure: the
+ * approved path set is handed down from the gate that measured it and is never
+ * measured again here, which is G12.
+ *
+ * That is a statement about the ONE production caller, not a capability. This
+ * is an exported function taking an exported record, so a caller inside `src/`
+ * can build an `OperatorRepairAllowed` of its own and hand it any path set it
+ * likes — the type carries the gate's answer, it is not proof the gate ran. An
+ * earlier draft of this sentence claimed no argument could make this commit
+ * something unapproved, which was simply false. What holds the property up is
+ * that `run/run-driver.ts` is the only caller and reaches this only through
+ * {@link assessOperatorRepair}, and that the option that reaches it is pinned
+ * by tests.
  */
 export async function commitOperatorRepair(
   git: GitRunner,
@@ -310,22 +336,24 @@ export async function commitOperatorRepair(
   const committed = await commitTaskWork(git, worktreePath, {
     taskId: state.taskId,
     phase: OPERATOR_REPAIR_COMMIT_PHASE,
-    // The round the BLOCK ITSELF recorded, read off the resume point the
-    // assessment has already proved names `REMEDIATE`.
+    // THE shared computation, not a second one. `core/review-budget.ts` owns
+    // it and every artefact that names a round reads it: the IMPLEMENT commit,
+    // the REMEDIATE commit, and the resume point `runVerifyStep` wrote when it
+    // recorded this very block.
     //
-    // It was `state.reviewRound + 1`, under a comment claiming it did not
-    // invent a counter — which it did. `loop-step.ts` writes every sibling
-    // artefact with `currentRound(state) = min(max(1, reviewRound), budget)`:
-    // the IMPLEMENT commit, the REMEDIATE commit, and this very block's resume
-    // point. At `reviewRound: 1` the two disagree, so the operator repair went
-    // into permanent history as `r2` while every other artefact for that task
-    // said `r1` — and at the budget ceiling it named a round above the declared
-    // budget, which is exactly what that clamp exists to prevent.
+    // Two review rounds got here. It was first `state.reviewRound + 1`, under
+    // a comment claiming it invented no counter — which it did, disagreeing
+    // with every sibling at `reviewRound >= 1` and able to name a round above
+    // the declared budget, which is what the clamp exists to prevent. The fix
+    // for that read `state.resumeFrom.round`, which agrees on every state AO
+    // writes but not on a hand-edited one: a schema-valid resume round can be
+    // any number, and this module already refuses to let an edited record pick
+    // the phase it enters. Letting it pick the round in the commit message
+    // would be the same mistake one field over.
     //
-    // Reading the resume point rather than re-deriving the formula is the
-    // narrower fix and the truer one: it is the round the failed attempt
-    // belongs to, written by the step that recorded the failure.
-    round: state.resumeFrom?.round ?? 1,
+    // A round in a commit message is permanent, and `commitTaskWork` has no
+    // undo, so the value comes from the task's own two numbers.
+    round: currentRound(state),
     approvedPaths: allowed.approvedPaths,
     basePinnedCommit: state.basePinnedCommit ?? '',
   });

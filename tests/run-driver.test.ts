@@ -63,7 +63,11 @@ import {
 } from '../src/state/state-store.js';
 import type { VerificationCommandResult, VerificationRunner } from '../src/verify/verify-command.js';
 import { verificationAttemptFrom } from '../src/verify/verification-attempt.js';
-import { recordVerificationAttempt } from '../src/verify/verification-attempt-store.js';
+import {
+  latestVerificationAttempt,
+  loadVerificationAttempts,
+  recordVerificationAttempt,
+} from '../src/verify/verification-attempt-store.js';
 import { verificationProfileDigest } from '../src/verify/verification-profile.js';
 import type { GitCommandResult, GitRunner } from '../src/worktree/git-command.js';
 import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
@@ -2250,38 +2254,6 @@ describe('a failed verification is continued only on an explicit decision', () =
   });
 
   /**
-   * The lease is not re-checked inside the adoption, deliberately — it is proven
-   * before it, and a second copy of a gate is a gate that can disagree with the
-   * first. This measures that the existing proof still covers the new path: the
-   * lease goes away mid-run, and the write refuses rather than landing.
-   */
-  it('refuses the adoption when the execution lease is lost under it', async () => {
-    const root = repoRoot();
-    const repo = repository(root);
-    blocked(root);
-    await recordedFailure(root);
-    const lease = leaseFor(repo);
-    const scripted = scriptedGit(root, { writingPass: true, status: OK(' M src/work.ts') });
-    let released = false;
-
-    const run = await runTask(
-      { ...request(root, { verifyOperatorRepair: true }), repository: repo, lease },
-      deps(root, {
-        git: async (cwd, args) => {
-          if (!released) {
-            released = true;
-            releaseRepositoryExecutionLease(lease);
-          }
-          return scripted(cwd, args);
-        },
-      }),
-    );
-
-    expect(run.outcome).not.toBe('TASK_COMPLETED');
-    expect(reload(root).state.state).toBe('BLOCKED_VERIFY');
-  });
-
-  /**
    * The attempt history is keyed by task, and a record that is not this task's
    * is refused by the store's own binding rather than adopted. So a failure
    * recorded for a DIFFERENT task leaves this one with no attempt at all.
@@ -2358,6 +2330,214 @@ describe('a failed verification is continued only on an explicit decision', () =
     expect(agent.calls.length).toBeGreaterThanOrEqual(1);
     expect(run.remediatedVerifyFailure).toBe(true);
     expect(run.verifiedOperatorRepair).toBe(false);
+  });
+
+  /**
+   * The fresh verification is about the tree the COMMIT produced, not the one
+   * that failed — and this is the case that can tell the difference.
+   *
+   * The first version could not: its scripted Git answered `rev-parse HEAD`
+   * with one SHA throughout, which is also the SHA the seeded failure names. An
+   * implementation that never committed, or that recorded the old subject
+   * again, passed it unchanged. A review named that as a surviving mutant, and
+   * it was right.
+   *
+   * So HEAD **moves** here. `SHA_B` before the commit, a different object name
+   * after it, and the assertion is that the attempt written by the re-run
+   * verification names the second one.
+   *
+   * The re-run FAILS, and that is what makes the assertion possible rather than
+   * being a gloomier scenario: `STORED_ATTEMPT_VERDICTS` is `FAILED` and
+   * `UNAVAILABLE`, so a passing gate writes a pass record and no attempt at all
+   * — and reading "the latest attempt" after a pass returns the seeded failure,
+   * which is how the first draft of this case fooled itself. A repair that is
+   * adopted and still does not verify is also the honest half of this feature:
+   * the new evidence must describe the repaired tree, not the old one.
+   */
+  it('binds the fresh verification to the commit the adoption made', async () => {
+    const root = repoRoot();
+    const repaired = `${'c'.repeat(39)}1`;
+    blocked(root, { reviewRound: 1 });
+    await recordedFailure(root, SHA_B);
+    const scripted = scriptedGit(root, { writingPass: true, status: OK(' M src/work.ts') });
+    let committed = false;
+
+    const run = await runTask(
+      request(root, { verifyOperatorRepair: true }),
+      deps(root, {
+        git: async (cwd, args) => {
+          // HEAD before the commit is the failed subject, which is what the
+          // `HEAD_MOVED` conjunct requires; afterwards it is the new object.
+          if (committed && args.includes('rev-parse') && args.includes('HEAD')) {
+            return OK(repaired);
+          }
+          const answer = await scripted(cwd, args);
+          if (args.includes('commit')) committed = true;
+          return answer;
+        },
+        verify: scriptedVerify({ exitCode: 1 }).runner,
+        agent: cappedAgent(agentCommandResult({ stdout: '' }), 0).runner,
+      }),
+    );
+
+    expect(run.verifiedOperatorRepair).toBe(true);
+    const latest = latestVerificationAttempt(loadVerificationAttempts(root, TASK_ID));
+    // The subject moved with HEAD. Both halves are asserted: naming the new
+    // commit, and no longer naming the failed one.
+    expect(latest?.subjectCommit).toBe(repaired);
+    expect(latest?.subjectCommit).not.toBe(SHA_B);
+  });
+
+  /**
+   * The round in the commit message is the task's own, computed the one way
+   * every other artefact computes it.
+   *
+   * Discriminating on purpose, and it took two review rounds to get here. The
+   * first implementation used `reviewRound + 1`; the second read
+   * `resumeFrom.round`. This state is schema-valid and separates all three:
+   * `reviewRound: 2` with a budget of at least 2 gives `currentRound === 2`,
+   * while the resume point says 1 and `reviewRound + 1` would say 3. Only the
+   * shared computation produces `r2`.
+   */
+  it('names the round the task is on, not the one an edited record claims', async () => {
+    const root = repoRoot();
+    blocked(root, { reviewRound: 2, resumeFrom: { phase: 'REMEDIATE', round: 1 } });
+    await recordedFailure(root);
+    const scripted = scriptedGit(root, { writingPass: true, status: OK(' M src/work.ts') });
+
+    await runTask(
+      request(root, { verifyOperatorRepair: true, maxSteps: 1 }),
+      deps(root, {
+        git: scripted,
+        verify: cappedVerify(0).runner,
+        agent: cappedAgent(agentCommandResult({ stdout: '' }), 0).runner,
+      }),
+    );
+
+    const commit = scripted.calls.find((call) => call.args.includes('commit'));
+    const message = (commit?.args ?? []).join(' ');
+    expect(message).toContain(`OPERATOR-REPAIR:${TASK_ID}:VERIFY:r2`);
+    // Not the resume point's 1, and not `reviewRound + 1`'s 3.
+    expect(message).not.toContain(':r1');
+    expect(message).not.toContain(':r3');
+    // And still not a writer's vocabulary.
+    expect(message).not.toContain('REMEDIATE');
+  });
+
+  /**
+   * The adoption does not repeat inside one run of the driver, and this case
+   * says exactly what it measures — because measuring it is how the previous
+   * version of it was found to be worthless.
+   *
+   * With the `operatorRepairSpent` guard deleted, this still passes: after the
+   * adoption the loop verifies, the gate says no, and `runTask` stops at the
+   * block rather than coming back round to the branch. So within one `runTask`
+   * the guard is belt-and-braces, not the thing that ends the cycle. The
+   * identical mutant on the sibling `verifyRemediationSpent` also survives its
+   * own "buys exactly one departure" case, so this is a property of the loop
+   * these two share and not something this grant introduced.
+   *
+   * Where the bound IS load-bearing is across the invocations of one lifecycle,
+   * and that is where it is proven:
+   * `v3-06-lifecycle-driver.test.ts` drives two invocations against a real
+   * repository and counts the commits.
+   */
+  it('adopts at most once inside one driver run', async () => {
+    const root = repoRoot();
+    blocked(root, { reviewRound: 1 });
+    await recordedFailure(root);
+    const scripted = scriptedGit(root, { writingPass: true, status: OK(' M src/work.ts') });
+
+    const run = await runTask(
+      request(root, { verifyOperatorRepair: true, maxSteps: 12 }),
+      deps(root, {
+        git: scripted,
+        verify: scriptedVerify({ exitCode: 1 }).runner,
+        agent: cappedAgent(agentCommandResult({ stdout: '' }), 0).runner,
+      }),
+    );
+
+    expect(scripted.calls.filter((call) => call.args.includes('commit')).length).toBe(1);
+    // And the run ended back in the block rather than leaving it again.
+    expect(run.outcome).toBe('BLOCKED_VERIFY');
+    expect(reload(root).state.state).toBe('BLOCKED_VERIFY');
+  });
+
+  /**
+   * No review round is granted and no finding is touched.
+   *
+   * Seeded with a real finding on purpose: the previous version started from an
+   * empty history and asserted an empty history, which an implementation that
+   * cleared the history would also have passed. A review named that mutant.
+   */
+  it('grants no review round and leaves the finding history alone', async () => {
+    const root = repoRoot();
+    const before = blocked(root, { reviewRound: 1, findingHistory: [DURABLE_FINDING] });
+    expect(before.state.findingHistory.length).toBe(1);
+    await recordedFailure(root);
+
+    await runTask(
+      request(root, { verifyOperatorRepair: true, maxSteps: 1 }),
+      deps(root, {
+        git: scriptedGit(root, { writingPass: true, status: OK(' M src/work.ts') }),
+        verify: cappedVerify(0).runner,
+        agent: cappedAgent(agentCommandResult({ stdout: '' }), 0).runner,
+      }),
+    );
+
+    const after = reload(root).state;
+    expect(after.state).toBe('VERIFYING');
+    // Untouched, all three. Adoption is not a review decision.
+    expect(after.findingHistory).toEqual(before.state.findingHistory);
+    expect(after.grantedReviewRounds).toBe(before.state.grantedReviewRounds);
+    expect(after.reviewRound).toBe(before.state.reviewRound);
+  });
+
+  /**
+   * The commit itself is fenced, not merely the state write that follows it.
+   *
+   * This is the review blocker that made the fence necessary, and the race is
+   * concrete: run A assesses the operator's dirty `src/work.ts`, loses the
+   * lease, and — on raw Git — still reaches `git add --all` and `git commit`.
+   * Run B, by then the repository's writer, can have rewritten that same
+   * already-approved path in the window, and A would commit B's bytes under
+   * `OPERATOR-REPAIR`. `advanceTaskState` re-proves the lease and refuses the
+   * state write afterwards, which is what the earlier version of this case
+   * measured — but a commit in the target repository is permanent by then, and
+   * the whole claim of this grant is that what lands is the operator's own
+   * repair.
+   *
+   * So the assertion is about the effect, not the record: with the lease gone,
+   * `add` and `commit` must never have been asked for at all.
+   */
+  it('never reaches add or commit once the lease is gone', async () => {
+    const root = repoRoot();
+    const repo = repository(root);
+    blocked(root);
+    await recordedFailure(root);
+    const lease = leaseFor(repo);
+    const scripted = scriptedGit(root, { writingPass: true, status: OK(' M src/work.ts') });
+    let released = false;
+
+    const run = await runTask(
+      { ...request(root, { verifyOperatorRepair: true }), repository: repo, lease },
+      deps(root, {
+        git: async (cwd, args) => {
+          if (!released) {
+            released = true;
+            releaseRepositoryExecutionLease(lease);
+          }
+          return scripted(cwd, args);
+        },
+      }),
+    );
+
+    // Nothing that writes the repository was asked for. `leasedGit` answers
+    // `UNAVAILABLE` before the runner is reached, so these never appear.
+    expect(scripted.calls.filter((call) => call.args.includes('add'))).toEqual([]);
+    expect(scripted.calls.filter((call) => call.args.includes('commit'))).toEqual([]);
+    expect(run.outcome).not.toBe('TASK_COMPLETED');
+    expect(reload(root).state.state).toBe('BLOCKED_VERIFY');
   });
 
   it('refuses an unattended run whatever it is given', async () => {

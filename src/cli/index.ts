@@ -66,7 +66,7 @@ const DESCRIPTION = [
   '    the only command that selects work across more than one repository, and',
   '    the only one that executes more than one at a time: read-only by default,',
   '    and with `--attended` it drives several concurrently — at most one task',
-  '    per repository, bounded by that same file. The three grants that',
+  '    per repository, bounded by that same file. The four grants that',
   '    authorise a destructive departure are not offered there. With',
   '    `--wait-for-reset` it also waits, between passes, for the soonest quota',
   '    reset still ahead that any enlisted repository has durably recorded, and',

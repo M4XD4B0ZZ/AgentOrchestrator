@@ -3,8 +3,9 @@
  *
  * ── Why a verb of its own, and not a fourth flag on `run` ──────────────────
  *
- * `run` already carries three operator grants (`--remediate-verify-failure`,
- * `--continue-human-decision`, `--continue-usage-limit`) and a fourth would have
+ * `run` already carries four operator grants (`--remediate-verify-failure`,
+ * `--verify-operator-repair`, `--continue-human-decision`,
+ * `--continue-usage-limit`) and one more would have
  * been the smaller diff. It is the wrong host, measurably: `run`'s ladder puts
  * an auth preflight, an MCP capability preflight and a full reconciliation in
  * front of every write, and each of those refuses in exactly the situation this

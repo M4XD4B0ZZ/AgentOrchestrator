@@ -799,9 +799,9 @@ async function driveUnderLease(
    * And the same bound for the operator's one departure from a
    * `BLOCKED_USAGE_LIMIT` the machine cannot wait out.
    *
-   * A third variable, not a third use of one of the others: a lifecycle given
-   * all three flags must be able to spend each exactly once, and sharing would
-   * let the first departure swallow the rest.
+   * Its own variable, not a second use of one of the others: a lifecycle given
+   * all four departure flags must be able to spend each exactly once, and
+   * sharing would let the first departure swallow the rest.
    */
   let usageLimitContinuationSpent = false;
   let steps = 0;
