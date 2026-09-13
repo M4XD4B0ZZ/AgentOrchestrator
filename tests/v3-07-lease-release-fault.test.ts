@@ -30,6 +30,7 @@
  */
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SILENT_NOTIFIER } from './helpers/silent-notifier.js';
 
 /**
  * The fault, hoisted so the `vi.mock` factory can see it.
@@ -226,7 +227,9 @@ function drivingSeams() {
 async function invokeBlock(args: readonly string[], seams: BlockCommandSeams = {}): Promise<void> {
   const program = new Command();
   program.exitOverride();
-  registerBlockCommand(program, seams);
+  // Never the real notifier — see `helpers/silent-notifier.ts`. This file was one of
+  // the two the egress scan caught after the first two were sealed.
+  registerBlockCommand(program, { notifier: SILENT_NOTIFIER, ...seams });
   await program.parseAsync(['block', ...args], { from: 'user' });
 }
 
