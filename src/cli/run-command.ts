@@ -679,12 +679,16 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
     )
     .option(
       '--verify-operator-repair',
-      'Adopt YOUR OWN repair of a failed verification and verify again, with NO agent ' +
-        'involved. For the case --remediate-verify-failure is not: the fix already exists ' +
-        'in the worktree because you made it. AO commits that diff under its own controls ' +
-        'and with a message that says an operator made it, moves the task BLOCKED_VERIFY -> ' +
-        'VERIFYING, and runs the declared verification again on the new commit. It starts no ' +
-        'writer, builds no payload, grants no review round and touches no finding history. ' +
+      'Adopt YOUR OWN repair of a failed verification and verify again. For the case ' +
+        '--remediate-verify-failure is not: the fix already exists in the worktree because ' +
+        'you made it. AO commits that diff under its own controls and with a message that ' +
+        'says an operator made it, moves the task BLOCKED_VERIFY -> VERIFYING, and runs the ' +
+        'declared verification again on the new commit. THE ADOPTION ITSELF starts no agent, ' +
+        'builds no payload, grants no review round and appends no finding. From there the ' +
+        'ordinary loop runs to --max-steps exactly as an attended run would, so a ' +
+        'verification that now passes goes on to REVIEW -- which does run an agent -- and a ' +
+        'review that finds something can start the writer. What this flag buys is that the ' +
+        'REPAIR is nobody else\'s work, not that the invocation is agent-free. ' +
         'It is refused unless every one of these is proven first: the state is exactly ' +
         'BLOCKED_VERIFY; the record still resumes from REMEDIATE; a verification attempt ' +
         'history exists and its LATEST attempt is a FAILED one; HEAD is still EXACTLY that ' +

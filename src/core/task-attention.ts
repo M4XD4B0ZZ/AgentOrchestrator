@@ -183,10 +183,13 @@ export const ATTENTION_ACTIONS = Object.freeze({
     'asserts nothing about the allowance.',
   VERIFICATION_REMEDIATION_REQUIRED:
     'The repository’s verification commands failed and were not retried, because re-running ' +
-    'them unchanged would fail again. Hand the recorded failure to the writing agent with ' +
-    '`agent-loop run --repository <path> --task <id> --attended --remediate-verify-failure`, ' +
-    'or end the task yourself with `agent-loop resolve --repository <path> --task <id> ' +
-    '--attended`.',
+    'them unchanged would fail again. There are three ways on. If YOU have already repaired ' +
+    'the tree, adopt that repair and verify again with no agent: `agent-loop run --repository ' +
+    '<path> --task <id> --attended --verify-operator-repair` — it is refused unless HEAD is ' +
+    'still the failed attempt’s own commit and the repair is inside the task’s scope. To hand ' +
+    'the recorded failure to the writing agent instead: `agent-loop run --repository <path> ' +
+    '--task <id> --attended --remediate-verify-failure`. Or end the task yourself with ' +
+    '`agent-loop resolve --repository <path> --task <id> --attended`.',
   SCOPE_REVIEW_REQUIRED:
     'An agent wrote outside the scope this repository declares. No flag in this build ' +
     'continues a scope violation, so the decision is yours: read the worktree the record ' +

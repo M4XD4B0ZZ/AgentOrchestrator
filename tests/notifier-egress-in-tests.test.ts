@@ -70,9 +70,30 @@ describe('a test may not reach the operator’s real notification target', () =>
    * because the alternative — saying nothing — is what sent the push.
    */
   it('names a notifier wherever a test constructs the block CLI', () => {
+    // Two needles, not one. `registerBlockCommand(` is the direct construction;
+    // `buildProgram(` is the indirect one — `src/cli/index.ts` builds the block
+    // command with no seams and never contains the direct needle, so a file
+    // reaching the CLI that way would have passed a scan that looked for only
+    // the first.
+    //
+    // And the match is on the seam VALUE, not on the word. The first version
+    // filtered `!text.includes('notifier')`, which a file passes by mentioning
+    // it in a comment — measured. `SILENT_NOTIFIER` is a real import of a real
+    // value, so the scan asks the question it means to ask.
+    const drivesTheBlockCommand = (text: string): boolean =>
+      text.includes('registerBlockCommand(') ||
+      // `buildProgram()` wires every command, so it matters here only when the
+      // file also *runs* `block` through it. The test is an argv, not a
+      // mention: `'block'` occurs in these suites as a path segment
+      // (`src/block/...`) and as a command-name assertion, and requiring a
+      // notifier of those would be noise — and noise is how a gate stops being
+      // read.
+      /parseAsync\(\s*\[\s*['"`]block['"`]/.test(text);
+
     const offenders = testFiles()
-      .filter((file) => file.text.includes('registerBlockCommand('))
-      .filter((file) => !file.text.includes('notifier'))
+      .filter((file) => drivesTheBlockCommand(file.text))
+      .filter((file) => !file.text.includes('SILENT_NOTIFIER'))
+      .filter((file) => !file.text.includes('notifier:'))
       .map((file) => file.name);
 
     expect(offenders).toEqual([]);

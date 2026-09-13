@@ -272,12 +272,15 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       '  it is still exhausted the next run reports a fresh block. Spent on one departure per\n' +
       '  invocation. `run --task <id>` prints whether a reset time was recorded.',
     BLOCKED_VERIFY:
-      'The repository\'s verification commands failed and were not retried. The only\n' +
-      '  continuation is remediation, which is a decision: re-run with --attended and\n' +
-      '  --remediate-verify-failure to hand the recorded failure to the writing agent.\n' +
-      '  That is not a retry -- verification runs again only on what the writer leaves,\n' +
-      '  and the decision is spent on one departure per invocation. `run --task <id>`\n' +
-      '  prints what was recorded about the failure.',
+      'The repository\'s verification commands failed and were not retried. Two decisions\n' +
+      '  continue it, and neither is an automatic retry. If YOU have already repaired the\n' +
+      '  tree, re-run with --attended and --verify-operator-repair: that commits your own\n' +
+      '  repair and verifies again with no agent, and is refused unless HEAD is still the\n' +
+      '  failed attempt\'s own commit and the repair is in scope. Otherwise re-run with\n' +
+      '  --attended and --remediate-verify-failure to hand the recorded failure to the\n' +
+      '  writing agent, after which verification runs again on what the writer leaves.\n' +
+      '  Each is spent on one departure per invocation. `run --task <id>` prints what was\n' +
+      '  recorded about the failure.',
     BLOCKED_AUTH: 'An agent\'s credentials are missing or expired. Only a human restores them.',
     SCOPE_VIOLATION: 'An agent wrote outside its allowed scope. Not resumable at all.',
     RESUME_STATE_DIVERGED:

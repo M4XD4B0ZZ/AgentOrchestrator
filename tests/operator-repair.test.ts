@@ -355,10 +355,23 @@ describe('the commit says an operator made it', () => {
       approvedPaths: ['src/a.ts'],
     };
 
-    await commitOperatorRepair(git, WORKTREE, blockedState(), allowed);
+    // `reviewRound: 1` deliberately, and it is the whole point of the fixture.
+    // The round came from `state.reviewRound + 1` under a comment claiming it
+    // invented no counter; at `reviewRound: 0` — the only value this file used —
+    // that formula and the block's own recorded round both give 1, so the pin
+    // could not tell them apart. At 1 they disagree: the resume point says r1,
+    // the old formula said r2, and r2 is a round no other artefact for this task
+    // carries and one this repair went into permanent history claiming.
+    await commitOperatorRepair(
+      git,
+      WORKTREE,
+      blockedState({ reviewRound: 1 }),
+      allowed,
+    );
 
     const message = seen.find((call) => call.includes('commit -m')) ?? '';
     expect(message).toContain('OPERATOR-REPAIR:TASK-001:VERIFY:r1');
+    expect(message).not.toContain(':r2');
     expect(message).not.toContain('AO:TASK-001');
     expect(message).not.toContain('REMEDIATE');
     expect(message).not.toContain('IMPLEMENT');

@@ -815,6 +815,7 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
           remediateVerifyFailure: request.remediateVerifyFailure,
           continueHumanDecision: request.continueHumanDecision,
           continueUsageLimit: request.continueUsageLimit,
+      verifyOperatorRepair: request.verifyOperatorRepair,
         },
       });
       return lifecycleResult();
@@ -854,6 +855,11 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
         remediateVerifyFailure: false,
         continueHumanDecision: false,
         continueUsageLimit: false,
+        // The fourth, added when the operator-repair grant was. It commits a
+        // diff no agent made, so a scheduler holding it `true` would be the
+        // worst of the four to miss — and this list is where the last omission
+        // was paid for.
+        verifyOperatorRepair: false,
       });
     }
   });

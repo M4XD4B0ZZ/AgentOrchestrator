@@ -2865,6 +2865,35 @@ not an automatic retry.* The loop still refuses; what changed with the M1
 verification-recovery fix is that an **operator** may now take that edge, with
 `run --attended --task <id> --remediate-verify-failure`.
 
+**A second operator door, added after CAPTURE-004 measured the cost of having
+only the first.** `run --attended --task <id> --verify-operator-repair` adopts a
+repair the *operator* already made and re-verifies, starting no agent. It exists
+because the mechanical case had nowhere to go: verification failed on a
+formatter check, and committing the repair moved `HEAD` off the failed attempt's
+`subjectCommit` so the stored failure stopped being evidence about the tree,
+while leaving it uncommitted meant a writing agent that had no shell, could not
+run the formatter, did not recognise an already-correct diff, and spent its
+budget parking the task.
+
+It is refused unless every one of these is proven before anything is written:
+the state is exactly `BLOCKED_VERIFY`; the record still resumes from
+`REMEDIATE`; an attempt history exists and reads as this task's; its **latest**
+attempt is `FAILED` rather than `UNAVAILABLE`; `HEAD` is **exactly** that
+attempt's `subjectCommit`, which is what proves the operator repaired the tree
+that failed and not a later one; the worktree carries a repair; and the whole
+delta from the base pin is `WITHIN_SCOPE`. Then AO commits that diff under its
+own controls, with a message beginning `OPERATOR-REPAIR:` rather than `AO:` so a
+reader of `git log --oneline` can tell it from an agent's work, and the task
+takes the `BLOCKED_VERIFY -> VERIFYING` edge.
+
+That edge is declared **operator-only** (`OPERATOR_ONLY_EDGES` in
+`core/transitions.ts`) and excluded from the resume policy's derivation, so no
+resume can take it and `allowedResumePhases('BLOCKED_VERIFY')` is still
+`['REMEDIATE']`. The adoption itself grants no review round and appends no
+finding; what follows it is the ordinary loop, which means a verification that
+now passes goes on to review. The two flags are contradictory and are refused
+together. See [`src/verify/operator-repair.ts`](src/verify/operator-repair.ts).
+
 What bounds the cycle afterwards was **measured rather than designed**, and the
 answer is not the obvious one. Two pre-existing rules already stop it: a `BLOCKED`
 loop step ends the `runTask` call unconditionally, and `driveLifecycle` re-enters
@@ -2876,8 +2905,11 @@ survived every test, which is how this was established rather than assumed.
 `HUMAN_DECISION_REQUIRED` has the same shape and got the same treatment one
 change later, with `run --attended --task <id> --continue-human-decision`. Two
 things differ, and both follow from the state rather than from taste.
-`BLOCKED_VERIFY` declares one outgoing edge, so its flag names the destination
-and the driver pins the resume phase to `REMEDIATE`; this state declares four, so
+`BLOCKED_VERIFY` declares one outgoing edge a *resume* may take, so its flag
+names the destination and the driver pins the resume phase to `REMEDIATE` — the
+operator-repair grant's `VERIFYING` edge is declared operator-only and excluded
+from the resume policy, which is what keeps that sentence true; this state
+declares four, so
 the flag names no phase and the **record** decides which edge is taken — a resume
 point naming a phase the loop does not drive is refused as
 `RESUME_PHASE_NOT_DRIVEN`, before the write, by the gate that already owned that
@@ -3029,7 +3061,7 @@ never passes it.
 | `IMPLEMENTING` and the setup chain | `NO_PROGRESS`; the loop does not drive them |
 | `READY_FOR_PR` / `ABORTED` | terminal, nothing run |
 | `BLOCKED_USAGE_LIMIT` | resumed **only** on `AUTOMATIC_ALLOWED` *and* an attended grant; otherwise stops with the checks that denied it, writing nothing |
-| `BLOCKED_VERIFY` | stops, unless the invocation carried `--remediate-verify-failure` **and** an attended grant, in which case it takes the declared `REMEDIATING` edge once. Never an automatic retry, and never a re-run of the same verification |
+| `BLOCKED_VERIFY` | stops, unless the invocation carried an attended grant and one of the two operator flags: `--remediate-verify-failure` takes the declared `REMEDIATING` edge once, and `--verify-operator-repair` commits the operator's own repair and takes the operator-only `VERIFYING` edge once. Never an automatic retry, and never a re-run of the *same* verification — the second re-runs it over a change it proved was there |
 | `HUMAN_DECISION_REQUIRED` | stops, unless the invocation carried `--continue-human-decision` **and** an attended grant, in which case it re-enters the phase its own `resumeFrom` names, once. It does not choose the phase. Where an exhausted review budget is what escalated the task, it grants exactly one more review round, durably and capped; continuing any other escalation grants nothing |
 | `BLOCKED_AUTH`, `SCOPE_VIOLATION`, `RESUME_STATE_DIVERGED` | stop; each keeps its own outcome |
 | diverged / unobservable / unusable | stop, fail-closed, repair nothing |

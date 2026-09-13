@@ -229,8 +229,9 @@ export function listAllTransitions(): readonly (readonly [TaskStateName, TaskSta
  * Without this list the edge leaks: `core/resume-policy.ts` derives a blocking
  * state's allowed resume phases *from the table*, so declaring the edge silently
  * made `VERIFY` a resume phase for `BLOCKED_VERIFY` — and a resume point naming
- * it would have re-entered verification with no proof of anything. Two pinned
- * tests caught it, which is why they are pinned.
+ * it would have re-entered verification with no proof of anything. Three pinned
+ * cases across two suites caught it, which is why they are pinned — and only
+ * the full gate ran them, which is why the focused runs said nothing.
  *
  * Kept here rather than in the resume policy because the property is a fact
  * about the edge, not about resumes: anything else that later derives producers

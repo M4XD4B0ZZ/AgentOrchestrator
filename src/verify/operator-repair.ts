@@ -33,8 +33,15 @@
  * it only against an assessment that already said yes.
  *
  * It is **agent-free** by construction: nothing here imports a runner, builds a
- * payload, or has a seam one could be injected through. That is the property
+ * payload, or has a seam that could carry one. The three optional seams it does
+ * take — {@link OperatorRepairAssessmentInput.loadAttempts}, `observeClean` and
+ * `assessScope` — are a store read and two observations, none of which can
+ * start a process, and production passes none of them. That is the property
  * the whole grant exists for, so it is structural rather than promised.
+ *
+ * What follows the adoption is the ordinary loop, in full. This module starts
+ * no agent; the invocation that calls it goes on to re-verify and, if that
+ * passes, to review — which does. See the flag's own help text, which says so.
  *
  * It grants **no review round**, touches `reviewRound`, `grantedReviewRounds`
  * and `findingHistory` not at all, and produces no `resumeFrom`. The task
@@ -303,9 +310,22 @@ export async function commitOperatorRepair(
   const committed = await commitTaskWork(git, worktreePath, {
     taskId: state.taskId,
     phase: OPERATOR_REPAIR_COMMIT_PHASE,
-    // The round the failed attempt belongs to, so the message says which
-    // verification this repaired rather than inventing a counter of its own.
-    round: state.reviewRound + 1,
+    // The round the BLOCK ITSELF recorded, read off the resume point the
+    // assessment has already proved names `REMEDIATE`.
+    //
+    // It was `state.reviewRound + 1`, under a comment claiming it did not
+    // invent a counter — which it did. `loop-step.ts` writes every sibling
+    // artefact with `currentRound(state) = min(max(1, reviewRound), budget)`:
+    // the IMPLEMENT commit, the REMEDIATE commit, and this very block's resume
+    // point. At `reviewRound: 1` the two disagree, so the operator repair went
+    // into permanent history as `r2` while every other artefact for that task
+    // said `r1` — and at the budget ceiling it named a round above the declared
+    // budget, which is exactly what that clamp exists to prevent.
+    //
+    // Reading the resume point rather than re-deriving the formula is the
+    // narrower fix and the truer one: it is the round the failed attempt
+    // belongs to, written by the step that recorded the failure.
+    round: state.resumeFrom?.round ?? 1,
     approvedPaths: allowed.approvedPaths,
     basePinnedCommit: state.basePinnedCommit ?? '',
   });

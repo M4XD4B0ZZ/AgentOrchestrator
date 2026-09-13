@@ -274,8 +274,11 @@ export function mayVerifyOperatorRepair(grant: InvocationGrant): boolean {
  * ── What this one continues ───────────────────────────────────────────────
  *
  * `HUMAN_DECISION_REQUIRED` differs from `BLOCKED_VERIFY` in one way that
- * matters here. `BLOCKED_VERIFY` declares exactly one outgoing edge, so its flag
- * can name the destination. This state declares four — `IMPLEMENTING`,
+ * matters here. `BLOCKED_VERIFY` declares exactly one outgoing edge a **resume**
+ * may take, so its flag can name the destination — the operator-repair grant's
+ * `VERIFYING` edge is declared operator-only (`core/transitions.ts`) and is
+ * excluded from the resume policy's derivation for precisely that reason. This
+ * state declares four — `IMPLEMENTING`,
  * `VERIFYING`, `REVIEWING`, `REMEDIATING` — and which one applies is not the
  * operator's to pick: it is recorded in the task's own `resumeFrom`, which
  * `resume-policy.ts` makes `REQUIRED` for this state. So the decision this
