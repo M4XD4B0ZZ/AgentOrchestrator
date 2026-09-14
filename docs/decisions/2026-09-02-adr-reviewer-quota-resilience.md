@@ -304,3 +304,43 @@ This slice's job is to make sure there is something correct for it to resume.
 - **the writer half of slice 5's cost is unchanged.** Nothing coordinates two
   writing agents against the Claude window. The default of
   `maxConcurrentRepositories: 1` is still what keeps that a choice.
+
+
+## Addendum, 2026-09-14: the weekly-window cost was reached
+
+The cost above — *"a weekly-window exhaustion would derive too early … not
+fixable without a fixture nobody has"* — was reached in production on
+2026-09-14, on `healthapp/CAPTURE-006`. The record above is left as it was
+written; this addendum states what the fixture showed.
+
+The risk was real and the predicted shape was wrong. The exhausted allowance is
+not a secondary *window* rendering a bare `H:MM`: it is the **premium** credit
+allowance, and the same rollout's rate limits read `limit_id: "premium"`,
+`primary: null`, `secondary: null`, `credits { has_credits: false, balance:
+"0" }`. It renders its reset with a calendar date:
+
+    You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro),
+    visit https://chatgpt.com/codex/settings/usage to purchase more credits or
+    try again at Sep 19th, 2026 11:28 AM.
+
+`RESET_SUFFIX_PATTERN` requires the digits immediately after `try again at`, so
+this matched nothing. The prefix still classified the block, so the task became
+`BLOCKED_USAGE_LIMIT` with `reportedResetAt: null` — a pause with no instant
+anybody can wait for, which is the one shape `evaluateAutomaticResume` can never
+clear. So the failure was not "derives too early and self-corrects"; it was
+"derives nothing and leaves the unattended path for good", and it is quieter,
+because nothing waits on a `null`.
+
+`codex-quota-signal.ts` now reads the date-qualified form as well, through an
+explicit month table rather than `Date.parse`, with the day checked against the
+month and year. A named date is resolved **on** that date rather than searched
+forward for from `now`: the bare-time scan is bounded by 26 hours, so a reset
+five days out would otherwise have been answered as the next occurrence of
+`11:28` — a wrong instant rather than no instant, and a scheduler would have
+waited on it and woken into a quota with four days still to run. A wall clock
+that does not occur on the named date — a spring-forward gap — yields `null`,
+because a dated reset has no next occurrence to walk to.
+
+The original cost stands for anything this build still cannot read: an
+unrecognised reset rendering remains `reportedResetAt: null`, and remains an
+operator decision.

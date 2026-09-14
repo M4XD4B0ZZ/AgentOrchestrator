@@ -249,6 +249,7 @@ export async function runCodexReviewer(
             refusal.resetTimeOfDay,
             nowMs,
             options.localOffsetMinutes ?? systemLocalOffsetMinutes,
+            refusal.resetDate,
           );
     return reviewFailure(evidence, 'AGENT_USAGE_LIMIT', {
       blockedAgent: 'codex' as const,
