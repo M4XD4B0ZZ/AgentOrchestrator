@@ -711,6 +711,164 @@ describe('a required capability that cannot be proven refuses', () => {
 
 /* ═══════ 4. The session announcement is read, not guessed ══════════════ */
 
+/* ═══════ 5b. The proof is the evidence, not the ending ═══════════════════ */
+
+/**
+ * Measured in production on 2026-09-15, and the reason this section exists.
+ *
+ * The probe starts the Claude CLI, which starts the granted MCP server. What
+ * proves the capability is the session's own `init` message — the named server
+ * `connected`, the granted tool present. That message is emitted early: nine
+ * faithful reproductions put it at 1135-2477 ms while the process itself did
+ * not exit until 2914-6430 ms, because `--print` also runs a model turn that
+ * the capability contract does not require.
+ *
+ * On 2026-09-15T12:04:44Z a real preflight was killed at its 20 000 ms budget
+ * having observed 1955 stdout bytes. Across the same reproductions the complete
+ * `init` line ended at 1579-1623 bytes and the whole stream at 4215-4277. So
+ * the run that AO refused had already emitted the complete proof, and was
+ * inside the following `rate_limit_event` when the budget expired — a stall in
+ * the model turn, under a five-hour window measured at 98% utilisation.
+ *
+ * `runCommand` carries the collected stdout out on a timeout (`exec.ts:1692`),
+ * so this build HELD that proof and discarded it unread, because the ending was
+ * graded before the evidence was. These cases pin the order.
+ */
+describe('a complete announcement proves the capability whatever the ending was', () => {
+  /** The `init` line alone, as the CLI emits it. */
+  function initLine(servers: unknown, tools: readonly string[]): string {
+    return JSON.stringify({ type: 'system', subtype: 'init', mcp_servers: servers, tools });
+  }
+
+  const PROVING_INIT = initLine(
+    [{ name: 'codegraph', status: 'connected' }],
+    ['mcp__codegraph__codegraph_explore'],
+  );
+
+  /** What the incident's own stream looked like: the proof, then a cut line. */
+  const CUT_MID_RATE_LIMIT = '{"type":"rate_limit_event","rate_limit_info":{"stat';
+
+  async function prove(home: ReturnType<typeof makeHome>, result: CommandResult) {
+    return await proveMcpCapabilities({
+      required: ['codegraph'],
+      parentEnv: {},
+      provider: home.provider,
+      timeoutMs: 20_000,
+      now: () => new Date('2026-09-15T12:04:44.256Z'),
+      probe: async () => result,
+    });
+  }
+
+  /** The production shape: proof complete, then killed at the budget. */
+  const KILLED_AT_BUDGET = {
+    started: true,
+    outcome: 'TIMED_OUT',
+    failureCode: 'TIMEOUT',
+    exitCode: null,
+    durationMs: 20_031,
+    stdoutBytesObserved: 1955,
+  } as const;
+
+  it('proves a capability whose init arrived before the probe was killed at its budget', async () => {
+    const home = withRegistry(GRANTED);
+    const outcome = await prove(
+      home,
+      completeResult({ ...KILLED_AT_BUDGET, stdout: PROVING_INIT + '\n' + CUT_MID_RATE_LIMIT }),
+    );
+    expect(outcome.state).toBe('PROVEN');
+    if (outcome.state !== 'PROVEN') return;
+    expect(outcome.capabilities).toEqual(['codegraph']);
+  });
+
+  it('writes no failure record for a probe whose evidence was complete', async () => {
+    const home = withRegistry(GRANTED);
+    await prove(
+      home,
+      completeResult({ ...KILLED_AT_BUDGET, stdout: PROVING_INIT + '\n' + CUT_MID_RATE_LIMIT }),
+    );
+    // The directory is created by the writer and by nothing else, so its
+    // absence is the whole assertion: a proven capability is not an incident.
+    expect(existsSync(join(home.aoHome, 'capability-command-failures'))).toBe(false);
+  });
+
+  it('proves it for every ending a started probe can have, not only a timeout', async () => {
+    for (const [commandOutcome, failureCode] of [
+      ['TIMED_OUT', 'TIMEOUT'],
+      ['OUTPUT_LIMIT_EXCEEDED', 'OUTPUT_LIMIT_STDOUT'],
+      ['BOUNDARY_LOST', 'BOUNDARY_LOST'],
+    ] as const) {
+      const home = withRegistry(GRANTED);
+      const outcome = await prove(
+        home,
+        completeResult({
+          started: true,
+          outcome: commandOutcome,
+          failureCode,
+          exitCode: null,
+          stdout: PROVING_INIT + '\n',
+        }),
+      );
+      expect(outcome.state).toBe('PROVEN');
+    }
+  });
+
+  it('proves it when the process exited non-zero after announcing', async () => {
+    const home = withRegistry(GRANTED);
+    const outcome = await prove(
+      home,
+      completeResult({ outcome: 'COMPLETED', exitCode: 1, stdout: PROVING_INIT + '\n' }),
+    );
+    expect(outcome.state).toBe('PROVEN');
+  });
+
+  /* ── fail closed: with no complete evidence the ending is still the answer ─ */
+
+  it('refuses when the budget expired before any announcement', async () => {
+    const home = withRegistry(GRANTED);
+    const outcome = await prove(home, completeResult({ ...KILLED_AT_BUDGET, stdout: '' }));
+    expect(outcome).toMatchObject({ state: 'REFUSED', code: 'PROBE_DID_NOT_COMPLETE' });
+  });
+
+  it('refuses a truncated init line, which is not an announcement', async () => {
+    const home = withRegistry(GRANTED);
+    // The exact hazard the byte arithmetic raises: stopped INSIDE the proof.
+    const cut = PROVING_INIT.slice(0, PROVING_INIT.length - 20);
+    const outcome = await prove(home, completeResult({ ...KILLED_AT_BUDGET, stdout: cut }));
+    expect(outcome).toMatchObject({ state: 'REFUSED', code: 'PROBE_DID_NOT_COMPLETE' });
+  });
+
+  it('refuses when a complete announcement says the server did not connect', async () => {
+    const home = withRegistry(GRANTED);
+    const failed = initLine([{ name: 'codegraph', status: 'failed' }], []);
+    const outcome = await prove(home, completeResult({ ...KILLED_AT_BUDGET, stdout: failed + '\n' }));
+    expect(outcome).toMatchObject({ state: 'REFUSED', code: 'SERVER_NOT_CONNECTED' });
+  });
+
+  it('refuses when a complete announcement lacks the granted tool', async () => {
+    const home = withRegistry(GRANTED);
+    const toolless = initLine([{ name: 'codegraph', status: 'connected' }], []);
+    const outcome = await prove(home, completeResult({ ...KILLED_AT_BUDGET, stdout: toolless + '\n' }));
+    expect(outcome).toMatchObject({ state: 'REFUSED', code: 'GRANTED_TOOL_ABSENT' });
+  });
+
+  it('refuses a probe that never started, whatever its stdout field says', async () => {
+    const home = withRegistry(GRANTED);
+    // A process that was never created cannot have announced anything. The
+    // stdout here is a lie the contract must not read.
+    const outcome = await prove(
+      home,
+      completeResult({ started: false, outcome: 'SPAWN_FAILED', stdout: PROVING_INIT + '\n' }),
+    );
+    expect(outcome).toMatchObject({ state: 'REFUSED', code: 'PROBE_DID_NOT_START' });
+  });
+
+  it('still refuses a completed probe that announced nothing this build can read', async () => {
+    const home = withRegistry(GRANTED);
+    const outcome = await prove(home, completeResult({ outcome: 'COMPLETED', stdout: 'not json\n' }));
+    expect(outcome).toMatchObject({ state: 'REFUSED', code: 'PROBE_EMITTED_NO_SESSION' });
+  });
+});
+
 describe('reading the session announcement', () => {
   it('is null when no announcement was emitted, which is not the same as an empty one', () => {
     expect(readSessionAnnouncement('')).toBeNull();
