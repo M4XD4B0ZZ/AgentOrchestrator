@@ -106,8 +106,12 @@ mit M2 Slice 6.
 
 **Heute:** beide Agenten können eine Reset-Zeit liefern. Der Writer liest sie
 aus einem `rate_limit_event` seines Streams; der Reviewer leitet sie aus der
-Uhrzeit ab, die Codex in seiner Absage nennt (`try again at 5:35 PM`) — als
-absoluter UTC-Zeitpunkt, nicht als lokale Uhrzeit. Beide Fälle schreiben dazu
+Zeit ab, die Codex in seiner Absage nennt — entweder als reine Uhrzeit
+(`try again at 5:35 PM`, das 300-Minuten-Fenster) oder mit Datum
+(`try again at Sep 19th, 2026 11:28 AM.`, die erschöpfte Premium-Zuteilung) —
+als absoluter UTC-Zeitpunkt, nicht als lokale Uhrzeit. Nennt die Absage ein
+Datum, wird die Uhrzeit **an diesem Datum** aufgelöst und nicht beim nächsten
+Auftreten dieser Uhrzeit. Beide Fälle schreiben dazu
 einen gemessenen Worktree-Checkpoint, und `evaluateAutomaticResume` verweigert
 dann nur noch mit `RESET_TIME_NOT_REACHED` — genau die Bedingung, auf die
 `--wait-for-reset` wartet.

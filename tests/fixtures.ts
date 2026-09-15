@@ -272,6 +272,31 @@ export const CODEX_USAGE_LIMIT_MESSAGE =
   'try again at 5:35 PM.';
 
 /**
+ * The Codex usage-limit message in its **date-qualified** form, byte for byte
+ * as production printed it.
+ *
+ * Recovered from
+ * `~/.codex/sessions/2026/09/14/rollout-2026-09-14T20-01-21-01a0a114-aa07-7552-a966-5f898131f464.jsonl`
+ * on this machine on 2026-09-14, and seen again in the 19-29-11 rollout of the
+ * same day. The same `token_count` event carried
+ * `rate_limits { limit_id: 'premium', primary: null, secondary: null,
+ * credits: { has_credits: false, balance: '0' } }` — so this is the exhausted
+ * **premium allowance**, not the 300-minute primary window every message in
+ * {@link CODEX_USAGE_LIMIT_MESSAGE} came from.
+ *
+ * That is why the reset carries a calendar date: five days out, far past any
+ * horizon a bare `H:MM` could mean. The template is otherwise identical, which
+ * is why the prefix still recognised it as a quota block while the reset went
+ * unread.
+ *
+ * Not paraphrased and not reconstructed.
+ */
+export const CODEX_DATED_USAGE_LIMIT_MESSAGE =
+  "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), " +
+  'visit https://chatgpt.com/codex/settings/usage to purchase more credits or ' +
+  'try again at Sep 19th, 2026 11:28 AM.';
+
+/**
  * The stdout `codex exec --json` prints for a failed turn.
  *
  * Measured on 2026-09-02 by forcing a failure (`-m

@@ -13692,13 +13692,25 @@ resume by itself after a process restart is M3 slice 1.
   the subscription and not the gate. Nothing in this build starts a second one,
   and the execution lease refuses two drivers on one repository, but two
   operators driving two registries would not coordinate;
-- **a weekly-window exhaustion would derive too early.** Every recorded refusal
-  named the 300-minute primary window. If the 7-day secondary window ever
-  produces the same bare `H:MM` rendering, the derived instant would be the next
-  occurrence of that time rather than days out, and each resume attempt would
-  spend one call and re-park with a fresh instant a day later. Bounded and
-  self-correcting, but not free — and not fixable without a fixture nobody has
-  yet;
+- **a long-window exhaustion was this cost, and production has now closed it.**
+  Every refusal recorded up to 2026-09-02 named the 300-minute primary window,
+  and this entry said a longer window rendering the same bare `H:MM` would derive
+  the next occurrence of that time rather than days out — bounded and
+  self-correcting, but not fixable without a fixture nobody had. The fixture
+  arrived on 2026-09-14, and the prediction was right about the risk and wrong
+  about the shape. The exhausted **premium** allowance — `limit_id: "premium"`,
+  `primary: null`, `secondary: null`, `credits { has_credits: false, balance:
+  "0" }` in the same rollout's rate limits — does not render a bare time at all.
+  It renders `try again at Sep 19th, 2026 11:28 AM.`, which the reset pattern did
+  not match, so the block was written with `reportedResetAt: null` and left the
+  unattended path entirely rather than deriving too early. That is a worse
+  failure than the one predicted, and a quieter one: nothing waits on a `null`.
+  `codex-quota-signal.ts` now reads the date-qualified form too, and resolves the
+  named wall clock **on** the date it names instead of searching forward for that
+  clock's next occurrence — which is the part that would otherwise have answered
+  `2026-09-15` for a reset five days out. Turning this residual back into work
+  was decided when the block it describes parked a real task
+  (`healthapp/CAPTURE-006`, 2026-09-14);
 - **a recognised refusal that names no time spends a reviewer call to learn
   nothing.** It parks at `BLOCKED_USAGE_LIMIT` with `reportedResetAt: null`, and
   clearing it is an operator decision (below) rather than a wait, because there

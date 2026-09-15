@@ -67,7 +67,12 @@ import { loadTaskState, saveTaskState, type StateLoadSuccess } from '../src/stat
 import { classifyResume } from '../src/state/resume-decision.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import type { AgentCommandResult } from '../src/agent/agent-command.js';
-import { agentCommandResult, codexFailedTurn, CODEX_USAGE_LIMIT_MESSAGE } from './fixtures.js';
+import {
+  agentCommandResult,
+  codexFailedTurn,
+  CODEX_DATED_USAGE_LIMIT_MESSAGE,
+  CODEX_USAGE_LIMIT_MESSAGE,
+} from './fixtures.js';
 import { authPreflightPasses, provenAuthEvidence } from './helpers/auth-evidence.js';
 import { leaseAuthorityFor, leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { createRepoFixture, git, removeRepoFixtures } from './helpers/repo-fixtures.js';
@@ -212,6 +217,68 @@ describe('§1 the Codex quota signal, read from what the CLI actually prints', (
   });
 });
 
+/* ---------------- §1b the date-qualified refusal, as premium prints it ---- */
+
+/** The template of {@link CODEX_DATED_USAGE_LIMIT_MESSAGE}, with one reset swapped in. */
+const datedMessage = (reset: string): string =>
+  "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), " +
+  'visit https://chatgpt.com/codex/settings/usage to purchase more credits or ' +
+  `try again at ${reset}.`;
+
+describe('§1b the reset the premium allowance names, which carries a calendar date', () => {
+  it('reads the date and the time out of the recorded premium refusal', () => {
+    const refusal = readCodexQuotaRefusal(codexFailedTurn(CODEX_DATED_USAGE_LIMIT_MESSAGE));
+
+    expect(refusal.verdict).toBe('USAGE_LIMIT');
+    expect(refusal.resetTimeOfDay).toEqual({ hour: 11, minute: 28 });
+    expect(refusal.resetDate).toEqual({ year: 2026, month: 9, day: 19 });
+  });
+
+  it('reports no date for the bare-time form, which still reads exactly as before', () => {
+    const refusal = readCodexQuotaRefusal(codexFailedTurn(CODEX_USAGE_LIMIT_MESSAGE));
+
+    expect(refusal.verdict).toBe('USAGE_LIMIT');
+    expect(refusal.resetTimeOfDay).toEqual({ hour: 17, minute: 35 });
+    expect(refusal.resetDate).toBeNull();
+  });
+
+  it.each<[string, { year: number; month: number; day: number }, { hour: number; minute: number }]>([
+    ['Jan 1st, 2027 12:00 AM', { year: 2027, month: 1, day: 1 }, { hour: 0, minute: 0 }],
+    ['Mar 2nd, 2026 1:05 PM', { year: 2026, month: 3, day: 2 }, { hour: 13, minute: 5 }],
+    ['Apr 3rd, 2026 11:59 PM', { year: 2026, month: 4, day: 3 }, { hour: 23, minute: 59 }],
+    ['Sep 19th, 2026 11:28 AM', { year: 2026, month: 9, day: 19 }, { hour: 11, minute: 28 }],
+    ['Dec 31st, 2026 12:00 PM', { year: 2026, month: 12, day: 31 }, { hour: 12, minute: 0 }],
+    ['Feb 29th, 2028 6:15 AM', { year: 2028, month: 2, day: 29 }, { hour: 6, minute: 15 }],
+  ])('reads %s', (reset, date, timeOfDay) => {
+    const refusal = readCodexQuotaRefusal(codexFailedTurn(datedMessage(reset)));
+
+    expect(refusal.verdict).toBe('USAGE_LIMIT');
+    expect(refusal.resetDate).toEqual(date);
+    expect(refusal.resetTimeOfDay).toEqual(timeOfDay);
+  });
+
+  it.each([
+    ['an unknown month', 'Sap 19th, 2026 11:28 AM'],
+    ['a day the month does not have', 'Sep 31st, 2026 11:28 AM'],
+    ['February 29th of a common year', 'Feb 29th, 2026 11:28 AM'],
+    ['day zero', 'Sep 0th, 2026 11:28 AM'],
+    ['a two-digit year', 'Sep 19th, 26 11:28 AM'],
+    ['hour 13 on a twelve-hour clock', 'Sep 19th, 2026 13:28 PM'],
+    ['hour zero on a twelve-hour clock', 'Sep 19th, 2026 0:28 AM'],
+    ['a minute out of range', 'Sep 19th, 2026 11:60 AM'],
+    ['a missing ordinal suffix', 'Sep 19, 2026 11:28 AM'],
+    ['a missing meridiem', 'Sep 19th, 2026 11:28'],
+  ])('is still a pause, but invents no reset, for %s', (_label, reset) => {
+    const refusal = readCodexQuotaRefusal(codexFailedTurn(datedMessage(reset)));
+
+    // The prefix is what classifies. An unreadable reset costs the instant,
+    // never the classification - the same rule the bare-time form already has.
+    expect(refusal.verdict).toBe('USAGE_LIMIT');
+    expect(refusal.resetDate).toBeNull();
+    expect(refusal.resetTimeOfDay).toBeNull();
+  });
+});
+
 /* ────────────────────── §2 turning a time into an instant ───────────────── */
 
 describe('§2 the reset instant, derived against a stated timezone', () => {
@@ -295,11 +362,75 @@ describe('§2 the reset instant, derived against a stated timezone', () => {
   });
 });
 
+/* ----------------- §2b an instant on a date the message named ------------- */
+
+describe('§2b the reset instant when the refusal named a calendar date', () => {
+  /** The observed premium refusal: written at this instant, naming Sep 19th. */
+  const PREMIUM_REFUSED_AT = Date.parse('2026-09-14T18:01:19.000Z');
+  const SEP_19 = { year: 2026, month: 9, day: 19 };
+
+  it('reaches five days out, far past the horizon a bare time of day is bounded by', () => {
+    // 11:28 local in UTC+2 is 09:28Z, and the named minute rounds up to :29:00
+    // exactly as the bare-time derivation does.
+    const derived = deriveResetInstant({ hour: 11, minute: 28 }, PREMIUM_REFUSED_AT, CEST, SEP_19);
+
+    expect(derived).toBe('2026-09-19T09:29:00.000Z');
+  });
+
+  it('does not silently answer with the next occurrence of the same wall clock', () => {
+    // The defect this section exists for. Without the date the same wall clock
+    // resolves to TOMORROW, which is a wrong instant rather than no instant -
+    // and a wrong one is worse, because a scheduler would wait on it and wake
+    // into a quota that still has four days to run.
+    const dated = deriveResetInstant({ hour: 11, minute: 28 }, PREMIUM_REFUSED_AT, CEST, SEP_19);
+    const bare = deriveResetInstant({ hour: 11, minute: 28 }, PREMIUM_REFUSED_AT, CEST);
+
+    expect(bare).toBe('2026-09-15T09:29:00.000Z');
+    expect(dated).not.toBe(bare);
+  });
+
+  it('resolves an ambiguous wall clock on the named date to the later instant', () => {
+    // The same fall-back fold §2 measures, reached by date rather than by scan.
+    const folding: LocalOffsetMinutes = (ms) =>
+      ms < Date.parse('2026-10-25T01:00:00.000Z') ? -120 : -60;
+
+    const derived = deriveResetInstant(
+      { hour: 2, minute: 30 },
+      Date.parse('2026-10-20T00:00:00.000Z'),
+      folding,
+      { year: 2026, month: 10, day: 25 },
+    );
+
+    expect(derived).toBe('2026-10-25T01:31:00.000Z');
+  });
+
+  it('refuses a wall clock that does not occur on the date it was named for', () => {
+    // A spring-forward gap. The bare-time search walks past a missing wall clock
+    // to its next real occurrence; a DATED reset has no next occurrence to walk
+    // to, so the honest answer is no instant at all.
+    const springing: LocalOffsetMinutes = (ms) =>
+      ms < Date.parse('2026-03-29T01:00:00.000Z') ? -60 : -120;
+
+    const derived = deriveResetInstant(
+      { hour: 2, minute: 30 },
+      Date.parse('2026-03-20T00:00:00.000Z'),
+      springing,
+      { year: 2026, month: 3, day: 29 },
+    );
+
+    expect(derived).toBeNull();
+  });
+
+  it('refuses rather than guesses when the clock itself is unreadable', () => {
+    expect(deriveResetInstant({ hour: 11, minute: 28 }, Number.NaN, CEST, SEP_19)).toBeNull();
+  });
+});
+
 /* ─────────────────────────── §3 the reviewer boundary ───────────────────── */
 
-async function reviewOf(result: AgentCommandResult) {
+async function reviewOf(result: AgentCommandResult, now: string = REFUSED_AT) {
   return runCodexReviewer(
-    { worktreePath: '/srv/worktrees/alpha/task', round: 2, payload: 'review', now: REFUSED_AT },
+    { worktreePath: '/srv/worktrees/alpha/task', round: 2, payload: 'review', now },
     { agent: async () => result, localOffsetMinutes: CEST },
   );
 }
@@ -316,6 +447,24 @@ describe('§3 the boundary classifies a quota refusal as a pause', () => {
       blockedAgent: 'codex',
       resumeFrom: { phase: 'REVIEW', round: 2 },
       reportedResetAt: DERIVED_RESET,
+    });
+  });
+
+  it('carries the dated premium reset all the way to the block', async () => {
+    // The end-to-end shape that failed in production on 2026-09-14: the block
+    // was written with `reportedResetAt: null`, so nothing could ever wait for
+    // it and the task left the unattended path for good.
+    const outcome = await reviewOf(
+      codexUsageLimitResult({ message: CODEX_DATED_USAGE_LIMIT_MESSAGE }),
+      '2026-09-14T18:01:19.000Z',
+    );
+
+    if (outcome.ok) expect.unreachable();
+    expect(outcome.disposition).toBe('AGENT_BLOCKED_USAGE_LIMIT');
+    expect(outcome.block).toEqual({
+      blockedAgent: 'codex',
+      resumeFrom: { phase: 'REVIEW', round: 2 },
+      reportedResetAt: '2026-09-19T09:29:00.000Z',
     });
   });
 

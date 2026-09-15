@@ -97,6 +97,22 @@ export interface ReportedResetTimeOfDay {
   readonly minute: number;
 }
 
+/**
+ * The calendar date the provider named, when it named one.
+ *
+ * Present only for the **date-qualified** refusal — the exhausted premium
+ * allowance, whose reset is days away rather than hours. See
+ * {@link DATED_RESET_SUFFIX_PATTERN} for the evidence.
+ */
+export interface ReportedResetDate {
+  /** Four digits, as the message rendered them. */
+  readonly year: number;
+  /** 1–12, from an explicit table rather than a locale-dependent parse. */
+  readonly month: number;
+  /** 1–31, already checked against {@link month} and {@link year}. */
+  readonly day: number;
+}
+
 export interface CodexQuotaRefusal {
   /**
    * `USAGE_LIMIT` only for the positively recognised template. Everything
@@ -114,11 +130,24 @@ export interface CodexQuotaRefusal {
    * `resume-policy.ts` already describes for `reportedResetAt`.
    */
   readonly resetTimeOfDay: ReportedResetTimeOfDay | null;
+  /**
+   * The calendar date the refusal named, or `null` when it named only a time of
+   * day.
+   *
+   * A second field rather than a member of {@link ReportedResetTimeOfDay},
+   * because the two are answers to different questions and the bare-time form
+   * genuinely has no date to give. A caller holding a date must resolve the
+   * clock **on** it; a caller holding none must search forward for the clock's
+   * next occurrence, and those are different derivations with different failure
+   * modes — see {@link deriveResetInstant}.
+   */
+  readonly resetDate: ReportedResetDate | null;
 }
 
 const NO_REFUSAL: CodexQuotaRefusal = Object.freeze({
   verdict: 'NONE' as const,
   resetTimeOfDay: null,
+  resetDate: null,
 });
 
 /**
@@ -141,6 +170,90 @@ const USAGE_LIMIT_PREFIX = "You've hit your usage limit.";
  * trailing newline — so the anchor means here what it appears to mean.
  */
 const RESET_SUFFIX_PATTERN = / or try again at (\d{1,2}):(\d{2}) (AM|PM)\.$/;
+
+/**
+ * The **date-qualified** reset, read only from the end of the message.
+ *
+ * ── Evidence (measured on this machine, 2026-09-14) ────────────────────────
+ *
+ * Two rollouts of that day —
+ * `~/.codex/sessions/2026/09/14/rollout-2026-09-14T20-01-21-01a0a114-….jsonl`
+ * and the `19-29-11` one — carry the identical template with a different reset
+ * rendering:
+ *
+ *     You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro),
+ *     visit https://chatgpt.com/codex/settings/usage to purchase more credits or
+ *     try again at Sep 19th, 2026 11:28 AM.
+ *
+ * The same rollout's rate limits read `limit_id: "premium"`, `primary: null`,
+ * `secondary: null`, `credits { has_credits: false, balance: "0" }`. So this is
+ * the exhausted **premium allowance**, not the 300-minute primary window every
+ * message in this file's header came from — which is why the reset is five days
+ * out and why it has to carry a date to mean anything.
+ *
+ * What this pattern was built against, and what it deliberately refuses:
+ *
+ *  - the month is matched as three letters and resolved through {@link MONTHS},
+ *    never through `Date.parse`. Free-text date parsing is implementation- and
+ *    locale-defined, and a reset this build cannot read exactly is one it
+ *    reports no instant for;
+ *  - the ordinal suffix is matched but **not** cross-checked against the day.
+ *    `19st` would be accepted. The number is what carries the meaning, and a
+ *    renderer that changes its ordinal rules should not cost a real reset;
+ *  - the day is checked against the month and year by {@link daysInMonth}, so
+ *    `Sep 31st` and `Feb 29th, 2026` name no date at all;
+ *  - anchored at `$` for the same reason the bare pattern is.
+ */
+const DATED_RESET_SUFFIX_PATTERN =
+  / or try again at ([A-Z][a-z]{2}) (\d{1,2})(?:st|nd|rd|th), (\d{4}) (\d{1,2}):(\d{2}) (AM|PM)\.$/;
+
+/**
+ * The month names the provider renders, mapped explicitly.
+ *
+ * A table rather than a parse: `Date.parse('Sap 19, 2026')` is entitled to
+ * succeed, and a month this reader does not positively recognise must produce
+ * no date rather than a plausible one.
+ */
+const MONTHS: ReadonlyMap<string, number> = new Map([
+  ['Jan', 1],
+  ['Feb', 2],
+  ['Mar', 3],
+  ['Apr', 4],
+  ['May', 5],
+  ['Jun', 6],
+  ['Jul', 7],
+  ['Aug', 8],
+  ['Sep', 9],
+  ['Oct', 10],
+  ['Nov', 11],
+  ['Dec', 12],
+]);
+
+/** How many days that month has in that year. February is the only one that asks. */
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    return leap ? 29 : 28;
+  }
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
+
+/**
+ * A 12-hour rendering as a 24-hour wall clock, or `null`.
+ *
+ * Shared by both suffix patterns, which each admit an hour a 12-hour clock does
+ * not have. Refused here rather than folded into something plausible, exactly as
+ * the bare-time reader already did.
+ */
+function readTwelveHourClock(
+  hour12: number,
+  minute: number,
+  meridiem: string,
+): ReportedResetTimeOfDay | null {
+  if (hour12 < 1 || hour12 > 12 || minute > 59) return null;
+  const hour = meridiem === 'AM' ? hour12 % 12 : (hour12 % 12) + 12;
+  return Object.freeze({ hour, minute });
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -195,26 +308,45 @@ export function readCodexQuotaRefusal(stdout: string): CodexQuotaRefusal {
   const message = readTurnFailureMessage(stdout);
   if (message === null || !message.startsWith(USAGE_LIMIT_PREFIX)) return NO_REFUSAL;
 
+  // An unreadable reset costs the instant and never the classification: the
+  // prefix is what says this is a quota pause, and a pause with nothing to wait
+  // for is still a pause.
+  const unreadable: CodexQuotaRefusal = Object.freeze({
+    verdict: 'USAGE_LIMIT' as const,
+    resetTimeOfDay: null,
+    resetDate: null,
+  });
+
+  // The date-qualified form first. The two patterns cannot both match — the
+  // bare one requires the digits immediately after `try again at` — so the order
+  // is for a reader of this function, not for correctness.
+  const dated = DATED_RESET_SUFFIX_PATTERN.exec(message);
+  if (dated !== null) {
+    const month = MONTHS.get(dated[1] ?? '');
+    const day = Number(dated[2]);
+    const year = Number(dated[3]);
+    const timeOfDay = readTwelveHourClock(Number(dated[4]), Number(dated[5]), dated[6] ?? '');
+
+    if (month === undefined || timeOfDay === null) return unreadable;
+    if (day < 1 || day > daysInMonth(year, month)) return unreadable;
+
+    return Object.freeze({
+      verdict: 'USAGE_LIMIT' as const,
+      resetTimeOfDay: timeOfDay,
+      resetDate: Object.freeze({ year, month, day }),
+    });
+  }
+
   const named = RESET_SUFFIX_PATTERN.exec(message);
-  if (named === null) {
-    return Object.freeze({ verdict: 'USAGE_LIMIT' as const, resetTimeOfDay: null });
-  }
+  if (named === null) return unreadable;
 
-  const hour12 = Number(named[1]);
-  const minute = Number(named[2]);
-  const meridiem = named[3];
+  const timeOfDay = readTwelveHourClock(Number(named[1]), Number(named[2]), named[3] ?? '');
+  if (timeOfDay === null) return unreadable;
 
-  // A 12-hour clock has no hour 0 and no hour 13. The pattern admits both, so
-  // they are refused here rather than folded into something plausible: a message
-  // this reader cannot read exactly is a message it reports no time for.
-  if (hour12 < 1 || hour12 > 12 || minute > 59) {
-    return Object.freeze({ verdict: 'USAGE_LIMIT' as const, resetTimeOfDay: null });
-  }
-
-  const hour = meridiem === 'AM' ? hour12 % 12 : (hour12 % 12) + 12;
   return Object.freeze({
     verdict: 'USAGE_LIMIT' as const,
-    resetTimeOfDay: Object.freeze({ hour, minute }),
+    resetTimeOfDay: timeOfDay,
+    resetDate: null,
   });
 }
 
@@ -269,6 +401,75 @@ function sameWallClock(a: ReportedResetTimeOfDay, b: ReportedResetTimeOfDay): bo
   return a.hour === b.hour && a.minute === b.minute;
 }
 
+/** The local calendar date at an instant, in the same shape the message names. */
+function localDate(epochMs: number, offsetAt: LocalOffsetMinutes): ReportedResetDate {
+  const shifted = new Date(epochMs - offsetAt(epochMs) * MINUTE_MS);
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate(),
+  };
+}
+
+function sameLocalDate(a: ReportedResetDate, b: ReportedResetDate): boolean {
+  return a.year === b.year && a.month === b.month && a.day === b.day;
+}
+
+/**
+ * How far either side of the named date the dated scan looks.
+ *
+ * A **window**, not a claim: the named wall clock happens somewhere inside the
+ * 24 hours of that local day, and a day sits inside ±24 hours of its own UTC
+ * midnight in every zone offset that exists. Scanning a day either side costs
+ * 4320 comparisons and removes the need to do offset algebra across a
+ * transition, which is where a closed-form conversion goes wrong.
+ */
+const DATED_SCAN_PADDING_MS = 24 * HOUR_MS;
+const DATED_SCAN_MINUTES = 72 * 60;
+
+/**
+ * The instant at which a named wall clock occurs **on a named local date**.
+ *
+ * Scanned rather than computed, for the reason {@link deriveResetInstant} scans:
+ * a zone is a set of rules, not an offset, and the two interesting cases are
+ * transitions.
+ *
+ *  - **an ambiguous wall clock resolves to the later instant.** When daylight
+ *    saving ends the named clock happens twice on that date; the earlier one is
+ *    before the reset, so the scan keeps the last match rather than the first.
+ *    This is the same choice the bare-time derivation makes, reached the same
+ *    way;
+ *  - **a wall clock that does not occur on that date yields `null`.** Inside a
+ *    spring-forward gap there is no such instant. The bare-time search may walk
+ *    on to the clock's next occurrence because it was only ever asked for the
+ *    next one; a dated reset has no next occurrence, so the honest answer is no
+ *    instant at all — `reportedResetAt: null`, the operator decides.
+ *
+ * The named minute is rounded up to its end for the reason the header gives:
+ * the provider truncates seconds, and late is a longer wait while early is a
+ * wasted call.
+ */
+function deriveDatedResetInstant(
+  named: ReportedResetTimeOfDay,
+  date: ReportedResetDate,
+  offsetAt: LocalOffsetMinutes,
+): string | null {
+  const midnightAsUtc = Date.UTC(date.year, date.month - 1, date.day);
+  if (!Number.isFinite(midnightAsUtc)) return null;
+
+  const start = midnightAsUtc - DATED_SCAN_PADDING_MS;
+  let settled: number | null = null;
+
+  for (let step = 0; step <= DATED_SCAN_MINUTES; step += 1) {
+    const candidate = start + step * MINUTE_MS;
+    if (!sameWallClock(localWallClock(candidate, offsetAt), named)) continue;
+    if (!sameLocalDate(localDate(candidate, offsetAt), date)) continue;
+    settled = candidate;
+  }
+
+  return settled === null ? null : new Date(settled + MINUTE_MS).toISOString();
+}
+
 /**
  * Turns the time of day the provider named into an absolute instant.
  *
@@ -302,8 +503,20 @@ export function deriveResetInstant(
   named: ReportedResetTimeOfDay,
   nowMs: number,
   offsetAt: LocalOffsetMinutes = systemLocalOffsetMinutes,
+  onDate: ReportedResetDate | null = null,
 ): string | null {
+  // Checked before the split, and for both paths. An unreadable `now` is a
+  // caller that could not parse its own clock, and this build answers nothing
+  // from a caller in that state rather than answering one path and not the
+  // other.
   if (!Number.isFinite(nowMs)) return null;
+
+  // A named date is an answer, not a starting point: it is resolved on that
+  // date, never searched forward for from `now`. Without this the scan below
+  // returns the clock's NEXT occurrence — a wrong instant rather than no
+  // instant, and a scheduler would wait on it and wake into a quota with days
+  // still to run.
+  if (onDate !== null) return deriveDatedResetInstant(named, onDate, offsetAt);
 
   const start = Math.floor(nowMs / MINUTE_MS) * MINUTE_MS;
 
