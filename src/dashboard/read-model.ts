@@ -70,6 +70,7 @@ import {
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
 import { readDeclaredProfile } from '../repo/declared-identity.js';
 import { MAX_SCANNED_STATE_FILES_PER_REPOSITORY } from '../schedule/durable-wake.js';
+import { listAttentionRecords } from '../notify/attention-store.js';
 import { loadTaskState } from '../state/state-store.js';
 import {
   TASK_STATE_FILE_EXTENSION,
@@ -119,6 +120,15 @@ export const READING_NOTE_CODES = [
   'LEASE_LOCATION_UNDETERMINED',
   /** Inspecting the lease threw. */
   'LEASE_READER_THREW',
+  /** The operator-attention store could not be read. NOT "nothing is open". */
+  'ATTENTION_STORE_UNREADABLE',
+  /**
+   * A stored attention record names a task the live combined reading does not
+   * find actionable. Surfaced rather than acted on: the stored item is a
+   * snapshot of an earlier pass and cannot outrank a newer contradiction
+   * between the declaration and the runtime record.
+   */
+  'ATTENTION_STORE_DISAGREES',
 ] as const;
 
 export type ReadingNoteCode = (typeof READING_NOTE_CODES)[number];
@@ -170,8 +180,23 @@ export type ProfileReading =
  * an empty list, deliberately, so that "nothing was found" can never be read as
  * "everything is finished". Both arrive here as `REFUSED`, with the code.
  */
+/** What one declaration says about itself. AO's own `OPEN`/`DONE` vocabulary. */
+export interface DeclaredTask {
+  readonly id: string;
+  /**
+   * The declaration's lifecycle, carried verbatim.
+   *
+   * This is NOT a runtime state and is never mapped onto one: `OPEN` is not
+   * QUEUED and `DONE` is not a terminal AO state. It is what the repository's
+   * own task file says about the task's place in the declared plan, which is a
+   * real and independent fact — and the one that tells a finished task's leftover
+   * runtime record apart from live work.
+   */
+  readonly status: 'OPEN' | 'DONE';
+}
+
 export type DeclaredTaskReading =
-  | { readonly reading: 'DISCOVERED'; readonly taskIds: readonly string[] }
+  | { readonly reading: 'DISCOVERED'; readonly tasks: readonly DeclaredTask[] }
   | { readonly reading: 'REFUSED'; readonly code: string; readonly taskId: string | null }
   | { readonly reading: 'NOT_ATTEMPTED'; readonly why: 'PROFILE_UNUSABLE' };
 
@@ -309,7 +334,7 @@ export type DeliveryReading =
     };
 
 /**
- * Whether a task is declared — and the third answer, which is the point.
+ * What the declared plan says about a task — including the two non-answers.
  *
  * `UNDETERMINED` exists because declared-task discovery is all-or-nothing: one
  * unusable task file refuses the whole source and returns nothing. Folding that
@@ -317,25 +342,61 @@ export type DeliveryReading =
  * specific, unsupported claim "this task has no declaration" — for every task in
  * the repository at once. That is the unknown-as-false translation this model
  * exists to refuse, and it is one `?:` away at all times.
+ *
+ * `OPEN` and `DONE` are the declaration's own words, carried rather than
+ * translated. Keeping them is what lets a finished task's leftover runtime
+ * record be told apart from live work — see {@link OperationalReading}.
  */
-export type DeclarationReading = 'DECLARED' | 'NOT_DECLARED' | 'UNDETERMINED';
+export type DeclarationReading = 'OPEN' | 'DONE' | 'NOT_DECLARED' | 'UNDETERMINED';
+
+/**
+ * What, if anything, this task asks of the operator right now.
+ *
+ * A dashboard-only judgement, derived from two independent sources and inventing
+ * no AO state. It exists because neither source answers the question alone, and
+ * the real snapshot proved it: CAPTURE-002 carries a `HUMAN_DECISION_REQUIRED`
+ * runtime record and a declaration that says `DONE`. Reading the runtime record
+ * on its own paged the operator about a task that was finished and merged.
+ *
+ * - `ACTIONABLE`      the declared plan still wants this task AND AO's own
+ *                     attention semantics says a person is due.
+ * - `AUTOMATIC_WAIT`  parked on a recorded reset the machine can still wait out.
+ *                     Nobody is needed.
+ * - `INACTIVE`        nothing is required of the operator: finished, never
+ *                     started, or running with nothing asked.
+ * - `CONFLICT`        the declaration and the runtime record disagree. That is
+ *                     the whole claim. It does NOT say the runtime record is
+ *                     stale — staleness would need evidence neither source
+ *                     carries — only that two real sources do not line up.
+ * - `UNDETERMINED`    evidence is missing on one side, so no classification is
+ *                     supportable. Never a synonym for "fine".
+ */
+export type OperationalReading =
+  | 'ACTIONABLE'
+  | 'AUTOMATIC_WAIT'
+  | 'INACTIVE'
+  | 'CONFLICT'
+  | 'UNDETERMINED';
 
 export interface TaskSnapshot {
   readonly taskId: string;
   /**
-   * Whether the task appears in a successful declared-task discovery.
-   *
-   * Independent of {@link runtime}. A task file may exist with no durable state
-   * (never started), and a durable state may exist whose declaration is gone or
-   * could not be joined — that task stays listed rather than vanishing.
-   *
-   * Note what is NOT here: `TaskDefinition.status`. That field is `OPEN`/`DONE`
-   * and belongs to the dependency contract; a task file may legitimately say
-   * `OPEN` while its durable state says `READY_FOR_PR`, because the file flip
-   * lands in the delivery pull request. Nothing about progress is read from it.
+   * What the declared plan says. Four-valued, and never mapped onto a runtime
+   * state: `OPEN` is not QUEUED and `DONE` is not a terminal AO state.
    */
-  readonly declared: DeclarationReading;
+  readonly declaration: DeclarationReading;
+  /** What AO's durable record says. Independent of {@link declaration}. */
   readonly runtime: RuntimeTaskReading;
+  /**
+   * What this asks of the operator, from the two together.
+   *
+   * Only `ACTIONABLE` reaches the Needs-You list. AO's own attention judgement
+   * is a necessary condition for it and not a sufficient one: a blocking record
+   * on a task the plan calls `DONE` is a `CONFLICT`, and paging on it is exactly
+   * the false alarm this dashboard exists to avoid.
+   */
+  readonly operational: OperationalReading;
+  /** AO's own attention judgement over the runtime record alone. */
   readonly attention: AttentionReading;
   readonly verification: VerificationReading;
   readonly delivery: DeliveryReading;
@@ -398,6 +459,15 @@ export interface RepositorySnapshot {
   readonly lease: LeaseReading;
 }
 
+/** One task the combined evidence says a person must act on now. */
+export interface NeedsOperatorEntry {
+  readonly repositoryRoot: string;
+  readonly taskId: string;
+  readonly reason: AttentionReason;
+  /** AO's own operator sentence, naming the command where one exists. */
+  readonly action: string;
+}
+
 export interface DashboardSnapshot {
   /**
    * When this observation was taken, stamped here because AO stamps nothing.
@@ -408,6 +478,17 @@ export interface DashboardSnapshot {
   readonly registry: RegistryReading;
   /** In AO's own canonical-root order, never a locale collation. */
   readonly repositories: readonly RepositorySnapshot[];
+  /**
+   * The cross-repository "needs you" list.
+   *
+   * Exactly the tasks whose {@link TaskSnapshot.operational} is `ACTIONABLE`,
+   * which requires BOTH that AO's attention semantics says a person is due AND
+   * that the declared plan still wants the task. A blocking record on a task the
+   * plan calls `DONE` is a `CONFLICT` and is deliberately absent from this list:
+   * paging an operator to resume a task that was finished and merged is the
+   * false alarm this dashboard exists to remove.
+   */
+  readonly needsOperator: readonly NeedsOperatorEntry[];
   /** Everything this observation could not establish. Never silently empty. */
   readonly notes: readonly ReadingNote[];
 }
@@ -429,6 +510,7 @@ export interface ReadModelSeams {
   readonly readDirectory?: (path: string) => readonly string[];
   readonly loadState?: typeof loadTaskState;
   readonly inspectLease?: typeof inspectRepositoryExecutionLease;
+  readonly listAttention?: typeof listAttentionRecords;
 }
 
 /* ── the observation ───────────────────────────────────────────────────────── */
@@ -529,7 +611,9 @@ function readDeclaredTasks(
   }
   return Object.freeze({
     reading: 'DISCOVERED' as const,
-    taskIds: Object.freeze(discovered.tasks.map((task) => task.id)),
+    tasks: Object.freeze(
+      discovered.tasks.map((task) => Object.freeze({ id: task.id, status: task.status })),
+    ),
   });
 }
 
@@ -589,6 +673,50 @@ function factsOf(state: TaskState, revision: string): RuntimeTaskFacts {
     blockedAgent: state.blockedAgent,
     reportedResetAt: state.reportedResetAt,
   });
+}
+
+/**
+ * What this task asks of the operator, from the declaration and the record.
+ *
+ * Ordered so that every non-answer is taken before any answer: missing evidence
+ * on either side ends in `UNDETERMINED` rather than in a classification built on
+ * the half that happened to be readable.
+ */
+function operationalOf(
+  declaration: DeclarationReading,
+  runtime: RuntimeTaskReading,
+  attention: AttentionReading,
+): OperationalReading {
+  // A record this build cannot read says nothing about what is required.
+  if (runtime.reading === 'UNREADABLE') return 'UNDETERMINED';
+  // Declaration evidence missing for the whole repository. A runtime row must
+  // not become actionable merely because the other source could not be read.
+  if (declaration === 'UNDETERMINED') return 'UNDETERMINED';
+
+  // Nothing recorded: the plan may still want it, but nothing is asked of a
+  // person and no clock is running.
+  if (runtime.reading === 'NONE') return 'INACTIVE';
+
+  // A terminal record is an ending, whatever the declaration says. `OPEN` with
+  // READY_FOR_PR is the ordinary pre-delivery shape, not a disagreement: the
+  // declaration flip lands in the delivery pull request.
+  if (runtime.facts.stateKind === 'TERMINAL') return 'INACTIVE';
+
+  // Below here a NON-terminal record exists — AO believes this task is in
+  // flight.
+  //
+  // The plan says it is finished. Those cannot both be current, and the
+  // supportable statement is exactly that: they disagree. Which one is out of
+  // date is not decidable from either document, so it is not claimed.
+  if (declaration === 'DONE') return 'CONFLICT';
+  // A record with no declaration at all is the same shape of disagreement.
+  if (declaration === 'NOT_DECLARED') return 'CONFLICT';
+
+  // The plan still wants this task, so AO's own judgement decides.
+  if (attention.reading === 'OPERATOR_REQUIRED') return 'ACTIONABLE';
+  if (attention.reading === 'AUTOMATIC_WAIT') return 'AUTOMATIC_WAIT';
+  // In flight, with nothing asked of anybody.
+  return 'INACTIVE';
 }
 
 /** Whether a person is needed — AO's own judgement, not a second one. */
@@ -723,77 +851,91 @@ function readRepository(
 
   // The join. A task is listed if it is declared, if it has a durable record, or
   // both — and which of those is true is carried, never inferred from the other.
-  // Only a SUCCESSFUL discovery can answer "is this declared". On a refusal the
-  // question is unanswered for every task, and saying so is the whole job.
+  // Only a SUCCESSFUL discovery can answer "what does the plan say". On a
+  // refusal the question is unanswered for every task, and saying so is the job.
   const discovered = declaredTasks.reading === 'DISCOVERED';
-  const declaredIds = discovered ? declaredTasks.taskIds : [];
-  const ids = [...new Set([...declaredIds, ...runtime.taskIds])].sort(compareTaskIds);
+  const byId = new Map<string, DeclaredTask>(
+    discovered ? declaredTasks.tasks.map((task) => [task.id, task]) : [],
+  );
+  const ids = [...new Set([...byId.keys(), ...runtime.taskIds])].sort(compareTaskIds);
 
   const tasks = ids.map((taskId): TaskSnapshot => {
-    const isDeclared: DeclarationReading = !discovered
+    const declaration: DeclarationReading = !discovered
       ? 'UNDETERMINED'
-      : declaredIds.includes(taskId)
-        ? 'DECLARED'
-        : 'NOT_DECLARED';
+      : (byId.get(taskId)?.status ?? 'NOT_DECLARED');
     const hasRecord = runtime.taskIds.includes(taskId);
 
     if (!hasRecord) {
       // Declared, never started. NOT "queued": AO has no such state, and naming
       // one here would put a word on the page no AO report would ever agree to.
+      const none = Object.freeze({ reading: 'NONE' as const });
       return Object.freeze({
         taskId,
-        declared: isDeclared,
-        runtime: Object.freeze({ reading: 'NONE' as const }),
-        attention: Object.freeze({ reading: 'NONE' as const }),
-        verification: Object.freeze({ reading: 'NONE' as const }),
-        delivery: Object.freeze({ reading: 'NONE' as const }),
+        declaration,
+        runtime: none,
+        operational: operationalOf(declaration, none, none),
+        attention: none,
+        verification: none,
+        delivery: none,
       });
     }
 
     // Guarded, not trusted. `loadTaskState` documents that it never throws, but
     // this is a seam: the read model must survive ANY reader put through it,
-    // and a snapshot that dies because one task's record exploded would take
+    // and a snapshot that died because one task's record exploded would take
     // every other repository down with it.
     let load: ReturnType<typeof loadTaskState>;
     try {
       load = seams.loadState(canonicalRoot, taskId);
     } catch (error) {
       notes.push(note('TASK_STATE_UNREADABLE', canonicalRoot, taskId, errnoOf(error)));
+      const unreadable = Object.freeze({
+        reading: 'UNREADABLE' as const,
+        code: 'READER_THREW',
+        classification: 'STATE_INVALID',
+      });
+      const none = Object.freeze({ reading: 'NONE' as const });
       return Object.freeze({
         taskId,
-        declared: isDeclared,
-        runtime: Object.freeze({
-          reading: 'UNREADABLE' as const,
-          code: 'READER_THREW',
-          classification: 'STATE_INVALID',
-        }),
-        attention: Object.freeze({ reading: 'NONE' as const }),
-        verification: Object.freeze({ reading: 'NONE' as const }),
-        delivery: Object.freeze({ reading: 'NONE' as const }),
+        declaration,
+        runtime: unreadable,
+        operational: operationalOf(declaration, unreadable, none),
+        attention: none,
+        verification: none,
+        delivery: none,
       });
     }
 
     if (!load.ok) {
       notes.push(note('TASK_STATE_UNREADABLE', canonicalRoot, taskId, load.code));
+      const unreadable = Object.freeze({
+        reading: 'UNREADABLE' as const,
+        code: load.code,
+        classification: load.classification,
+      });
+      const none = Object.freeze({ reading: 'NONE' as const });
       return Object.freeze({
         taskId,
-        declared: isDeclared,
-        runtime: Object.freeze({
-          reading: 'UNREADABLE' as const,
-          code: load.code,
-          classification: load.classification,
-        }),
-        attention: Object.freeze({ reading: 'NONE' as const }),
-        verification: Object.freeze({ reading: 'NONE' as const }),
-        delivery: Object.freeze({ reading: 'NONE' as const }),
+        declaration,
+        runtime: unreadable,
+        operational: operationalOf(declaration, unreadable, none),
+        attention: none,
+        verification: none,
+        delivery: none,
       });
     }
 
+    const loaded = Object.freeze({
+      reading: 'LOADED' as const,
+      facts: factsOf(load.state, load.revision),
+    });
+    const attention = attentionOf(load.state, now);
     return Object.freeze({
       taskId,
-      declared: isDeclared,
-      runtime: Object.freeze({ reading: 'LOADED' as const, facts: factsOf(load.state, load.revision) }),
-      attention: attentionOf(load.state, now),
+      declaration,
+      runtime: loaded,
+      operational: operationalOf(declaration, loaded, attention),
+      attention,
       verification: verificationOf(canonicalRoot, taskId, notes),
       delivery: deliveryOf(canonicalRoot, taskId, notes),
     });
@@ -822,6 +964,49 @@ function canonicalise(
     return realpath(declaredPath);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Compares the stored operator-attention outbox against this live reading.
+ *
+ * The outbox is settled only by a coordinator pass, so between passes it can
+ * hold an item whose condition has since cleared — and, more importantly here,
+ * an item raised before a task's declaration was flipped to `DONE`. This does
+ * not act on it either way. A stored item the live reading does not find
+ * actionable becomes a note; the live reading stands, because it is the newer
+ * of the two and it is the one that saw both sources.
+ */
+function crossCheckStoredAttention(
+  list: typeof listAttentionRecords,
+  provider: PathProvider,
+  repositories: readonly RepositorySnapshot[],
+  actionable: ReadonlySet<string>,
+  notes: ReadingNote[],
+): void {
+  let listing: ReturnType<typeof listAttentionRecords>;
+  try {
+    listing = list(provider);
+  } catch (error) {
+    notes.push(note('ATTENTION_STORE_UNREADABLE', null, null, errnoOf(error)));
+    return;
+  }
+
+  // Absent is ordinary. Unreadable is not, and must never read as "nothing open".
+  if (listing.unreadableRoot) {
+    notes.push(note('ATTENTION_STORE_UNREADABLE', null, null, null));
+    return;
+  }
+
+  const known = new Set(repositories.map((repository) => repository.canonicalRoot));
+  for (const record of listing.records) {
+    if (record.subject !== 'TASK') continue;
+    // Only repositories this reading actually covered can be compared.
+    if (!known.has(record.repositoryRoot)) continue;
+    if (actionable.has(`${record.repositoryRoot} ${record.taskId}`)) continue;
+    notes.push(
+      note('ATTENTION_STORE_DISAGREES', record.repositoryRoot, record.taskId, record.reason),
+    );
   }
 }
 
@@ -856,6 +1041,7 @@ export function readDashboardSnapshot(seams: ReadModelSeams = {}): DashboardSnap
       observedAt,
       registry: Object.freeze({ reading: 'UNUSABLE' as const, code: 'PROFILE_UNAVAILABLE' }),
       repositories: Object.freeze([]),
+      needsOperator: Object.freeze([]),
       notes: Object.freeze(notes),
     });
   }
@@ -865,6 +1051,7 @@ export function readDashboardSnapshot(seams: ReadModelSeams = {}): DashboardSnap
       observedAt,
       registry: Object.freeze({ reading: 'NOT_REGISTERED' as const }),
       repositories: Object.freeze([]),
+      needsOperator: Object.freeze([]),
       notes: Object.freeze(notes),
     });
   }
@@ -875,6 +1062,7 @@ export function readDashboardSnapshot(seams: ReadModelSeams = {}): DashboardSnap
       observedAt,
       registry: Object.freeze({ reading: 'UNUSABLE' as const, code: outcome.code }),
       repositories: Object.freeze([]),
+      needsOperator: Object.freeze([]),
       notes: Object.freeze(notes),
     });
   }
@@ -903,6 +1091,38 @@ export function readDashboardSnapshot(seams: ReadModelSeams = {}): DashboardSnap
   // locale collation, and never the declared id — ids may repeat.
   repositories.sort((a, b) => compareRepositoryRoots(a.canonicalRoot, b.canonicalRoot));
 
+  // The needs-you list is a projection, not a second judgement: exactly the
+  // tasks the combined reading already classified ACTIONABLE.
+  const needsOperator: NeedsOperatorEntry[] = [];
+  const actionable = new Set<string>();
+  for (const repository of repositories) {
+    for (const task of repository.tasks) {
+      if (task.operational !== 'ACTIONABLE') continue;
+      if (task.attention.reading !== 'OPERATOR_REQUIRED') continue;
+      actionable.add(`${repository.canonicalRoot} ${task.taskId}`);
+      needsOperator.push(
+        Object.freeze({
+          repositoryRoot: repository.canonicalRoot,
+          taskId: task.taskId,
+          reason: task.attention.reason,
+          action: task.attention.action,
+        }),
+      );
+    }
+  }
+
+  // The stored outbox is an earlier pass's snapshot. Where it names a task this
+  // reading does not find actionable, the disagreement is reported and the live
+  // combined reading stands — a record written before a declaration changed
+  // cannot outrank the contradiction that change created.
+  crossCheckStoredAttention(
+    seams.listAttention ?? listAttentionRecords,
+    provider,
+    repositories,
+    actionable,
+    notes,
+  );
+
   return Object.freeze({
     observedAt,
     registry: Object.freeze({
@@ -912,6 +1132,7 @@ export function readDashboardSnapshot(seams: ReadModelSeams = {}): DashboardSnap
       maxConcurrentRepositories: outcome.maxConcurrentRepositories,
     }),
     repositories: Object.freeze(repositories),
+    needsOperator: Object.freeze(needsOperator),
     notes: Object.freeze(notes),
   });
 }

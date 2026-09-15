@@ -64,6 +64,8 @@ interface StateOverrides {
   readonly blockedAgent?: string | null;
   readonly resumeFrom?: { phase: string; round: number } | null;
   readonly reviewRound?: number;
+  /** Required by the contract whenever state is OPERATOR_RESOLVED, and only then. */
+  readonly operatorResolution?: { closedFrom: string } | null;
 }
 
 /** Writes a durable task-state file the real loader will accept. */
@@ -89,6 +91,7 @@ function writeRuntimeState(root: string, taskId: string, overrides: StateOverrid
     resumeFrom: overrides.resumeFrom ?? null,
     reportedResetAt: overrides.reportedResetAt ?? null,
     worktreeCleanAtCheckpoint: true,
+    operatorResolution: overrides.operatorResolution ?? null,
     findingHistory: [],
   };
   writeFileSync(join(directory, `${taskId}.json`), `${JSON.stringify(state, null, 2)}\n`, 'utf8');
@@ -146,7 +149,7 @@ describe('declared and runtime are independent facts', () => {
     const [task] = snapshot.repositories[0]?.tasks ?? [];
 
     expect(task?.taskId).toBe('D1-01');
-    expect(task?.declared).toBe('DECLARED');
+    expect(task?.declaration).toBe('OPEN');
     expect(task?.runtime.reading).toBe('NONE');
 
     // AO has no QUEUED, so neither may this. The serialized snapshot must not
@@ -165,7 +168,7 @@ describe('declared and runtime are independent facts', () => {
     const orphan = tasks.find((t) => t.taskId === 'D1-99');
 
     expect(orphan).toBeDefined();
-    expect(orphan?.declared).toBe('NOT_DECLARED');
+    expect(orphan?.declaration).toBe('NOT_DECLARED');
     expect(orphan?.runtime.reading).toBe('LOADED');
   });
 
@@ -187,8 +190,8 @@ describe('declared and runtime are independent facts', () => {
 
     const task = repo?.tasks.find((t) => t.taskId === 'D1-01');
     expect(task).toBeDefined();
-    expect(task?.declared).toBe('UNDETERMINED');
-    expect(task?.declared).not.toBe('NOT_DECLARED');
+    expect(task?.declaration).toBe('UNDETERMINED');
+    expect(task?.declaration).not.toBe('NOT_DECLARED');
     // It is still listed: the durable record is evidence that work happened.
     expect(task?.runtime.reading).toBe('LOADED');
   });
@@ -202,9 +205,151 @@ describe('declared and runtime are independent facts', () => {
 
     const snapshot = snapshotOf([root]);
     const [task] = snapshot.repositories[0]?.tasks ?? [];
-    expect(task?.declared).toBe('DECLARED');
+    expect(task?.declaration).toBe('OPEN');
     if (task?.runtime.reading !== 'LOADED') throw new Error('expected a loaded record');
     expect(task.runtime.facts.state).toBe('READY_FOR_PR');
+  });
+});
+
+/* ═══════ the operational classification ════════════════════════════════ */
+
+describe('what a task asks of the operator comes from BOTH sources', () => {
+  it('calls a finished task with a blocking record a CONFLICT, not Needs You', () => {
+    // THE DEFECT THIS SECTION EXISTS FOR. Measured on the real machine:
+    // CAPTURE-002 carries a HUMAN_DECISION_REQUIRED runtime record and a
+    // declaration that says DONE. Reading the record alone paged the operator
+    // about a task that was finished and merged — the exact false alarm this
+    // dashboard is meant to remove.
+    const root = repository({ 'tasks/D1-01.md': taskFile('D1-01', 'DONE') });
+    writeRuntimeState(root, 'D1-01', {
+      state: 'HUMAN_DECISION_REQUIRED',
+      resumeFrom: { phase: 'REMEDIATE', round: 1 },
+      reviewRound: 1,
+    });
+
+    const snapshot = snapshotOf([root]);
+    const [task] = snapshot.repositories[0]?.tasks ?? [];
+
+    expect(task?.declaration).toBe('DONE');
+    if (task?.runtime.reading !== 'LOADED') throw new Error('expected a loaded record');
+    expect(task.runtime.facts.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(task.operational).toBe('CONFLICT');
+
+    // AO's own judgement still says a person is due — and is deliberately NOT
+    // the last word. Both facts stay on the record.
+    expect(task.attention.reading).toBe('OPERATOR_REQUIRED');
+
+    // What must never happen: this reaching the Needs-You list.
+    expect(snapshot.needsOperator.map((n) => n.taskId)).not.toContain('D1-01');
+  });
+
+  it('never claims the record is stale, only that the two sources disagree', () => {
+    // Which document is out of date is not decidable from either one, so it is
+    // not claimed. CONFLICT is the whole statement.
+    const root = repository({ 'tasks/D1-01.md': taskFile('D1-01', 'DONE') });
+    writeRuntimeState(root, 'D1-01', {
+      state: 'HUMAN_DECISION_REQUIRED',
+      resumeFrom: { phase: 'REMEDIATE', round: 1 },
+      reviewRound: 1,
+    });
+
+    const serialized = JSON.stringify(snapshotOf([root]));
+    expect(serialized).not.toContain('STALE');
+    expect(serialized).not.toContain('stale');
+    expect(serialized).not.toContain('OUTDATED');
+  });
+
+  it('calls a finished task with a terminal record INACTIVE', () => {
+    const root = repository({ 'tasks/D1-01.md': taskFile('D1-01', 'DONE') });
+    // OPERATOR_RESOLVED is biconditional with `operatorResolution` — the state
+    // cannot exist without the provenance of what the operator overrode.
+    writeRuntimeState(root, 'D1-01', {
+      state: 'OPERATOR_RESOLVED',
+      reviewRound: 1,
+      operatorResolution: { closedFrom: 'HUMAN_DECISION_REQUIRED' },
+    });
+
+    const [task] = snapshotOf([root]).repositories[0]?.tasks ?? [];
+    expect(task?.declaration).toBe('DONE');
+    expect(task?.operational).toBe('INACTIVE');
+  });
+
+  it('calls an open task whose record needs a person ACTIONABLE', () => {
+    const root = repository({ 'tasks/D1-01.md': taskFile('D1-01', 'OPEN') });
+    writeRuntimeState(root, 'D1-01', {
+      state: 'HUMAN_DECISION_REQUIRED',
+      resumeFrom: { phase: 'REMEDIATE', round: 1 },
+      reviewRound: 1,
+    });
+
+    const snapshot = snapshotOf([root]);
+    const [task] = snapshot.repositories[0]?.tasks ?? [];
+    expect(task?.operational).toBe('ACTIONABLE');
+    expect(snapshot.needsOperator.map((n) => n.taskId)).toContain('D1-01');
+  });
+
+  it('calls an open task parked on a recorded future reset AUTOMATIC_WAIT', () => {
+    const root = repository({ 'tasks/D1-01.md': taskFile('D1-01', 'OPEN') });
+    writeRuntimeState(root, 'D1-01', {
+      state: 'BLOCKED_USAGE_LIMIT',
+      blockedAgent: 'codex',
+      resumeFrom: { phase: 'REVIEW', round: 1 },
+      reviewRound: 1,
+      reportedResetAt: '2026-09-15T23:00:00.000Z',
+    });
+
+    const snapshot = snapshotOf([root]);
+    const [task] = snapshot.repositories[0]?.tasks ?? [];
+    expect(task?.operational).toBe('AUTOMATIC_WAIT');
+    expect(snapshot.needsOperator).toHaveLength(0);
+  });
+
+  it('leaves an open task with no record visible and asking nothing', () => {
+    const root = repository({ 'tasks/D1-01.md': taskFile('D1-01', 'OPEN') });
+    const snapshot = snapshotOf([root]);
+    const [task] = snapshot.repositories[0]?.tasks ?? [];
+
+    expect(task?.declaration).toBe('OPEN');
+    expect(task?.runtime.reading).toBe('NONE');
+    expect(task?.operational).toBe('INACTIVE');
+    expect(snapshot.needsOperator).toHaveLength(0);
+  });
+
+  it('treats an undeclared record with a blocking state conservatively', () => {
+    // Visible, because the record is evidence that work happened — but a record
+    // with no declaration is itself a disagreement between sources, so it does
+    // not page anybody.
+    const root = repository({ 'tasks/D1-01.md': taskFile('D1-01', 'OPEN') });
+    writeRuntimeState(root, 'D1-99', {
+      state: 'HUMAN_DECISION_REQUIRED',
+      resumeFrom: { phase: 'REMEDIATE', round: 1 },
+      reviewRound: 1,
+    });
+
+    const snapshot = snapshotOf([root]);
+    const orphan = snapshot.repositories[0]?.tasks.find((t) => t.taskId === 'D1-99');
+    expect(orphan?.declaration).toBe('NOT_DECLARED');
+    expect(orphan?.operational).toBe('CONFLICT');
+    expect(snapshot.needsOperator.map((n) => n.taskId)).not.toContain('D1-99');
+  });
+
+  it('does not page on a blocking record when the declaration could not be read', () => {
+    // Missing evidence on one side is not permission to act on the other.
+    const root = repository({
+      'tasks/D1-01.md': taskFile('D1-01', 'OPEN'),
+      'tasks/D1-02.md': '---\nnot: a task\n---\n',
+    });
+    writeRuntimeState(root, 'D1-01', {
+      state: 'HUMAN_DECISION_REQUIRED',
+      resumeFrom: { phase: 'REMEDIATE', round: 1 },
+      reviewRound: 1,
+    });
+
+    const snapshot = snapshotOf([root]);
+    const task = snapshot.repositories[0]?.tasks.find((t) => t.taskId === 'D1-01');
+    expect(task?.declaration).toBe('UNDETERMINED');
+    expect(task?.operational).toBe('UNDETERMINED');
+    expect(snapshot.needsOperator).toHaveLength(0);
   });
 });
 

@@ -204,7 +204,7 @@ describe('a normal snapshot starts nothing and calls nobody', () => {
     const notStarted = repo?.tasks.find((t) => t.taskId === 'N1-02');
     expect(started?.runtime.reading).toBe('LOADED');
     expect(notStarted?.runtime.reading).toBe('NONE');
-    expect(notStarted?.declared).toBe('DECLARED');
+    expect(notStarted?.declaration).toBe('OPEN');
   });
 
   it('refuses to guess a lease location rather than reaching for Git', () => {
