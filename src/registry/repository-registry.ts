@@ -28,11 +28,22 @@
  * `delivery-automation.ts`. Both functions below take a {@link PathProvider}, so
  * a caller inside this package can point the lookup anywhere — that is the test
  * seam. The property that holds is narrower and is a fact about the tree: the
- * registry is read from exactly one place in `src/`, `cli/repositories-command.ts`,
+ * registry is read from exactly two places in `src/` — `cli/repositories-command.ts`,
  * which the shipped entry point registers with no seams at all, and
- * `package.json` exports only that entry point. That sentence is a pin rather
- * than a claim — `tests/m2-03-cross-repository-selection.test.ts` enumerates the
- * importers — because an earlier draft of it named a file that does not exist.)
+ * `dashboard/read-model.ts` — and `package.json` exports only that entry point.
+ * That sentence is a pin rather than a claim —
+ * `tests/m2-03-cross-repository-selection.test.ts` enumerates the importers —
+ * because an earlier draft of it named a file that does not exist.)
+ *
+ * The second importer arrived with DASHBOARD-001 and had to argue for itself,
+ * which is what the enumeration is for. The argument: a read-only observer must
+ * be able to answer *which repositories are registered*, and the alternative —
+ * taking that set as a parameter — would push the read into a caller and create
+ * exactly the second opinion this pin exists to prevent. It reads through
+ * {@link loadRepositoryRegistry} unchanged, re-implements no parse, adds no
+ * writer, and surfaces the three-state outcome as it stands rather than
+ * collapsing it. What the pin still forbids is a *third* reader arriving without
+ * the same argument.
  *
  * ── What an entry declares, and what it does not ───────────────────────────
  *

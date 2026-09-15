@@ -1421,6 +1421,14 @@ describe('the slice added no new authority', () => {
       [
         join('src', 'cli', 'repositories-command.ts'),
         join('src', 'registry', 'repository-registry.ts'),
+        // DASHBOARD-001. Added deliberately, which is what this enumeration is
+        // for: the read model must answer "which repositories are registered",
+        // and taking that set as a parameter would push the read into a caller
+        // and grow the second opinion this pin prevents. It reads through
+        // `loadRepositoryRegistry` unchanged, re-implements no parse, adds no
+        // writer, and keeps the three-state outcome intact. A THIRD reader must
+        // make its own argument here before this line grows again.
+        join('src', 'dashboard', 'read-model.ts'),
       ].sort(),
     );
   });
