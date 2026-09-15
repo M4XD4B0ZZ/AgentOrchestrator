@@ -46,6 +46,27 @@
  * would pass a capability that is not there. The evidence is the `init`
  * message, and the check is positive: the named server must be `connected`
  * *and* the granted tool must appear by name.
+ *
+ * ── Nor is the ending the evidence (M5-R1) ─────────────────────────────────
+ *
+ * The same sentence holds in the other direction, and this build learned it the
+ * expensive way. `--print` does not stop at the session announcement: it goes on
+ * to run a model turn, and only then exits. Measured over nine faithful
+ * reproductions, the `init` message lands at 1135-2477 ms and the process exits
+ * at 2914-6430 ms. The tail is a model round trip, governed by the operator's
+ * quota, and the capability contract does not require it.
+ *
+ * Grading the *ending* before reading the evidence therefore made a proof about
+ * CodeGraph depend on whether an unrelated model turn finished inside the
+ * probe's budget. Under a five-hour window measured at 98% utilisation it did
+ * not, and a connected server with its tool present was reported as
+ * `REQUIRED_CAPABILITY_UNPROVEN`.
+ *
+ * So {@link proveMcpCapabilities} reads the announcement first. The only ending
+ * asked before it is `started === false`, which is the one ending that makes an
+ * announcement impossible. Every fail-closed arm is unchanged: no announcement,
+ * a truncated one, a server that is not `connected`, or a missing tool all still
+ * refuse — an ending is not a substitute for the evidence in either direction.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -510,22 +531,45 @@ export async function proveMcpCapabilities(
 
   const observation = observeCapabilityCommand(result, probeBudget(request.timeoutMs));
 
-  // The two disjuncts, apart. They were one `if` and one code, and the code
-  // asserted the first of them for both — so a probe that ran for its whole
-  // budget and was killed reported that it never started. `started === false`
-  // and "started and did not complete" are different facts about the world and
-  // an operator acts differently on each.
+  // The one ending asked before the evidence, because it is the one ending that
+  // makes evidence impossible: a process that was never created announced
+  // nothing, whatever a `stdout` field happens to hold. `started === false` and
+  // "started and did not complete" are different facts about the world and an
+  // operator acts differently on each.
   if (!result.started) {
     return refusedWithRecord(request, first, 'PROBE_DID_NOT_START', observation);
   }
-  if (result.outcome !== 'COMPLETED') {
-    return refusedWithRecord(request, first, 'PROBE_DID_NOT_COMPLETE', observation);
-  }
 
+  // ── The evidence is read before the ending is graded (M5-R1) ─────────────
+  //
+  // Measured on 2026-09-15: the session's `init` message — the proof — lands at
+  // 1135-2477 ms across nine faithful reproductions, while the process does not
+  // exit until 2914-6430 ms, because `--print` also runs a model turn. That turn
+  // is no part of the capability contract, and its duration is governed by the
+  // operator's model quota rather than by anything CodeGraph does.
+  //
+  // A real preflight was refused that day at its 20 000 ms budget having
+  // observed 1955 stdout bytes, while the complete `init` line ends at
+  // 1579-1623 bytes and the whole stream at 4215-4277. The proof was therefore
+  // already on the wire, and `runCommand` carries collected stdout out on a
+  // timeout — so this build HELD the proof and discarded it unread, because the
+  // ending was graded first. `REQUIRED_CAPABILITY_UNPROVEN` was reported for a
+  // server that was connected and a tool that was present.
+  //
+  // So the announcement is consulted first. It is a positive, self-contained
+  // claim: the named server reached `connected` and the granted tool was listed
+  // in the session the writer will get. Nothing that happens to the process
+  // afterwards can unmake that, and nothing that happens afterwards can make it
+  // either — an ending is not a substitute for the evidence in either
+  // direction, which is why the fail-closed arms below are unchanged.
   const announcement = readSessionAnnouncement(result.stdout);
-  // A process ran, completed, and said nothing this build can read. The cause is
-  // outside the code, so this one earns a record too.
+
   if (announcement === null) {
+    // Nothing this build can read was measured, so the ending is all there is.
+    // Both arms earn a durable record: the cause of each is outside this code.
+    if (result.outcome !== 'COMPLETED') {
+      return refusedWithRecord(request, first, 'PROBE_DID_NOT_COMPLETE', observation);
+    }
     return refusedWithRecord(request, first, 'PROBE_EMITTED_NO_SESSION', observation);
   }
 

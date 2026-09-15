@@ -76,9 +76,13 @@ export const MCP_CAPABILITY_REFUSAL_SENTENCES: Readonly<Record<McpCapabilityRefu
       'No probe process was ever created -- proved, not inferred. Nothing about the grant was\n' +
       '  measured, because nothing ran. Check that the CLI is on PATH for this account.',
     PROBE_DID_NOT_COMPLETE:
-      'A probe process was created and did not complete. The Probe line says how, against the\n' +
-      '  budget it was given. This class includes causes that clear on their own -- a timeout\n' +
-      '  under load is not a grant problem -- so read the ending before changing configuration.',
+      'A probe process was created, announced no session this build can read, and did not\n' +
+      '  complete. The Probe line says how it ended, against the budget it was given. The\n' +
+      '  announcement is the evidence and is read first, so a probe that DID announce a\n' +
+      '  connected server with the granted tool is proven whatever its ending was; this class\n' +
+      '  is reached only when nothing was measured. It includes causes that clear on their own\n' +
+      '  -- a timeout under load is not a grant problem -- so read the ending before changing\n' +
+      '  configuration.',
     PROBE_EMITTED_NO_SESSION:
       'The probe ran to completion and announced no session, so nothing was measured. The\n' +
       '  session announcement is the evidence; an exit code is not.',
