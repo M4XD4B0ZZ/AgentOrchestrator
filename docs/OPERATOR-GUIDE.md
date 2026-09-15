@@ -265,14 +265,49 @@ node .\dist\cli\index.js --help
 node .\dist\cli\index.js block --help
 ```
 
-`dist/` ist das, was läuft. Nach einem `git pull` ist es **nicht** automatisch
-aktuell — wenn sich `src/` geändert hat, gilt:
+`dist/` ist das, was läuft — und **`npm run build` schreibt es nicht mehr**.
+Seit 2026-09-15 sind Build-Ausgabe und ausgeliefertes Runtime zwei getrennte
+Verzeichnisse:
+
+| | Build-Ausgabe | ausgeliefertes Runtime |
+| --- | --- | --- |
+| Pfad | `build/` | `dist/` |
+| geschrieben von | `npm run build` | **nur** `npm run deploy` |
+| ausgeführt von | den dist-Artefakt-Gates | dem geplanten Supervisor |
+
+Grund: `npm run verify` ruft `npm run build` auf, und solange `build` nach
+`dist/` schrieb, hat jede Prüfung auf einem Feature-Branch die Bytes ersetzt,
+die die Produktion als Nächstes ausgeführt hat. Das ist am 2026-09-14/15 real
+passiert (PR #103, vor dem Merge). Details:
+`docs/decisions/2026-09-15-adr-build-output-and-deployed-runtime.md`.
+
+Nach einem `git pull` ist `dist/` **nicht** automatisch aktuell. Um zu ändern,
+was die Produktion ausführt:
+
+```powershell
+npm run deploy
+```
+
+`deploy` verweigert einen schmutzigen Arbeitsbaum und einen Commit, der nicht
+`origin/main` ist. Beides lässt sich einzeln freigeben
+(`--allow-dirty "<Grund>"`, `--allow-non-canonical "<Grund>"`), und der Grund
+landet dauerhaft im Runtime.
+
+Welcher Commit gerade läuft:
+
+```powershell
+Get-Content .\dist\.ao-provenance.json
+```
+
+Zum Ausprobieren des eigenen Branches — ohne die Produktion anzufassen:
 
 ```powershell
 npm run build
+node .\build\cli\index.js --help
 ```
 
-und für die vollständige kanonische Prüfung `npm run verify`.
+und für die vollständige kanonische Prüfung `npm run verify`. Die schreibt
+`dist/` nicht; ein Gate misst genau das.
 
 Aktueller Block-Vertrag:
 

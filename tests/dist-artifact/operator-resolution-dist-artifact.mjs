@@ -40,7 +40,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const distEntry = resolve(here, '..', '..', 'dist', 'cli', 'index.js');
+const distEntry = resolve(here, '..', '..', 'build', 'cli', 'index.js');
 
 const EXIT_INPUT_UNUSABLE = 2;
 const EXIT_NEEDS_OPERATOR = 3;
@@ -54,7 +54,7 @@ function check(condition, message) {
 }
 
 if (!existsSync(distEntry)) {
-  process.stderr.write('dist/cli/index.js is missing. Run `npm run build` before this check.\n');
+  process.stderr.write('build/cli/index.js is missing. Run `npm run build` before this check.\n');
   process.exit(1);
 }
 

@@ -8,7 +8,7 @@
  * transitively by `verify:dist-trusted-profile` and `verify`), and it imports
  * exactly one module:
  *
- *     dist/config/internal/trusted-profile.js
+ *     build/config/internal/trusted-profile.js
  *
  * via an explicit, absolute `file://` URL computed from this script's own
  * location. There is no TypeScript compilation, no vitest module resolution and
@@ -30,7 +30,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..', '..');
-const distEntry = join(repoRoot, 'dist', 'config', 'internal', 'trusted-profile.js');
+const distEntry = join(repoRoot, 'build', 'config', 'internal', 'trusted-profile.js');
 
 /** @type {string[]} */
 const failures = [];
@@ -41,7 +41,7 @@ const check = (condition, message) => {
 // ── Build freshness: a missing dist artefact is a hard, explicit failure ─────
 if (!existsSync(distEntry)) {
   console.error(
-    'dist/config/internal/trusted-profile.js does not exist. Run "npm run build" before this ' +
+    'build/config/internal/trusted-profile.js does not exist. Run "npm run build" before this ' +
       'check (see the "verify:dist-trusted-profile" npm script, which does this for you).',
   );
   process.exit(1);
@@ -76,9 +76,9 @@ for (const name of REMOVED_NAMES) {
  */
 const emittedFiles = [
   distEntry,
-  join(repoRoot, 'dist', 'config', 'internal', 'trusted-profile.d.ts'),
+  join(repoRoot, 'build', 'config', 'internal', 'trusted-profile.d.ts'),
   `${distEntry}.map`,
-  join(repoRoot, 'dist', 'config', 'internal', 'trusted-profile.d.ts.map'),
+  join(repoRoot, 'build', 'config', 'internal', 'trusted-profile.d.ts.map'),
 ].filter((file) => existsSync(file));
 
 check(emittedFiles.includes(distEntry), 'the built JavaScript module was not among the emitted files');
@@ -433,11 +433,11 @@ for (const target of Object.values(manifest.exports ?? {})) {
 // ── Result ──────────────────────────────────────────────────────────────────
 if (failures.length > 0) {
   console.error(
-    `dist/config/internal/trusted-profile.js integration check FAILED (${failures.length} issue(s)):`,
+    `build/config/internal/trusted-profile.js integration check FAILED (${failures.length} issue(s)):`,
   );
   for (const message of failures) console.error(` - ${message}`);
   process.exit(1);
 }
 
-console.log('dist/config/internal/trusted-profile.js integration check passed.');
+console.log('build/config/internal/trusted-profile.js integration check passed.');
 process.exit(0);

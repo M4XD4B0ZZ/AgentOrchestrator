@@ -3,7 +3,7 @@
  * V2-07P. The runtime gate, measured against the SHIPPED CLI.
  *
  * Standalone Node script, plain JavaScript, spawned by `test:dist-runtime-gate`
- * (and transitively by `verify`). It spawns `dist/cli/index.js` as a real child
+ * (and transitively by `verify`). It spawns `build/cli/index.js` as a real child
  * process — the gate lives at the CLI entry, terminates the process and writes
  * synchronously to fd 2, and none of those three things can be observed from
  * inside a vitest worker.
@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..', '..');
-const distEntry = join(repoRoot, 'dist', 'cli', 'index.js');
+const distEntry = join(repoRoot, 'build', 'cli', 'index.js');
 const preload = join(scriptDir, 'runtime-gate-preload.cjs');
 
 const EXIT_RUNTIME_UNSUPPORTED = 6;
@@ -33,7 +33,7 @@ const check = (condition, message) => {
 
 if (!existsSync(distEntry)) {
   console.error(
-    'dist/cli/index.js does not exist. Run "npm run build" before this check ' +
+    'build/cli/index.js does not exist. Run "npm run build" before this check ' +
       '(see the "verify:dist-runtime-gate" npm script, which does this for you).',
   );
   process.exit(1);
@@ -80,7 +80,7 @@ const UNSUPPORTED_NODE = { V2_07P_FAKE_NODE_VERSION: 'v20.11.1' };
  * an in-process `{ gitCommonDir, root, id }` record by hand and calls the lease
  * module directly, and `execution-lease-race-dist-artifact.mjs` only
  * `mkdirSync`s a bare `.git` directory — enough for the lease code, which reads
- * no profile. This harness is different: it exercises `dist/cli/index.js` end
+ * no profile. This harness is different: it exercises `build/cli/index.js` end
  * to end, so `lease status` has to reach a real, fully resolvable repository —
  * an actual `git init`, a real commit, and a schema-valid profile on disk — or
  * there is nothing for it to print. Neither sibling technique transfers, so

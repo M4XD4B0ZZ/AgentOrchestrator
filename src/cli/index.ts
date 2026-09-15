@@ -29,6 +29,7 @@ import { registerRepositoriesCommand } from './repositories-command.js';
 import { registerResolveCommand } from './resolve-command.js';
 import { registerRunCommand } from './run-command.js';
 import { enforceSupportedRuntime } from './runtime-gate.js';
+import { enforceRuntimeProvenance } from './runtime-provenance.js';
 
 const DESCRIPTION = [
   'Repository-agnostic orchestrator for a writing agent and a read-only reviewer.',
@@ -235,8 +236,14 @@ export function buildProgram(): Command {
   // tests/dist-artifact/runtime-gate-dist-artifact.mjs. If a future Commander
   // stops inheriting it, that harness fails on the nested case rather than this
   // gate quietly covering only the top level.
+  //
+  // Two gates, in this order. The runtime gate asks whether this *machine* is
+  // inside the support contract; the provenance gate asks whether this *tree*
+  // can say which commit it was deployed from. An unsupported machine gets the
+  // answer about the machine, which is the one the operator can act on.
   program.hook('preAction', () => {
     enforceSupportedRuntime();
+    enforceRuntimeProvenance();
   });
 
   registerDoctorCommand(program);

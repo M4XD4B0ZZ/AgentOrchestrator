@@ -3,7 +3,7 @@
  * V2-10 — the notification egress gate, against the shipped artefact.
  *
  * Standalone Node script, spawned by the `test:dist-notify-egress` npm script
- * (and transitively by `verify`). It drives `dist/cli/index.js` as a real
+ * (and transitively by `verify`). It drives `build/cli/index.js` as a real
  * process, twice, with the egress tripwire from
  * `notification-egress-preload.cjs` installed ahead of the ESM entry point.
  *
@@ -55,7 +55,7 @@ import { fileURLToPath } from 'node:url';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..', '..');
-const cliEntry = join(repoRoot, 'dist', 'cli', 'index.js');
+const cliEntry = join(repoRoot, 'build', 'cli', 'index.js');
 const preload = join(scriptDir, 'notification-egress-preload.cjs');
 
 const EXIT_EGRESS_ATTEMPTED = 96;
@@ -69,7 +69,7 @@ const check = (condition, message) => {
 
 if (!existsSync(cliEntry)) {
   console.error(
-    'dist/cli/index.js does not exist. Run "npm run build" first (see "verify:dist-notify-egress").',
+    'build/cli/index.js does not exist. Run "npm run build" first (see "verify:dist-notify-egress").',
   );
   process.exit(1);
 }

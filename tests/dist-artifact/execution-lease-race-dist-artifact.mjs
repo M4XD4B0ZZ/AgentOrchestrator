@@ -38,7 +38,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..', '..');
-const distEntry = join(repoRoot, 'dist', 'lease', 'execution-lease.js');
+const distEntry = join(repoRoot, 'build', 'lease', 'execution-lease.js');
 
 /** How many processes race for one lease. */
 const RACERS = 16;
@@ -53,7 +53,7 @@ const check = (condition, message) => {
 
 if (!existsSync(distEntry)) {
   console.error(
-    'dist/lease/execution-lease.js does not exist. Run "npm run build" before this check ' +
+    'build/lease/execution-lease.js does not exist. Run "npm run build" before this check ' +
       '(see the "verify:dist-lease-race" npm script, which does this for you).',
   );
   process.exit(1);

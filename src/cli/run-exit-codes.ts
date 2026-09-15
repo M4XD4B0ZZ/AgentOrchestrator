@@ -77,6 +77,24 @@ export const EXIT_RUN_CALL_AGAIN = 5;
 export const EXIT_RUNTIME_UNSUPPORTED = 6;
 
 /**
+ * This runtime's provenance could not be established, so no command ran.
+ *
+ * A deployed runtime carries a record of the commit it was built from and the
+ * root it was deployed to (`.ao-provenance.json`, written by
+ * `scripts/deploy-runtime.mjs`). A tree with no such record, or with one that
+ * names a different root, was not put there by a deployment — it was copied,
+ * or it is the residue of a build that used to write straight into the
+ * production runtime. Either way nothing can say which source it corresponds
+ * to, and the refusal is the fail-closed reading of that.
+ *
+ * **Deliberately not a member of {@link CliExitCode}**, for the same reason
+ * {@link EXIT_RUNTIME_UNSUPPORTED} is not: this is a refusal that happens
+ * before any command begins, and mapping a run outcome onto it would tell an
+ * operator their task failed when in fact their runtime was never identifiable.
+ */
+export const EXIT_RUNTIME_PROVENANCE_UNKNOWN = 7;
+
+/**
  * The closed set of codes this command may exit with.
  *
  * Named as a type so the three tables below can be written with `satisfies`,

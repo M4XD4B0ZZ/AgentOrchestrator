@@ -54,9 +54,9 @@ if (process.platform !== 'win32') {
 }
 
 const required = [
-  join(repoRoot, 'dist', 'lease', 'execution-lease.js'),
-  join(repoRoot, 'dist', 'doctor', 'exec.js'),
-  join(repoRoot, 'dist', 'native', 'ao-launch.exe'),
+  join(repoRoot, 'build', 'lease', 'execution-lease.js'),
+  join(repoRoot, 'build', 'doctor', 'exec.js'),
+  join(repoRoot, 'build', 'native', 'ao-launch.exe'),
 ];
 for (const path of required) {
   if (!existsSync(path)) {
@@ -68,14 +68,14 @@ for (const path of required) {
   }
 }
 
-const lease = await import(pathToFileURL(join(repoRoot, 'dist', 'lease', 'execution-lease.js')).href);
+const lease = await import(pathToFileURL(join(repoRoot, 'build', 'lease', 'execution-lease.js')).href);
 const containment = await import(
-  pathToFileURL(join(repoRoot, 'dist', 'lease', 'containment-evidence.js')).href
+  pathToFileURL(join(repoRoot, 'build', 'lease', 'containment-evidence.js')).href
 );
 const attestation = await import(
-  pathToFileURL(join(repoRoot, 'dist', 'core', 'containment-attestation.js')).href
+  pathToFileURL(join(repoRoot, 'build', 'core', 'containment-attestation.js')).href
 );
-const exec = await import(pathToFileURL(join(repoRoot, 'dist', 'doctor', 'exec.js')).href);
+const exec = await import(pathToFileURL(join(repoRoot, 'build', 'doctor', 'exec.js')).href);
 
 /* ─────────────────────────────── fixtures ───────────────────────────────── */
 

@@ -86,13 +86,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
-const distLease = join(repoRoot, 'dist', 'lease', 'execution-lease.js');
-const distStart = join(repoRoot, 'dist', 'boundary', 'start-owned-process.js');
-const distMint = join(repoRoot, 'dist', 'core', 'internal', 'containment-attestation.js');
-const distRepo = join(repoRoot, 'dist', 'repo', 'resolve-repository.js');
-const distVerify = join(repoRoot, 'dist', 'verify', 'verify-command.js');
-const distOwned = join(repoRoot, 'dist', 'boundary', 'owned-command.js');
-const cli = join(repoRoot, 'dist', 'cli', 'index.js');
+const distLease = join(repoRoot, 'build', 'lease', 'execution-lease.js');
+const distStart = join(repoRoot, 'build', 'boundary', 'start-owned-process.js');
+const distMint = join(repoRoot, 'build', 'core', 'internal', 'containment-attestation.js');
+const distRepo = join(repoRoot, 'build', 'repo', 'resolve-repository.js');
+const distVerify = join(repoRoot, 'build', 'verify', 'verify-command.js');
+const distOwned = join(repoRoot, 'build', 'boundary', 'owned-command.js');
+const cli = join(repoRoot, 'build', 'cli', 'index.js');
 
 const LEASE_FILE = 'agent-orchestrator-execution-lease.json';
 const LEDGER_FILE = 'agent-orchestrator-execution-lease.launches.json';
@@ -111,8 +111,8 @@ if (process.platform !== 'win32') {
   process.stdout.write('crash-recovery: Windows only; the boundary this measures exists nowhere else.\n');
   process.exit(0);
 }
-if (!existsSync(join(repoRoot, 'dist', 'native', 'ao-launch.exe'))) {
-  process.stderr.write('crash-recovery: dist/native/ao-launch.exe is missing. Run `npm run build`.\n');
+if (!existsSync(join(repoRoot, 'build', 'native', 'ao-launch.exe'))) {
+  process.stderr.write('crash-recovery: build/native/ao-launch.exe is missing. Run `npm run build`.\n');
   process.exit(1);
 }
 
@@ -570,7 +570,7 @@ const {
   releaseRepositoryExecutionLease,
 } = await import(pathToFileURL(distLease).href);
 const { runOwnedCommand } = await import(
-  pathToFileURL(join(repoRoot, 'dist', 'boundary', 'owned-command.js')).href
+  pathToFileURL(join(repoRoot, 'build', 'boundary', 'owned-command.js')).href
 );
 const { resolveRepository } = await import(pathToFileURL(distRepo).href);
 const { deriveExecutionLeaseLocation } = await import(pathToFileURL(distLease).href);

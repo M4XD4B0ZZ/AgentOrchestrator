@@ -82,9 +82,9 @@ const treeFixture = join(fixtureDir, 'boundary-tree-fixture.mjs');
 const aoStandIn = join(fixtureDir, 'boundary-ao-stand-in.mjs');
 const echoFixture = join(fixtureDir, 'boundary-echo-fixture.mjs');
 
-const startModuleUrl = pathToFileURL(join(repoRoot, 'dist', 'boundary', 'start-owned-process.js'))
+const startModuleUrl = pathToFileURL(join(repoRoot, 'build', 'boundary', 'start-owned-process.js'))
   .href;
-const contractModuleUrl = pathToFileURL(join(repoRoot, 'dist', 'boundary', 'launch-boundary.js'))
+const contractModuleUrl = pathToFileURL(join(repoRoot, 'build', 'boundary', 'launch-boundary.js'))
   .href;
 const buildModuleUrl = pathToFileURL(join(repoRoot, 'scripts', 'build-native-boundary.mjs')).href;
 

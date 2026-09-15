@@ -7,7 +7,7 @@
     "types": ["node"],
 
     "rootDir": ".",
-    "outDir": "dist",
+    "outDir": "build",
 
     "strict": true,
     "noImplicitOverride": true,

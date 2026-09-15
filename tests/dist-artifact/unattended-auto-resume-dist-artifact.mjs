@@ -37,7 +37,7 @@
  * repository, invoked read-only, reports `TASK_NOT_STARTED` as a *plan*, which
  * is the plan's way of saying "a start is what happens next".
  *
- * ── Why it runs against `dist/` ───────────────────────────────────────────
+ * ── Why it runs against `build/` ──────────────────────────────────────────
  *
  * The refusals are a property of the shipped command's argument handling and of
  * the compiled lifecycle driver, and both are things a `src`-only suite reaches
@@ -54,7 +54,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const distEntry = resolve(here, '..', '..', 'dist', 'cli', 'index.js');
+const distEntry = resolve(here, '..', '..', 'build', 'cli', 'index.js');
 
 const EXIT_INPUT_UNUSABLE = 2;
 
@@ -67,7 +67,7 @@ function check(condition, message) {
 }
 
 if (!existsSync(distEntry)) {
-  process.stderr.write('dist/cli/index.js is missing. Run `npm run build` before this check.\n');
+  process.stderr.write('build/cli/index.js is missing. Run `npm run build` before this check.\n');
   process.exit(1);
 }
 

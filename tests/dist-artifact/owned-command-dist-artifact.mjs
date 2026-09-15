@@ -142,13 +142,13 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..', '..');
 const fixture = join(scriptDir, 'fixtures', 'owned-command-fixture.mjs');
 
-const adapterUrl = pathToFileURL(join(repoRoot, 'dist', 'boundary', 'owned-command.js')).href;
-const contractUrl = pathToFileURL(join(repoRoot, 'dist', 'boundary', 'launch-boundary.js')).href;
-const execUrl = pathToFileURL(join(repoRoot, 'dist', 'doctor', 'exec.js')).href;
+const adapterUrl = pathToFileURL(join(repoRoot, 'build', 'boundary', 'owned-command.js')).href;
+const contractUrl = pathToFileURL(join(repoRoot, 'build', 'boundary', 'launch-boundary.js')).href;
+const execUrl = pathToFileURL(join(repoRoot, 'build', 'doctor', 'exec.js')).href;
 
 const { runOwnedCommand } = await import(adapterUrl);
 const { startOwnedProcess } = await import(
-  pathToFileURL(join(repoRoot, 'dist', 'boundary', 'start-owned-process.js')).href
+  pathToFileURL(join(repoRoot, 'build', 'boundary', 'start-owned-process.js')).href
 );
 const { decodeBoundaryStatus } = await import(contractUrl);
 const { runCommand } = await import(execUrl);
