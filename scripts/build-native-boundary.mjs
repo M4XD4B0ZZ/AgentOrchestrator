@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Builds the native launch boundary (`native/ao-launch/AoLaunch.cs`) into
- * `dist/native/ao-launch.exe`.
+ * `build/native/ao-launch.exe`.
  *
  * ── Why the in-box compiler ────────────────────────────────────────────────
  *
@@ -19,7 +19,7 @@
  *
  * A missing compiler, a compile error, or a missing output file ends the build
  * with a nonzero exit and no artefact. There is deliberately no "build without
- * the boundary" mode: a `dist` that silently lacks the boundary would let a
+ * the boundary" mode: a build that silently lacks the boundary would let a
  * later slice ship a runner whose ownership guarantee resolves to nothing.
  */
 
@@ -32,7 +32,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 
 export const BOUNDARY_SOURCE = join(repoRoot, 'native', 'ao-launch', 'AoLaunch.cs');
-export const BOUNDARY_OUTPUT = join(repoRoot, 'dist', 'native', 'ao-launch.exe');
+export const BOUNDARY_OUTPUT = join(repoRoot, 'build', 'native', 'ao-launch.exe');
 
 /** Where Windows keeps the in-box C# compiler, 64-bit first. */
 export function locateCsc() {
@@ -62,9 +62,9 @@ export class NativeBoundaryBuildError extends Error {}
  *
  * The compile writes to a per-process staging name and only then takes the
  * output path, rather than clearing the path first. Clearing first opens a
- * window in which `dist/` has no boundary at all for the whole compile, and a
+ * window in which `build/` has no boundary at all for the whole compile, and a
  * second build entering that window can carry off the artefact the first one is
- * still writing — which would let a build report success over a `dist/native/`
+ * still writing — which would let a build report success over a `build/native/`
  * that another build then failed to fill. One rename-wide window remains, and
  * only when a helper is still running: the old image has to be moved aside
  * before the new one can take its name. A failure there propagates, so the

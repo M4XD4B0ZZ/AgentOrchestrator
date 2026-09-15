@@ -1,9 +1,17 @@
 # Dependencies
 node_modules/
 
-# Build output
-dist/
+# Build output. Disposable, rebuilt by anyone on any branch, executed by
+# nothing outside this checkout.
+build/
 *.tsbuildinfo
+
+# The deployed runtime. NOT a build output — `npm run build` never writes it,
+# and a test that finds it changed by a build fails
+# (tests/dist-artifact/runtime-isolation-dist-artifact.mjs). It is produced by
+# one explicit operation, `npm run deploy`, from a clean canonical commit, and
+# it is what the scheduled production supervisor executes.
+dist/
 
 # Diagnostics produced by `agent-loop doctor` now live in a per-run directory
 # under the per-user application-data root

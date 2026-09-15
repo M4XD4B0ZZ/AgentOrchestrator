@@ -73,11 +73,25 @@ jobs:
     #   3e85479   node 24  40:05  cancelled — the ceiling, not a failure
     #
     # Six minutes of spread between identical runs, against six minutes of
-    # headroom. The suite is now ~5 870 tests plus sixteen dist-artefact checks;
+    # headroom. The suite was then ~5 870 tests plus sixteen dist-artefact checks;
     # 40 stopped being a ceiling and became the thing the gate races. 75 restores
     # roughly the 2x margin the previous raise was sized for, and the numbers are
     # written down here so the next raise is argued from measurements rather than
     # from the feeling that it is too small again.
+    #
+    # 2026-09-15: eighteen dist-artefact checks, not sixteen.
+    # AO-RUNTIME-ISOLATION-001 added `test:dist-runtime-isolation` and
+    # `test:dist-runtime-deployment`, and each compiles the project once more —
+    # so the gate now performs three full compiles rather than one. The ceiling
+    # is NOT raised for it, and that is a measurement rather than a guess: the
+    # local run of the slice that added them took 19m49s end to end
+    # (12:12:26 → 12:32:15 on this machine, 2026-09-15). What that says about
+    # this runner is only a direction, not a number — the runs that tipped the
+    # last raise were 38-40 minutes here-to-there — so the claim made is the
+    # narrow one: two more compiles is minutes, and the margin this ceiling was
+    # sized for is tens of minutes. The count is corrected rather than the
+    # paragraph rewritten, because the argument that chose 75 was made on the
+    # numbers it states and those numbers were true when it was made.
     timeout-minutes: 75
 
     steps:

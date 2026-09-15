@@ -170,7 +170,9 @@ Sekunden und verhindert die teuren Fehler.
 ```powershell
 cd D:\AgentOrchestrator
 git status --short -uall     # muss leer sein
-npm run build                # nur nötig, wenn sich src\ geändert hat
+npm run deploy               # nur nötig, wenn sich src\ geändert hat.
+                             # deploy schreibt dist\ — das, was der Supervisor
+                             # ausführt. npm run build schreibt nur build\.
 
 cd D:\Pfad\Zum\Projekt
 git fetch origin
@@ -332,7 +334,8 @@ nicht lesen, sagt es das, statt „leer" zu behaupten.
 ```text
 AgentOrchestrator
 [ ] auf main, sauber, aktuell
-[ ] npm run build, falls src\ sich geändert hat
+[ ] npm run deploy, falls src\ sich geändert hat (nicht npm run build:
+    build schreibt build\, deploy schreibt dist\)
 
 Dein Projekt
 [ ] auf dem Default-Branch, sauber, aktuell

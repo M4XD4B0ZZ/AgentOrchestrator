@@ -54,7 +54,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..', '..');
 
 /** The shipped artefact, imported as a URL: a Windows path is not an ESM specifier. */
-const shipped = (...segments) => pathToFileURL(join(repoRoot, 'dist', ...segments)).href;
+const shipped = (...segments) => pathToFileURL(join(repoRoot, 'build', ...segments)).href;
 
 const { runAgentCommand } = await import(shipped('agent', 'agent-command.js'));
 const { CLAUDE_WRITER_ARGS } = await import(shipped('agent', 'claude-writer.js'));
@@ -341,8 +341,8 @@ if (version === null) {
   process.exit(2);
 }
 
-if (!existsSync(join(repoRoot, 'dist', 'agent', 'agent-command.js'))) {
-  console.error('dist/ is missing. Run `npm run build` first (verify:writer-authority does).');
+if (!existsSync(join(repoRoot, 'build', 'agent', 'agent-command.js'))) {
+  console.error('build/ is missing. Run `npm run build` first (verify:writer-authority does).');
   process.exit(1);
 }
 

@@ -8,7 +8,7 @@
  * transitively by `verify:dist-doctor` and `verify`), and it imports exactly
  * one module:
  *
- *     dist/doctor/run-completion.js
+ *     build/doctor/run-completion.js
  *
  * via an explicit, absolute `file://` URL computed from this script's own
  * location. There is no TypeScript compilation, no vitest module resolution,
@@ -17,7 +17,7 @@
  * There used to also be a thin vitest wrapper, `tests/run-completion-dist.test.ts`,
  * that did nothing but spawn this same script; it was removed because vitest's
  * default `tests/**\/*.test.ts` glob picked it up, which made a plain `npm test`
- * on a clean checkout (no `dist/` yet) fail for a reason unrelated to the tests
+ * on a clean checkout (no `build/` yet) fail for a reason unrelated to the tests
  * vitest is meant to run. This script is the sole dist integration check now.
  *
  * Contract: exit code 0 means every check below passed. Any nonzero exit code
@@ -32,7 +32,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..', '..');
-const distEntry = join(repoRoot, 'dist', 'doctor', 'run-completion.js');
+const distEntry = join(repoRoot, 'build', 'doctor', 'run-completion.js');
 
 /** @type {string[]} */
 const failures = [];
@@ -43,7 +43,7 @@ const check = (condition, message) => {
 // ── 5. Build freshness: a missing dist artefact is a hard, explicit failure ──
 if (!existsSync(distEntry)) {
   console.error(
-    'dist/doctor/run-completion.js does not exist. Run "npm run build" before this check ' +
+    'build/doctor/run-completion.js does not exist. Run "npm run build" before this check ' +
       '(see the "verify:dist-doctor" npm script, which does this for you).',
   );
   process.exit(1);
@@ -237,7 +237,7 @@ try {
 }
 
 // ── 6. AO-FOUNDATION-REM-003B: Windows system tool provenance in the built
-//      dist/doctor/exec.js, against the trusted internal resolver ─────────
+//      build/doctor/exec.js, against the trusted internal resolver ─────────
 //
 // Added alongside the run-completion checks above rather than as a second
 // dist script (see this file's own header comment on why a separate vitest
@@ -246,17 +246,17 @@ try {
 // vitest's module resolution could quietly redirect back to `src/doctor/
 // exec.ts` — is exercised at all.
 
-const execDistEntry = join(repoRoot, 'dist', 'doctor', 'exec.js');
-const windowsSystemToolsDistEntry = join(repoRoot, 'dist', 'doctor', 'internal', 'windows-system-tools.js');
-const reportDistEntry = join(repoRoot, 'dist', 'doctor', 'report.js');
+const execDistEntry = join(repoRoot, 'build', 'doctor', 'exec.js');
+const windowsSystemToolsDistEntry = join(repoRoot, 'build', 'doctor', 'internal', 'windows-system-tools.js');
+const reportDistEntry = join(repoRoot, 'build', 'doctor', 'report.js');
 
 if (!existsSync(execDistEntry)) {
-  console.error('dist/doctor/exec.js does not exist. Run "npm run build" before this check.');
+  console.error('build/doctor/exec.js does not exist. Run "npm run build" before this check.');
   process.exit(1);
 }
 if (!existsSync(windowsSystemToolsDistEntry)) {
   console.error(
-    'dist/doctor/internal/windows-system-tools.js does not exist. Run "npm run build" before this check.',
+    'build/doctor/internal/windows-system-tools.js does not exist. Run "npm run build" before this check.',
   );
   process.exit(1);
 }
@@ -277,7 +277,7 @@ for (const pattern of [
   "env['ComSpec']",
   'env["ComSpec"]',
 ]) {
-  check(!execSource.includes(pattern), `dist/doctor/exec.js still contains the removed pattern ${pattern}`);
+  check(!execSource.includes(pattern), `build/doctor/exec.js still contains the removed pattern ${pattern}`);
 }
 
 // The removed function itself. Case-sensitive and lower-case `s`, so this
@@ -285,20 +285,20 @@ for (const pattern of [
 // exactly what should be present instead.
 check(
   !execSource.includes('systemTool('),
-  'dist/doctor/exec.js still defines or calls the removed env-based systemTool() helper',
+  'build/doctor/exec.js still defines or calls the removed env-based systemTool() helper',
 );
 check(
   execSource.includes('windowsSystemTool'),
-  'dist/doctor/exec.js does not reference the trusted windowsSystemTool resolver at all',
+  'build/doctor/exec.js does not reference the trusted windowsSystemTool resolver at all',
 );
 check(
   execSource.includes("from './internal/windows-system-tools.js'"),
-  'dist/doctor/exec.js does not import the trusted resolver from ./internal/windows-system-tools.js',
+  'build/doctor/exec.js does not import the trusted resolver from ./internal/windows-system-tools.js',
 );
 
 // resolveOnPath's own body, isolated textually, must not spawn anything.
 const resolveOnPathStart = execSource.indexOf('export function resolveOnPath');
-check(resolveOnPathStart !== -1, 'dist/doctor/exec.js does not export resolveOnPath');
+check(resolveOnPathStart !== -1, 'build/doctor/exec.js does not export resolveOnPath');
 if (resolveOnPathStart !== -1) {
   const nextTopLevelBoundary = execSource.indexOf('\nfunction ', resolveOnPathStart + 1);
   const resolveOnPathBody = execSource.slice(
@@ -307,11 +307,11 @@ if (resolveOnPathStart !== -1) {
   );
   check(
     !resolveOnPathBody.includes('execFileSync') && !resolveOnPathBody.includes('spawn('),
-    'dist/doctor/exec.js resolveOnPath() body still spawns a process (where.exe/which)',
+    'build/doctor/exec.js resolveOnPath() body still spawns a process (where.exe/which)',
   );
   check(
     !resolveOnPathBody.toLowerCase().includes('where.exe'),
-    'dist/doctor/exec.js resolveOnPath() body still references where.exe',
+    'build/doctor/exec.js resolveOnPath() body still references where.exe',
   );
 }
 
@@ -322,19 +322,19 @@ const windowsSystemToolsModule = await import(pathToFileURL(windowsSystemToolsDi
 
 check(
   typeof execModule.resolveOnPath === 'function',
-  'dist/doctor/exec.js does not export resolveOnPath as a function',
+  'build/doctor/exec.js does not export resolveOnPath as a function',
 );
 check(
   typeof windowsSystemToolsModule.windowsSystemTool === 'function',
-  'dist/doctor/internal/windows-system-tools.js does not export windowsSystemTool as a function',
+  'build/doctor/internal/windows-system-tools.js does not export windowsSystemTool as a function',
 );
 check(
   typeof windowsSystemToolsModule.createWindowsSystemToolResolverForTests === 'function',
-  'dist/doctor/internal/windows-system-tools.js does not export the internal test resolver',
+  'build/doctor/internal/windows-system-tools.js does not export the internal test resolver',
 );
 check(
   typeof windowsSystemToolsModule.WindowsSystemToolUnavailableError === 'function',
-  'dist/doctor/internal/windows-system-tools.js does not export WindowsSystemToolUnavailableError',
+  'build/doctor/internal/windows-system-tools.js does not export WindowsSystemToolUnavailableError',
 );
 
 // PATH resolution is unaffected by SystemRoot/windir/COMSPEC: build a
@@ -357,7 +357,7 @@ try {
   const resolved = execModule.resolveOnPath('ao-dist-probe', spoofedEnv);
   check(
     Array.isArray(resolved) && resolved.length > 0,
-    'dist/doctor/exec.js resolveOnPath() failed to find a PATH target under spoofed SystemRoot/windir/COMSPEC',
+    'build/doctor/exec.js resolveOnPath() failed to find a PATH target under spoofed SystemRoot/windir/COMSPEC',
   );
 
   // The inverse: pointing SystemRoot/windir at a directory that *does* hold a
@@ -372,7 +372,7 @@ try {
   });
   check(
     JSON.stringify(resolvedAgain) === JSON.stringify(resolved),
-    'dist/doctor/exec.js resolveOnPath() result changed when a fake where.exe was planted at a spoofed SystemRoot',
+    'build/doctor/exec.js resolveOnPath() result changed when a fake where.exe was planted at a spoofed SystemRoot',
   );
 } finally {
   rmSync(distProbeRoot, { recursive: true, force: true });
@@ -424,13 +424,13 @@ if (process.platform === 'win32') {
 
 // ── 6c. Report schema stays v4 ──────────────────────────────────────────────
 if (!existsSync(reportDistEntry)) {
-  console.error('dist/doctor/report.js does not exist. Run "npm run build" before this check.');
+  console.error('build/doctor/report.js does not exist. Run "npm run build" before this check.');
   process.exit(1);
 }
 const reportModule = await import(pathToFileURL(reportDistEntry).href);
 check(
   reportModule.DOCTOR_REPORT_SCHEMA_VERSION === 4,
-  `dist/doctor/report.js DOCTOR_REPORT_SCHEMA_VERSION is not 4 (got ${reportModule.DOCTOR_REPORT_SCHEMA_VERSION})`,
+  `build/doctor/report.js DOCTOR_REPORT_SCHEMA_VERSION is not 4 (got ${reportModule.DOCTOR_REPORT_SCHEMA_VERSION})`,
 );
 
 // ── Result ────────────────────────────────────────────────────────────────

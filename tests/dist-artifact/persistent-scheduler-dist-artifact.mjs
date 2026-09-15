@@ -82,7 +82,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const distDir = resolve(here, '..', '..', 'dist');
+const distDir = resolve(here, '..', '..', 'build');
 const distEntry = join(distDir, 'cli', 'index.js');
 const preload = join(here, 'scheduler-preload.cjs');
 
@@ -95,7 +95,7 @@ function check(condition, message) {
 }
 
 if (!existsSync(distEntry)) {
-  process.stderr.write('dist/cli/index.js is missing. Run `npm run build` before this check.\n');
+  process.stderr.write('build/cli/index.js is missing. Run `npm run build` before this check.\n');
   process.exit(1);
 }
 

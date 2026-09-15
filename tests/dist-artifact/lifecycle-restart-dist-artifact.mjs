@@ -14,7 +14,11 @@
  *  - the writer-launch ledger must have been written **by that process, under
  *    that lease**, because the ledger is what licenses the removal at all;
  *  - and the recovery, the acquisition that follows it and the release that ends
- *    it must all run against `dist/`, because that is what ships.
+ *    it must all run against `build/` — the compiled artefact, not the
+ *    TypeScript a test runner transpiles. `build/` is not itself what the
+ *    production supervisor executes: `npm run deploy` produces that from the
+ *    same sources with the same compiler settings, so what is measured here is
+ *    the procedure that produces it.
  *
  * `tests/v3-06-lifecycle-driver.test.ts` fabricates a stale lease by rewriting
  * one field of a document this process wrote. That is the right instrument for
@@ -115,7 +119,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const distDir = resolve(here, '..', '..', 'dist');
+const distDir = resolve(here, '..', '..', 'build');
 const distLease = join(distDir, 'lease', 'execution-lease.js');
 const distMint = join(distDir, 'core', 'internal', 'containment-attestation.js');
 const distLifecycle = join(distDir, 'run', 'lifecycle-driver.js');
@@ -132,7 +136,7 @@ function check(condition, message) {
 
 if (!existsSync(distLifecycle)) {
   process.stderr.write(
-    'dist/run/lifecycle-driver.js is missing. Run `npm run build` before this check.\n',
+    'build/run/lifecycle-driver.js is missing. Run `npm run build` before this check.\n',
   );
   process.exit(1);
 }

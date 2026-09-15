@@ -67,39 +67,61 @@ const STATUS_POLL_INTERVAL_MS = 10;
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
 /**
+ * True when this module is the TypeScript source rather than a compiled
+ * artefact — which is exactly the case the test suite runs in, and the only
+ * case that is allowed to look outside its own tree for the boundary.
+ *
+ * The discriminator is the module's own file extension, because that is the
+ * thing that actually differs: `tsc` emits `.js`, and every compiled tree —
+ * the build output and the deployed runtime alike — is reached as `.js`. A
+ * check on a directory name would be a guess about where someone installed the
+ * artefact; this one is a fact about what is running.
+ */
+const RUNNING_FROM_SOURCE = fileURLToPath(import.meta.url).endsWith('.ts');
+
+/**
  * Where the built boundary is.
  *
  * Resolved from this module's own location, so the answer is about the
  * artefact that is actually running rather than about a working directory: in
- * `dist/boundary/`, the boundary is `dist/native/ao-launch.exe`.
+ * `<tree>/boundary/`, the boundary is `<tree>/native/ao-launch.exe`.
  *
- * The second candidate exists because V3 slice 3 made this path productive.
- * `runCommand` now reaches the boundary for every Windows command, and the test
- * suite runs the TypeScript in `src/` directly — where `../native/` is nothing
- * and never will be, because the build script writes the helper to
- * `dist/native/`. Without this the whole suite would run against a boundary
- * that is permanently absent, and every case would pass while measuring a
- * refusal.
+ * ── Why a compiled artefact has exactly one candidate ───────────────────────
+ *
+ * A compiled tree carries its own `native/ao-launch.exe`, put there by the same
+ * build that produced the JavaScript beside it. Letting it fall back anywhere
+ * else would let a **deployed runtime** — the tree the production supervisor
+ * executes — reach into `<root>/build/native/`, an ordinary build output that
+ * any branch can overwrite at any time. That is the same class of defect as the
+ * one that split these two directories in the first place (AO-RUNTIME-ISOLATION-001,
+ * `tests/dist-artifact/runtime-isolation-dist-artifact.mjs`), so a compiled tree
+ * resolves its own sibling or nothing at all.
+ *
+ * ── Why the source tree has a second one ────────────────────────────────────
+ *
+ * V3 slice 3 made this path productive: `runCommand` reaches the boundary for
+ * every Windows command, and the test suite runs the TypeScript in `src/`
+ * directly — where `../native/` is nothing and never will be, because the build
+ * script writes the helper to `build/native/`. Without the second candidate the
+ * whole suite would run against a boundary that is permanently absent, and
+ * every case would pass while measuring a refusal.
  *
  * The arithmetic, because an earlier version of this note got it wrong and a
  * false model of where the second candidate points is worse than no note. Both
  * candidates are `resolve`d from this module's directory, so from
  * `<root>/src/boundary/` they are `<root>/src/native/` (absent, always) and
- * `<root>/dist/native/` (the build's own output). From `<root>/dist/boundary/`
- * they are `<root>/dist/native/` and — walking up two and back down into
- * `dist/native` — **the same path again**. So a shipped artefact resolves the
- * same file either way; the second candidate is redundant there rather than
- * nonexistent, and it can no more reach outside the installed tree than the
- * first can.
+ * `<root>/build/native/` (the build's own output). From `<root>/build/boundary/`
+ * the first is `<root>/build/native/` — already the answer — and the second is
+ * not consulted at all, because that tree is compiled.
  *
  * It is a *location*, not a fallback: neither candidate is an ordinary spawn,
  * and a run that finds neither is refused rather than downgraded.
  */
 export function resolveBoundaryExecutable(): { path?: string } {
-  const candidates = [
-    resolve(moduleDir, '..', 'native', 'ao-launch.exe'),
-    resolve(moduleDir, '..', '..', 'dist', 'native', 'ao-launch.exe'),
-  ];
+  const candidates = [resolve(moduleDir, '..', 'native', 'ao-launch.exe')];
+  if (RUNNING_FROM_SOURCE) {
+    candidates.push(resolve(moduleDir, '..', '..', 'build', 'native', 'ao-launch.exe'));
+  }
   for (const path of candidates) {
     if (existsSync(path)) return { path };
   }

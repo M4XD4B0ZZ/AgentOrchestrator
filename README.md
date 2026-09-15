@@ -177,10 +177,12 @@ and the shipped code disagree, the code is.
 
 ```powershell
 npm install
-npm run build
+npm run build          # writes build/. To change what the scheduled production
+                       # supervisor executes, use `npm run deploy` instead —
+                       # see "The build output and the deployed runtime"
 
 # always the preview first: it starts no agent, writes nothing, takes no lease
-node .\dist\cli\index.js block `
+node .\build\cli\index.js block `
   --repository "D:\Path\To\Project" `
   --block PROJECT-AREA-001 `
   --tasks PROJECT-AREA-001A PROJECT-AREA-001B `
@@ -287,8 +289,44 @@ build may read as "NTFS was established at startup, so this effect is safe".
 npm run verify
 ```
 
+### The build output and the deployed runtime are two directories
+
+Read this before anything else in this section, because the two words are not
+interchangeable and one of them is production.
+
+| | build output | deployed runtime |
+| --- | --- | --- |
+| path | `build/` | `dist/` |
+| written by | `npm run build` | `npm run deploy`, and nothing else |
+| when | every `verify`, on every branch | when an operator decides |
+| executed by | the dist-artefact gates, and you | the scheduled production supervisor |
+| may be stale | yes, harmlessly | no — compiled fresh into an empty directory |
+
+`npm run build` **never writes `dist/`**, and that is a measured invariant
+rather than a convention: `test:dist-runtime-isolation` runs the real build and
+fails if a single byte or a single write time under `dist/` moved.
+
+It exists because the opposite used to be true and cost something. `verify`
+runs `build`, `build` wrote `dist/`, and the scheduled supervisor executes
+`dist/cli/index.js` — so a feature-branch verify deployed unmerged code to
+production. It happened on 2026-09-14/15, for PR #103, before that pull request
+was merged. The full measurement and the decision are in
+`docs/decisions/2026-09-15-adr-build-output-and-deployed-runtime.md`.
+
+To run *your branch's* CLI during development, run the build output:
+
+```powershell
+npm run build
+node .\build\cli\index.js --help
+```
+
+To change what production executes, see "Deploy the runtime" below.
+
+### The `verify` chain
+
 `verify` is the canonical full Foundation verify command. It runs, in this
-order: `schema:generate`, `typecheck`, `build`, `test:dist-doctor`,
+order: `schema:generate`, `typecheck`, `build`, `test:dist-runtime-isolation`,
+`test:dist-runtime-deployment`, `test:dist-doctor`,
 `test:dist-trusted-profile`, `test:dist-lease-race`, `test:dist-lease-release`,
 `test:dist-runtime-gate`, `test:dist-notify-egress`, `test:dist-boundary`,
 `test:foundation-safe`, and then each heavy real-process file in a serial gate
@@ -303,14 +341,30 @@ three, having said "the two" while there were two and never been corrected when
 V4 slice 9 made it three. The set, and a measured reason for each entry, lives
 in `package.json` beside the scripts, which is where it is maintained.
 
-`build` itself now produces two artefacts: the TypeScript `dist/`, and
-`dist/native/ao-launch.exe`, the Windows launch boundary compiled from
-`native/ao-launch/AoLaunch.cs` with the in-box .NET Framework compiler. A
-missing compiler fails the build rather than producing a `dist` without the
-boundary in it.
+`build` itself now produces three artefacts, all of them under `build/`: the
+compiled TypeScript; `build/native/ao-launch.exe`, the Windows launch boundary
+compiled from `native/ao-launch/AoLaunch.cs` with the in-box .NET Framework
+compiler; and `build/.ao-provenance.json`, the record without which the compiled
+CLI refuses to run at all. A missing compiler fails the build rather than
+producing a build output without the boundary in it.
+
+`test:dist-runtime-isolation` runs the real `npm run build` and then measures
+`dist/` — both the bytes of every file in it and the time each was last written.
+A build that wrote there fails this gate. Both halves are load-bearing: `tsc` is
+deterministic, so on a clean tree a digest alone would report "unchanged" for a
+build that had in fact rewritten every file in the production runtime.
+
+`test:dist-runtime-deployment` measures the one operation that *is* allowed to
+change the production runtime. It deploys into a throwaway directory and
+requires five properties of the result: a complete runtime carrying the same
+bytes the gates verified and no leftovers, a recorded canonical commit, a
+refusal to run when provenance cannot be established, a promotion that leaves
+the previous runtime complete when it fails part-way, and a compiled tree that
+resolves its own launch boundary rather than a build output's. The canonical and
+dirty-tree refusals are measured against real throwaway Git repositories.
 
 `test:dist-trusted-profile` checks the *built* trusted-profile module
-(`dist/config/internal/trusted-profile.js`): that it resolves the OS user
+(`build/config/internal/trusted-profile.js`): that it resolves the OS user
 profile through `os.userInfo()`, that a child process with spoofed profile
 environment variables gets the identical answer, and that no remnant of the
 removed PowerShell resolver survives in the shipped artefact.
@@ -412,33 +466,45 @@ npm run test:windows-tree-kill-tool-release
                               # each excluded file on its own, serially
                               # (--no-file-parallelism); the gates `verify` runs
                               # after the foundation set
-npm run build                # emit dist/ (Node-executable CLI) and the native
-                             # launch boundary, dist/native/ao-launch.exe
+npm run build                # emit build/ (Node-executable CLI), the native
+                             # launch boundary build/native/ao-launch.exe, and
+                             # build/.ao-provenance.json. NEVER writes dist/
 npm run build:boundary       # only the native launch boundary
 npm run test:dist-boundary   # only the real-process launch-boundary check
                              # (tests/dist-artifact/launch-boundary-dist-artifact.mjs),
-                             # against whatever dist/ already exists — no build
+                             # against whatever build/ already exists — no build
 npm run test:dist-lease-race  # only the real-process execution-lease race
 npm run test:dist-lease-release # only the real-process acquire -> release check
                               # (tests/dist-artifact/execution-lease-release-dist-artifact.mjs),
-                              # against whatever dist/ already exists — no build
+                              # against whatever build/ already exists — no build
 npm run test:dist-doctor     # run only the dist-artefact child check
                               # (tests/dist-artifact/run-completion-dist-artifact.mjs),
-                              # against whatever dist/ already exists — no build
+                              # against whatever build/ already exists — no build
 npm run verify:dist-doctor   # build, then check the *built* doctor run-completion
-                              # artefact (dist/doctor/run-completion.js) in a
+                              # artefact (build/doctor/run-completion.js) in a
                               # separate Node process — not the TypeScript source
 npm run test:dist-trusted-profile   # run only the built trusted-profile check
                               # (tests/dist-artifact/trusted-profile-dist-artifact.mjs),
-                              # against whatever dist/ already exists — no build
+                              # against whatever build/ already exists — no build
 npm run verify:dist-trusted-profile # build, then check the *built* trusted-profile
-                              # module (dist/config/internal/trusted-profile.js)
+                              # module (build/config/internal/trusted-profile.js)
+npm run test:dist-runtime-isolation  # only the proof that the build wrote
+                              # nothing into the deployed runtime. Runs the
+                              # real build itself, so it needs no prior one
+npm run test:dist-runtime-deployment # only the deployment checks, into a
+                              # throwaway directory. Never touches dist/
 ```
 
 Every dist artefact check is a plain Node script, not a vitest test file, so
 none of them is picked up by vitest's default `tests/**/*.test.ts` glob and a
-plain `npm test` on a clean checkout (no `dist/` yet) does not depend on a
-prior build. (This paragraph said "both" while there were three of them, which
+plain `npm test` on a clean checkout (no `build/` yet) does not depend on a
+prior build.
+
+The directory name `tests/dist-artifact/` is historical. What those harnesses
+drive is the **build output**, `build/` — the compiled artefact rather than the
+TypeScript a test runner transpiles, which was always the point of them and did
+not change when the directory they read did. None of them reads the deployed
+runtime, and nothing in `verify` does. (This paragraph said "both" while there were three of them, which
 is the same class of stale count this repository keeps having to correct: the
 authority is the `verify` chain above.)
 
@@ -452,8 +518,66 @@ npm link
 agent-loop --help
 ```
 
-`bin.agent-loop` points at `dist/cli/index.js`, so `npm run build` must have run
-first.
+`bin.agent-loop` points at `dist/cli/index.js` — the **deployed runtime**, not
+the build output — so `npm run deploy` must have run first. That is deliberate:
+`npm link` publishes the name `agent-loop` onto this machine's PATH, and handing
+out an unverified, branch-dependent build under that name is a smaller instance
+of the defect that separated these two directories.
+
+To run your own branch without deploying, skip the link and run the build output
+directly:
+
+```powershell
+npm run build
+node .\build\cli\index.js --help
+```
+
+## Deploy the runtime
+
+```powershell
+npm run deploy
+```
+
+This is the **only** thing that writes `dist/`, the runtime the scheduled
+production supervisor executes. It compiles the current commit into a staging
+directory, writes `dist/.ao-provenance.json` last, and takes the name by rename,
+so `dist/` is at every instant the complete previous runtime, absent for one
+rename, or the complete new one — never half-replaced.
+
+It refuses two things, each with its own authorisation, and each authorisation
+records its reason in the runtime's provenance where it stays readable:
+
+```powershell
+npm run deploy                                          # clean tree, canonical tip only
+npm run deploy -- --allow-non-canonical "hotfix AO-123" # HEAD is not origin/main
+npm run deploy -- --allow-dirty "reproducing a defect"  # the tree has uncommitted changes
+```
+
+`--allow-non-canonical` does **not** grant `--allow-dirty`. They authorise
+different claims: the first still names a commit whose content is what was
+deployed; the second is the admission that the runtime corresponds to no commit
+at all, and the record then says `sourceTreeClean: false`.
+
+**Which commit is running right now:**
+
+```powershell
+Get-Content .\dist\.ao-provenance.json
+```
+
+**If a deployment fails part-way**, the previous runtime is still in place and
+still usable — the rollback is measured, not assumed. Fix the cause and run
+`npm run deploy` again. If the output says the previous runtime is still on disk
+under a `dist.superseded-…` name, a file in it was in use; it is safe to delete
+once nothing is running out of it.
+
+**A runtime that cannot say where it came from refuses to run**, with exit code
+7 and a message naming the refusal. A tree with no `.ao-provenance.json`, or one
+whose record names a different root, was copied rather than deployed. Deploy it;
+do not write the record by hand.
+
+A deployed runtime is **not** self-contained: it imports `commander`, which Node
+resolves by walking up to a `node_modules`. `dist/` works because it sits beside
+this checkout's. A runtime deployed outside a checkout dies on its first import.
 
 ## `agent-loop run`
 
@@ -7826,7 +7950,7 @@ that mutant dies here.
 
 ### "No egress without opt-in", measured against the shipped artefact
 
-`test:dist-notify-egress` runs `dist/cli/index.js` twice as a real process, with
+`test:dist-notify-egress` runs `build/cli/index.js` twice as a real process, with
 a self-verifying preload that points the OS profile at a scratch directory and
 arms every socket surface — `fetch`, `net`, `http`, `https`, `dns`.
 
@@ -8830,7 +8954,7 @@ describes is the component and its guarantees, which are unchanged by that.
 
 | Part | Where |
 | --- | --- |
-| The boundary itself | `native/ao-launch/AoLaunch.cs` → `dist/native/ao-launch.exe` |
+| The boundary itself | `native/ao-launch/AoLaunch.cs` → `build/native/ao-launch.exe` |
 | Its build | `scripts/build-native-boundary.mjs` (`npm run build:boundary`) |
 | The contract: request, status, endings | `src/boundary/launch-boundary.ts` |
 | Starting one owned process | `src/boundary/start-owned-process.ts` |

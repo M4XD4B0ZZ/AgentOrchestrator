@@ -65,8 +65,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..', '..');
-const distLease = join(repoRoot, 'dist', 'lease', 'execution-lease.js');
-const distMint = join(repoRoot, 'dist', 'core', 'internal', 'containment-attestation.js');
+const distLease = join(repoRoot, 'build', 'lease', 'execution-lease.js');
+const distMint = join(repoRoot, 'build', 'core', 'internal', 'containment-attestation.js');
 
 const LEASE_FILE_NAME = 'agent-orchestrator-execution-lease.json';
 const LEDGER_FILE_NAME = 'agent-orchestrator-execution-lease.launches.json';
