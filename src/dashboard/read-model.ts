@@ -697,10 +697,25 @@ function operationalOf(
   // person and no clock is running.
   if (runtime.reading === 'NONE') return 'INACTIVE';
 
-  // A terminal record is an ending, whatever the declaration says. `OPEN` with
-  // READY_FOR_PR is the ordinary pre-delivery shape, not a disagreement: the
-  // declaration flip lands in the delivery pull request.
-  if (runtime.facts.stateKind === 'TERMINAL') return 'INACTIVE';
+  // A terminal record is an ending — but WHICH ending decides whether it
+  // disagrees with a plan that still says OPEN.
+  //
+  // `READY_FOR_PR` does not. AO's own words: it is "the intended successful end
+  // of a task", and handing over for the actual pull request is out of scope for
+  // the loop. The declaration flip lands in that delivery pull request, so a
+  // task that is finished and not yet delivered legitimately reads OPEN here.
+  // That is an explicit rule of this build, not an assumption.
+  //
+  // `ABORTED` and `OPERATOR_RESOLVED` do disagree. One means the task was given
+  // up on "deliberately and irreversibly"; the other means an operator took it
+  // out of the orchestrator's hands. A plan that still asks for the task while
+  // the record says either of those is two sources contradicting each other,
+  // and the operator is the only one who can say which is current.
+  if (runtime.facts.stateKind === 'TERMINAL') {
+    if (runtime.facts.state === 'READY_FOR_PR') return 'INACTIVE';
+    if (declaration === 'OPEN') return 'CONFLICT';
+    return 'INACTIVE';
+  }
 
   // Below here a NON-terminal record exists — AO believes this task is in
   // flight.
