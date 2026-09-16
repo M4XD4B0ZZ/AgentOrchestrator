@@ -346,7 +346,9 @@ async function theBuiltCliFindsItsOwnAssetsWithNoSeam() {
       check(
         /ao-shell-[0-9a-f]{64}/.test(text),
         'the served service worker names no ao-shell-<64 hex> cache, so the build-time digest ' +
-          'never reached it',
+          `never reached it. If ${uiDir} was left behind by a crashed run of this script rather ` +
+          'than written by "npm run build", it holds placeholders and this is what that looks ' +
+          'like: remove it and build.',
       );
       check(
         !text.includes('__AO_SHELL_'),
