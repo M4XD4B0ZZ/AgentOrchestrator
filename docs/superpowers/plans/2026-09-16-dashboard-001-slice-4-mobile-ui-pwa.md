@@ -217,7 +217,7 @@ Create `src/dashboard/ui-assets.ts`:
  * The alternative is a static-file server: take the request target, decode it,
  * normalise it, join it onto a root and open whatever comes out. Every path
  * traversal defect in the history of the web lives in that sentence. Here a
- * request is a lookup in a frozen `Map` keyed by the path exactly as it
+ * request is a lookup in a `Map` keyed by the path exactly as it
  * arrived, so `..`, `%2e%2e` and a backslash are strings that are not keys.
  * Traversal is not mitigated; it has nowhere to go.
  */
@@ -271,7 +271,16 @@ export interface LoadedUiAsset {
   readonly contentType: string;
 }
 
-/** The frozen route→asset map a running server answers from. */
+/**
+ * The route→asset map a running server answers from.
+ *
+ * Protection is type-level and conventional: the map is built once by this
+ * loader and nothing in this build writes to it afterwards. There is
+ * deliberately no runtime `Object.freeze` — a frozen object would refuse key
+ * mutation but the bytes it points at stay writable either way, so the
+ * guarantee would be partial rather than real. A partial guarantee is not
+ * worth changing the container type for.
+ */
 export type DashboardAssetMap = ReadonlyMap<string, LoadedUiAsset>;
 
 /** What a load attempt did. Total: every path returns one of these. */
