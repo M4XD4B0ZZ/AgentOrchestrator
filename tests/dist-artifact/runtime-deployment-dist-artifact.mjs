@@ -171,6 +171,55 @@ check(
   `the deployed runtime has no ${deploy.PROVENANCE_FILENAME}`,
 );
 
+// The dashboard UI is the second non-`tsc` artefact, and this deployment
+// compiled rather than copying `build/` — so if the emit had only ever been
+// wired into `npm run build`, every check above would still pass and the
+// deployed runtime would carry no UI at all. `loadUiAssets` is all-or-nothing,
+// so that runtime would refuse to start the Manager on the one machine where
+// nobody is watching. Read against the DEPLOYED manifest, which is the
+// authority the deployed loader itself uses.
+const deployedUi = join(target, 'dashboard', 'ui');
+const deployedManifestModule = join(target, 'dashboard', 'ui-assets.js');
+check(existsSync(deployedManifestModule), 'the deployed runtime has no dashboard/ui-assets.js');
+if (existsSync(deployedManifestModule)) {
+  const { UI_ASSET_MANIFEST } = await import(pathToFileURL(deployedManifestModule).href);
+  for (const entry of UI_ASSET_MANIFEST) {
+    check(
+      existsSync(join(deployedUi, entry.file)),
+      `the deployed runtime has no dashboard/ui/${entry.file}`,
+    );
+  }
+  // Verbatim across the deploy path, for everything but the worker: a copy
+  // step that transformed an icon or a stylesheet would be a silent corruption
+  // nothing else here would see.
+  for (const entry of UI_ASSET_MANIFEST) {
+    if (entry.file === 'sw.js') continue;
+    const authored = join(repoRoot, 'src', 'dashboard', 'ui', entry.file);
+    if (!existsSync(join(deployedUi, entry.file)) || !existsSync(authored)) continue;
+    check(
+      readFileSync(join(deployedUi, entry.file)).equals(readFileSync(authored)),
+      `the deployed dashboard/ui/${entry.file} is not the authored file`,
+    );
+  }
+}
+
+// The substitution, on the path that matters most. A worker that shipped with
+// its placeholder intact would have bytes that never change again, so no
+// installed client would ever pick up another deployment — invisibly, and
+// permanently.
+const deployedWorker = join(deployedUi, 'sw.js');
+if (existsSync(deployedWorker)) {
+  const worker = readFileSync(deployedWorker, 'utf8');
+  check(
+    /ao-shell-[0-9a-f]{64}/.test(worker),
+    'the deployed service worker names no ao-shell-<64 hex> cache',
+  );
+  check(
+    !worker.includes('__AO_SHELL_'),
+    'a build-time placeholder survived into the deployed service worker',
+  );
+}
+
 // The same bytes the gates verified. `tsc` is deterministic, so a deployment
 // compiled from the same commit with the same settings reproduces the build
 // output exactly — and if it ever stops doing so, "verify measured these bytes"

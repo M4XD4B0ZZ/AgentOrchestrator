@@ -20,15 +20,30 @@
  * directory. Only running the BUILT artefact, unseamed, proves the wiring
  * that actually ships.
  *
- * ── Why this script writes its own placeholder assets ───────────────────────
+ * ── Two modes, and why the choice is made before anything is written ────────
  *
- * At this point in the plan's sequence, `src/dashboard/ui/` does not exist
- * (Task 5 creates it) and neither does `scripts/build-ui-assets.mjs` (Task 9),
- * so `build/dashboard/ui/` is never written by an ordinary build. This script
- * creates that directory itself, with one placeholder file per manifest
- * entry, stands the built CLI up against it, and deletes the directory again
- * on every exit path — it never touches a real shipped asset, because none
- * exists yet.
+ * When this script was first written, nothing emitted `build/dashboard/ui/`,
+ * so it created that directory itself with one placeholder per manifest entry
+ * and removed it again on every exit path. It also REFUSED to run if the
+ * directory already existed, rather than guess whether it was real — because
+ * deleting a directory it had not created is a mistake this repository has
+ * made before.
+ *
+ * Task 9 made `npm run build` emit exactly that directory. Left as it was,
+ * this gate would have refused to run on every developer machine and in CI
+ * from that commit onward, and a gate that silently stops running is worse
+ * than one that fails. So it now has two modes:
+ *
+ *   REAL        — `build/dashboard/ui/` exists. The shipped assets are used as
+ *                 they are, nothing is written, and nothing is deleted. This
+ *                 is the ordinary mode after `npm run build`.
+ *   PLACEHOLDER — the directory is absent. This script creates it, fills it
+ *                 with one placeholder per manifest entry, and removes it
+ *                 again on every exit path, exactly as before.
+ *
+ * The mode is decided ONCE, before anything runs, and the cleanup is bound to
+ * that same decision — so the safety property the original refusal protected
+ * is kept: this script can only ever delete a directory it created itself.
  *
  * ── What this control proves ────────────────────────────────────────────────
  *
@@ -36,11 +51,16 @@
  *     directory in the place the manifest and the loader agree on, reaches
  *     "listening" — it does NOT refuse with `UI_ASSETS_UNUSABLE`;
  *  2. an asset requested over the real socket comes back with the exact bytes
- *     this script wrote for it, proving the path by use rather than by
- *     inspecting a return value offline.
+ *     on disk for it, proving the path by use rather than by inspecting a
+ *     return value offline;
+ *  3. in REAL mode only: the service worker the built CLI actually serves
+ *     names an `ao-shell-<64 hex>` cache and carries no surviving build-time
+ *     placeholder. That substitution failing is invisible and permanent — a
+ *     worker whose bytes never change is a worker no browser ever replaces —
+ *     and this is the only place it is measured against bytes that came off a
+ *     real build and out of a real socket.
  *
- * It does not prove anything about the REAL shipped assets — there are none
- * yet — and it does not prove `loadUiAssets`'s all-or-nothing behaviour, which
+ * It does not prove `loadUiAssets`'s all-or-nothing behaviour, which
  * `tests/dashboard-08-ui-assets.test.ts` already covers against a real
  * temporary directory.
  *
@@ -51,7 +71,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -75,19 +95,23 @@ if (!existsSync(cliEntry) || !existsSync(uiAssetsEntry)) {
   process.exit(1);
 }
 
-// A pre-existing `build/dashboard/ui` would mean either a real build step now
-// writes it (Task 9 landed) or a previous run of this script crashed before
-// its own cleanup. Either way, deleting it blindly would be a scratch-checkout
-// mistake this repository has made before: mutate a scratch directory, never
-// one that might be real.
-if (existsSync(uiDir)) {
-  console.error(
-    `${uiDir} already exists. This script only ever creates and removes that directory itself; ` +
-      'refusing to touch it rather than guess whether it is real. Remove it by hand if it is a ' +
-      'leftover from a crashed run of this script.',
-  );
-  process.exit(1);
-}
+/**
+ * REAL when the shipped assets are already there, PLACEHOLDER when they are not.
+ *
+ * Read exactly once, here, before this script writes anything — and every
+ * cleanup below is conditioned on this same constant rather than on a fresh
+ * `existsSync`. That is what keeps the original safety property intact: a
+ * directory this run did not create is never removed by it, whatever happens
+ * in between.
+ *
+ * `npm run build` emits `build/dashboard/ui/` (scripts/build-ui-assets.mjs),
+ * so REAL is the ordinary mode. PLACEHOLDER still exists because the property
+ * under test — the built CLI finding its own assets with no seam — is about
+ * the LOOKUP, and it is worth being able to measure that on a tree where the
+ * emit has not run.
+ */
+const realAssets = existsSync(uiDir);
+const mode = realAssets ? 'REAL' : 'PLACEHOLDER';
 
 const uiAssetsModule = await import(pathToFileURL(uiAssetsEntry).href);
 const manifest = uiAssetsModule.UI_ASSET_MANIFEST;
@@ -211,7 +235,7 @@ function getBytes(port, path) {
   });
 }
 
-/* ── the fixture: placeholder bytes, one per manifest entry ──────────────── */
+/* ── the fixture: real assets, or placeholders when there are none ───────── */
 
 /** Distinct, deterministic bytes per file — never the file's real content. */
 function placeholderBytesFor(file) {
@@ -225,14 +249,44 @@ function writePlaceholderAssets() {
   }
 }
 
+/** Only ever called in PLACEHOLDER mode; see `realAssets` above. */
 function removePlaceholderAssets() {
   rmSync(uiDir, { recursive: true, force: true });
+}
+
+/**
+ * What the server ought to answer with for `file`, read from the tree it is
+ * serving out of.
+ *
+ * In REAL mode this is the shipped file itself, so the comparison below is
+ * against bytes a build produced rather than against bytes this script
+ * invented. The property — "the built CLI reads the directory the manifest and
+ * the loader agree on" — is the same either way.
+ */
+function expectedBytesFor(file) {
+  return realAssets ? readFileSync(join(uiDir, file)) : placeholderBytesFor(file);
 }
 
 /* ── the measurement ──────────────────────────────────────────────────────── */
 
 async function theBuiltCliFindsItsOwnAssetsWithNoSeam() {
-  writePlaceholderAssets();
+  if (realAssets) {
+    // A directory that exists but is incomplete would otherwise surface only as
+    // "the built CLI refused to serve", which names the symptom and not the
+    // cause. The loader is all-or-nothing, so one absent file is the whole UI.
+    const absent = manifest
+      .filter((entry) => !existsSync(join(uiDir, entry.file)))
+      .map((entry) => entry.file);
+    check(
+      absent.length === 0,
+      `${uiDir} exists but does not hold ${absent.join(', ')}. Run "npm run build", or remove ` +
+        'that directory if it is a leftover from a crashed run of this script.',
+    );
+    if (absent.length > 0) return;
+  } else {
+    writePlaceholderAssets();
+  }
+
   const port = await freePort();
   const handle = launch(['dashboard', 'serve', '--port', String(port)]);
 
@@ -261,8 +315,8 @@ async function theBuiltCliFindsItsOwnAssetsWithNoSeam() {
     );
 
     // One asset, fetched over the real socket, compared byte for byte against
-    // what this script itself wrote to build/dashboard/ui — the path is
-    // proved by use, not by inspecting defaultUiAssetRoot()'s return value.
+    // what is on disk in build/dashboard/ui — the path is proved by use, not
+    // by inspecting defaultUiAssetRoot()'s return value.
     const target = manifest.find((entry) => entry.route === '/app.js');
     check(target !== undefined, 'the manifest carries no /app.js entry to fetch');
     if (target === undefined) return;
@@ -274,12 +328,34 @@ async function theBuiltCliFindsItsOwnAssetsWithNoSeam() {
       `content-type was ${String(answer.headers['content-type'])}, expected ${target.contentType}`,
     );
     check(
-      answer.body.equals(placeholderBytesFor(target.file)),
-      `the served bytes for /app.js did not match what this script wrote for ${target.file}`,
+      answer.body.equals(expectedBytesFor(target.file)),
+      `the served bytes for /app.js did not match ${join(uiDir, target.file)}`,
     );
+
+    // REAL mode only — placeholders carry no digest, and asserting one against
+    // them would be asserting against this script's own invention.
+    //
+    // This is the substitution measured where it ships: bytes written by
+    // `npm run build`, read by the built CLI with no seam, and handed back over
+    // a socket. A worker that kept its placeholder would have bytes that never
+    // change again, so no installed client would ever see another deployment.
+    if (realAssets) {
+      const worker = await getBytes(port, '/sw.js');
+      check(worker.status === 200, `GET /sw.js answered ${String(worker.status)}, expected 200`);
+      const text = worker.body.toString('utf8');
+      check(
+        /ao-shell-[0-9a-f]{64}/.test(text),
+        'the served service worker names no ao-shell-<64 hex> cache, so the build-time digest ' +
+          'never reached it',
+      );
+      check(
+        !text.includes('__AO_SHELL_'),
+        'a build-time placeholder survived into the served service worker',
+      );
+    }
   } finally {
     await killAndWait(handle);
-    removePlaceholderAssets();
+    if (!realAssets) removePlaceholderAssets();
   }
 }
 
@@ -290,14 +366,17 @@ try {
 } finally {
   // Belt and suspenders: an assertion thrown out of the function above (as
   // opposed to a recorded `check` failure) must not leave the directory
-  // behind either.
-  if (existsSync(uiDir)) removePlaceholderAssets();
+  // behind either — but only in the mode that created it.
+  if (!realAssets && existsSync(uiDir)) removePlaceholderAssets();
 }
 
 if (failures.length > 0) {
-  console.error('dashboard assets gate FAILED:');
+  console.error(`dashboard assets gate FAILED (${mode} assets):`);
   for (const failure of failures) console.error(`  - ${failure}`);
   process.exit(1);
 }
 
-console.log('dashboard assets gate: the shipped CLI finds its own UI beside itself, with no seam.');
+console.log(
+  `dashboard assets gate (${mode} assets): the shipped CLI finds its own UI beside itself, ` +
+    'with no seam.',
+);

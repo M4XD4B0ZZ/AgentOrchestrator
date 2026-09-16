@@ -466,9 +466,15 @@ npm run test:windows-tree-kill-tool-release
                               # each excluded file on its own, serially
                               # (--no-file-parallelism); the gates `verify` runs
                               # after the foundation set
-npm run build                # emit build/ (Node-executable CLI), the native
-                             # launch boundary build/native/ao-launch.exe, and
+npm run build                # emit build/ (Node-executable CLI), the dashboard
+                             # UI build/dashboard/ui/, the native launch
+                             # boundary build/native/ao-launch.exe, and
                              # build/.ao-provenance.json. NEVER writes dist/
+npm run build:ui             # only the dashboard UI. `tsc` emits no .html,
+                             # .css, .js, .png or .webmanifest, so this step
+                             # copies them and substitutes the service worker's
+                             # build-time digest; `npm run deploy` calls the
+                             # same function into its own staging directory
 npm run build:boundary       # only the native launch boundary
 npm run test:dist-boundary   # only the real-process launch-boundary check
                              # (tests/dist-artifact/launch-boundary-dist-artifact.mjs),

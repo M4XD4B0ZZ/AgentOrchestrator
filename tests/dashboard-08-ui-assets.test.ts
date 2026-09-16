@@ -409,3 +409,131 @@ describe('the default asset root resolves for real, against the source tree', ()
     }
   });
 });
+
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync } from 'node:fs';
+
+import { emitUiAssets } from '../scripts/build-ui-assets.mjs';
+
+/** A scratch destination that the suite's `afterAll` will sweep up. */
+function emitInto(): string {
+  const out = mkdtempSync(join(tmpdir(), 'ao-ui-emit-'));
+  roots.push(out);
+  return out;
+}
+
+/**
+ * The digest, recomputed from the TypeScript manifest.
+ *
+ * Deliberately an INDEPENDENT derivation: `scripts/build-ui-assets.mjs` is a
+ * `.mjs` build script and carries its own mirrored list, so a digest computed
+ * from that mirror is compared here against one computed from `ui-assets.ts`,
+ * which is the authority. A drifted mirror, a changed order, or a changed set
+ * all break the equality.
+ */
+function digestOver(files: readonly string[]): string {
+  const hash = createHash('sha256');
+  for (const file of files) {
+    hash.update(file, 'utf8');
+    hash.update(readSource(joinPath(UI_DIR, file)));
+  }
+  return hash.digest('hex');
+}
+
+describe('the emit step produces a complete, substituted artefact', () => {
+  it('emits exactly the manifest — every file, and no file it does not name', () => {
+    // Bidirectional, and both directions name the offending file. A one-way
+    // check would stay green while the emit quietly dropped an asset the
+    // loader needs, or shipped one nothing serves.
+    const out = emitInto();
+    const result = emitUiAssets({ outDir: out });
+    const manifestFiles = UI_ASSET_MANIFEST.map((e) => e.file).sort();
+
+    for (const entry of UI_ASSET_MANIFEST) {
+      expect(existsSync(joinPath(out, entry.file)), `the emit wrote no ${entry.file}`).toBe(true);
+    }
+    for (const name of readdirSync(out)) {
+      expect(manifestFiles, `the emit wrote ${name}, which the manifest does not name`).toContain(
+        name,
+      );
+    }
+    expect([...result.files].sort(), 'the reported file set').toEqual(manifestFiles);
+  });
+
+  it('writes an artefact the shipped loader accepts, all-or-nothing', () => {
+    const out = emitInto();
+    emitUiAssets({ outDir: out });
+    const loaded = loadUiAssets(out);
+    expect(loaded.outcome).toBe('LOADED');
+  });
+
+  it('substitutes both tokens, leaving none behind', () => {
+    const out = emitInto();
+    const { digest } = emitUiAssets({ outDir: out });
+    const sw = readSource(joinPath(out, 'sw.js'), 'utf8');
+    // A silent substitution failure is invisible and catastrophic: it ships a
+    // worker whose bytes never change, so no update ever runs, forever.
+    expect(sw, 'the digest placeholder survived').not.toContain('__AO_SHELL_DIGEST__');
+    expect(sw, 'the routes placeholder survived').not.toContain('__AO_SHELL_ROUTES__');
+    expect(sw).toContain(`ao-shell-${digest}`);
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+    for (const route of SHELL_ROUTES) expect(sw, route).toContain(JSON.stringify(route));
+    // The worker's allow-list is the shell, exactly — order included, because
+    // the substituted value is one JSON array literal and not a set.
+    expect(sw).toContain(`var SHELL_ROUTES = ${JSON.stringify([...SHELL_ROUTES])};`);
+  });
+
+  it('takes the digest over the shell only, so the worker cannot define itself', () => {
+    const out = emitInto();
+    const { digest } = emitUiAssets({ outDir: out });
+    const shellFiles = UI_ASSET_MANIFEST.filter((e) => SHELL_ROUTES.includes(e.route)).map(
+      (e) => e.file,
+    );
+    expect(shellFiles).not.toContain('sw.js');
+    // The pin: the emitted digest IS the digest of the shell, recomputed from
+    // the manifest. Comparing two emits of the same source tree to each other
+    // would be vacuous — both would agree whatever set they hashed.
+    expect(digest, 'the digest is not the digest of the shell').toBe(digestOver(shellFiles));
+    // And the set including the worker is demonstrably a different value, so
+    // the exclusion is measured rather than merely stated.
+    const withWorker = UI_ASSET_MANIFEST.map((e) => e.file);
+    expect(digestOver(withWorker), 'hashing sw.js too would be indistinguishable').not.toBe(digest);
+  });
+
+  it('changes the worker whenever the shell changes, which is what a browser notices', () => {
+    // Proved by use rather than by reading the hash function: the digest is
+    // recomputed here over a shell with one byte different, and the name that
+    // ends up inside the emitted worker must not be that one.
+    const out = emitInto();
+    const { digest } = emitUiAssets({ outDir: out });
+    const sw = readSource(joinPath(out, 'sw.js'), 'utf8');
+    const hash = createHash('sha256');
+    for (const entry of UI_ASSET_MANIFEST) {
+      if (entry.file === 'sw.js') continue;
+      hash.update(entry.file, 'utf8');
+      const bytes = Buffer.from(readSource(joinPath(UI_DIR, entry.file)));
+      if (entry.file === 'app.css') bytes[0] = (bytes[0]! + 1) & 0xff;
+      hash.update(bytes);
+    }
+    const altered = hash.digest('hex');
+    expect(altered).not.toBe(digest);
+    expect(sw, 'the worker carries a name the shell did not produce').not.toContain(
+      `ao-shell-${altered}`,
+    );
+    expect(sw).toContain(`ao-shell-${digest}`);
+  });
+
+  it('copies the shell verbatim — only sw.js differs from its source', () => {
+    const out = emitInto();
+    emitUiAssets({ outDir: out });
+    for (const entry of UI_ASSET_MANIFEST) {
+      if (entry.file === 'sw.js') continue;
+      const emitted = readSource(joinPath(out, entry.file));
+      const authored = readSource(joinPath(UI_DIR, entry.file));
+      expect(Buffer.compare(emitted, authored), entry.file).toBe(0);
+    }
+    const emittedWorker = readSource(joinPath(out, 'sw.js'));
+    const authoredWorker = readSource(joinPath(UI_DIR, 'sw.js'));
+    expect(Buffer.compare(emittedWorker, authoredWorker), 'sw.js must NOT be verbatim').not.toBe(0);
+  });
+});
