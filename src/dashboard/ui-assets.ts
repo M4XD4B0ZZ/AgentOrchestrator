@@ -2,9 +2,11 @@
  * DASHBOARD-001 slice 4 — the closed asset manifest, and the only reader of it.
  *
  * This module is the single authority for what the UI consists of. Two other
- * lists are DERIVED from it and never hand-maintained: the digest input and the
- * service worker's fetch allow-list, both substituted into `sw.js` by
- * `scripts/build-ui-assets.mjs`.
+ * lists are derived from it by `scripts/build-ui-assets.mjs`: the digest input
+ * and the service worker's fetch allow-list, both substituted into `sw.js`.
+ * A two-way gate keeps the mirror honest — every manifest route must be present
+ * in the artefact, and every file in the artefact must be named by the manifest
+ * — so a drifted mirror cannot ship.
  *
  * ── Why a list and not a directory ─────────────────────────────────────────
  *
@@ -65,7 +67,17 @@ export interface LoadedUiAsset {
   readonly contentType: string;
 }
 
-/** The frozen route→asset map a running server answers from. */
+/**
+ * The route→asset map a running server answers from.
+ *
+ * Protection is type-level and conventional: the map is built once by this
+ * loader and nothing in this build writes to it afterwards. There is
+ * deliberately no runtime `Object.freeze` — the two ways to get one are worse:
+ * a defensive copy per access would copy the whole UI on every request for a
+ * property no caller needs, and a frozen null-prototype object keyed by the
+ * request path itself would trade runtime immutability for the exact
+ * prototype-key lookup hazard the literal-map lookup exists to avoid.
+ */
 export type DashboardAssetMap = ReadonlyMap<string, LoadedUiAsset>;
 
 /** What a load attempt did. Total: every path returns one of these. */

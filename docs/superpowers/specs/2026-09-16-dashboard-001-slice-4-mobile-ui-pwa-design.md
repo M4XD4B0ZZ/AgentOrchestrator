@@ -337,10 +337,10 @@ outcome `UI_ASSETS_UNUSABLE`, reported with the failing **route** (never a
 filesystem path), exiting `EXIT_RUN_UNEXPECTED` — nothing the operator typed was
 wrong; the artefact is defective.
 
-There is no partial serve. Afterwards the map is frozen, so a request never
-touches disk and the NTFS rename guarantee slice 1 depends on is untouched. A
-deployment changes files, the Manager is restarted, and exactly one consistent
-UI version is in memory.
+There is no partial serve. Once built, the map is never updated and a request
+never reads from disk — the NTFS rename guarantee slice 1 depends on is
+untouched. A deployment changes files, the Manager is restarted, and exactly
+one consistent UI version is in memory.
 
 ### 4.6 `http-server.ts` does change — the body type widens
 
