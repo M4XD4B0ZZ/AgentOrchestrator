@@ -943,19 +943,19 @@ describe('the server writes what the contract decided, and nothing more', () => 
   });
 
   /**
-   * Bytes, not text.
+   * Bytes, not text — proven for the test harness, not for `write()` itself.
    *
    * The icons slice 4 serves are PNG, and a PNG is full of bytes that are not
-   * valid UTF-8. `write` used to end every response with an explicit `'utf8'`
-   * encoding, which silently replaces each of them with U+FFFD and then
-   * reports a `Content-Length` describing bytes that were never sent. A test
-   * asserting only the status and the content type passes against exactly that
-   * corruption, which is why this one counts and compares the bytes.
-   *
-   * There is no `/__bytes-probe` route, in production or in this test: the
-   * point is what `write` does with a `Uint8Array`, not what any route
-   * decides, so this case builds its own throwaway server directly on
-   * `node:http` rather than adding a route nothing else would ever use.
+   * valid UTF-8. This case cannot exercise `write()` directly: nothing in the
+   * real contract returns a `Uint8Array` body yet, and there is deliberately
+   * no `/__bytes-probe` route to manufacture one. So it builds its own
+   * throwaway server on `node:http` instead, to prove what it CAN prove now —
+   * that `rawBytes`, the helper a later test will rely on to read such a body
+   * back for real once one exists, does not itself perform the corruption it
+   * exists to catch. `raw` decodes its reply as UTF-8 text, which would
+   * silently turn a byte above U+007F into U+FFFD before a single assertion
+   * ever ran; `rawBytes` keeps the reply as a `Buffer` for exactly that
+   * reason.
    */
   it('writes a binary body byte for byte, and describes it by byte length', async () => {
     // A deliberately hostile little payload: a real PNG signature, a lone 0xFF
