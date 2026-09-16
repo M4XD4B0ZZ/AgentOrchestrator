@@ -873,13 +873,34 @@
       inFlight = false;
     }
 
+    function unreached() {
+      // Never reached the Manager. The held snapshot stays on screen and the
+      // clock is NOT reset, so the renderer marks it stale or offline.
+      answered();
+      publish();
+      return undefined;
+    }
+
     function tick() {
       // Single-flight. The timer does not wait for the previous request, so a
       // Manager that takes longer than a poll interval to answer would collect
       // one request per tick — and when those finally land out of order, the
       // OLDER answer arrives last, moves the freshness clock backwards and
       // puts an older snapshot on screen than the one already rendered.
-      if (inFlight) return Promise.resolve(undefined);
+      //
+      // It PUBLISHES on the way out, and that line is the whole difference
+      // between a guard and a wedge. `fetch` has no default timeout, so one
+      // socket that never settles makes every later tick return here — and a
+      // silent return would freeze the badge on whatever it last said while
+      // the data underneath it aged for minutes. The version this guard
+      // replaced was wrong but SELF-HEALING; nothing may be traded for that
+      // except the truth, so the clock-derived word keeps marching
+      // LIVE → STALE → OFFLINE while a request is outstanding. The held
+      // snapshot is untouched: labelled stale, never resurrected.
+      if (inFlight) {
+        publish();
+        return Promise.resolve(undefined);
+      }
       inFlight = true;
 
       var headers = {};
@@ -887,22 +908,25 @@
       // including the quotes, so the bare revision matches nothing, forever.
       if (heldTag !== null) headers['If-None-Match'] = heldTag;
 
-      // `no-store` because the conditional request is ours to make. A 200 the
-      // browser answered out of its own store would reset the freshness clock
-      // without the Manager having said anything at all.
-      return fetchImpl(SNAPSHOT_PATH, { headers: headers, cache: 'no-store' }).then(
-        receive,
-        function () {
-          // Never reached the Manager. The held snapshot stays on screen and
-          // the clock is NOT reset, so the renderer marks it stale or offline.
-          answered();
-          publish();
-          return undefined;
-        }
+      var pending;
+      try {
+        // `no-store` because the conditional request is ours to make. A 200 the
+        // browser answered out of its own store would reset the freshness clock
+        // without the Manager having said anything at all.
+        pending = fetchImpl(SNAPSHOT_PATH, { headers: headers, cache: 'no-store' });
+      } catch (error) {
+        // A transport that THROWS rather than returning a rejected promise is
+        // the same permanent wedge through another door: the release below
+        // never runs and the poller is shut for the life of the page.
+        // Observably this is a request that never reached the Manager.
+        release();
+        return Promise.resolve(unreached());
+      }
+
       // Released on BOTH outcomes, including one thrown by a caller's own
       // `onState`. A release that only ran on success would wedge the poller
-      // shut for the life of the page the first time anything threw.
-      ).then(release, release);
+      // shut the first time anything threw.
+      return pending.then(receive, unreached).then(release, release);
     }
 
     return { tick: tick, republish: publish };
@@ -915,11 +939,17 @@
    *
    * Its own view rather than `renderRoute(hash, null, …)`, because that would
    * print the PROJECTS heading and a sentence about the registry — and a page
-   * that has had no answer has read no registry to report on either way.
+   * holding no reading has read no registry to report on either way.
+   *
+   * "Usable", and not "no data received", for the same reason `contactLine`
+   * says it: this card is reachable after an answer that ARRIVED and could not
+   * be read, once the attempt following it clears the unreadable outcome. A
+   * card claiming nothing was received would send the operator after a network
+   * fault that is not there, and the two conditions want different actions.
    */
   function noDataView() {
     return '<section class="card"><p><strong>AO status unavailable</strong></p>' +
-      '<p>No live data received in this session.</p></section>';
+      '<p>No usable data received in this session.</p></section>';
   }
 
   /**

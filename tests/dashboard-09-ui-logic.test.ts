@@ -598,6 +598,8 @@ interface Answer {
   readonly hangs?: true;
   /** the request rejects, as it does with no network at all */
   readonly fails?: true;
+  /** `fetch` throws synchronously instead of returning a rejected promise */
+  readonly throws?: true;
 }
 
 interface FakeElement {
@@ -678,6 +680,7 @@ function mountPage(
       }
       if (answer.hangs === true) return new Promise(() => undefined);
       if (answer.fails === true) return Promise.reject(new Error('offline'));
+      if (answer.throws === true) throw new TypeError('Failed to construct the request');
       return Promise.resolve({
         status: answer.status,
         ok: answer.status >= 200 && answer.status < 300,
@@ -831,7 +834,7 @@ describe('a malformed snapshot is an explicit error state, never old data', () =
       expect(h.word()).toBe('UNREADABLE');
       expect(h.stateAttribute()).toBe('UNREADABLE');
       // Nor is it the cold-launch copy — this page HAS had contact.
-      expect(h.content()).not.toContain('No live data received in this session');
+      expect(h.content()).not.toContain('No usable data received in this session');
 
       // ── valid -> normal render restored ─────────────────────────────────
       await h.poll();
@@ -880,12 +883,36 @@ describe('the page paints before the first answer, and says what it does not kno
     const h = mountPage([{ status: 200, hangs: true }]);
     await h.settle();
     expect(h.content()).toContain('AO status unavailable');
-    expect(h.content()).toContain('No live data received in this session.');
+    expect(h.content()).toContain('No usable data received in this session.');
     // renderRoute is never called with a null snapshot: its landing screen
     // would print the PROJECTS heading, and this page has no projects to
     // report — it has no reading at all.
     expect(h.content()).not.toContain('PROJECTS');
     expect(h.word()).toBe('OFFLINE');
+  });
+
+  it('does not claim nothing was received after an answer that could not be read', async () => {
+    // Reachable, and this drives the whole way there: an unreadable answer
+    // drops the snapshot AND the contact clock, the attempt after it clears
+    // the unreadable outcome, and `paint` falls through to the no-data card.
+    // At that point an answer HAS arrived in this session — it was garbage —
+    // and a card saying none was received sends the reader after a network
+    // fault that is not there. The two conditions want different actions.
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, etag: 'W/"bad"', body: NOT_SHAPED },
+      { status: 200, fails: true },
+    ]);
+    await h.settle();
+    await h.poll();
+    expect(h.content()).toContain('AO status unreadable');
+
+    await h.poll();
+    expect(h.content()).toContain('AO status unavailable');
+    expect(h.content(), 'the card claims nothing was received, and something was').not.toContain(
+      'No live data received',
+    );
+    expect(h.content()).toContain('No usable data received in this session.');
   });
 
   it('asks for the snapshot without the browser cache in the way', async () => {
@@ -958,6 +985,63 @@ describe('the polling loop follows the page, not the tab it was opened in', () =
     await h.poll();
     await h.poll();
     expect(h.requests(), 'a request was started while one was still in flight').toBe(1);
+  });
+
+  it('keeps telling the truth while a request hangs, rather than freezing on the last word', async () => {
+    // The trap the single-flight guard opened, and the reason it is worth
+    // writing down: the stacking version this replaced SELF-HEALED — a later
+    // request landed on a fresh socket and published whatever it got. A guard
+    // that early-returns without publishing does not. `fetch` has no default
+    // timeout and there is no AbortController here, so one socket that never
+    // settles leaves every later tick returning immediately, `publish` never
+    // running, and the badge reading LIVE over data that is minutes old.
+    // Nothing else in the file can move the word: `classifyFreshness` is
+    // called at exactly one site, inside `publish`.
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, hangs: true },
+    ]);
+    await h.settle();
+    expect(h.word()).toBe('LIVE');
+
+    await h.poll();
+    expect(h.requests()).toBe(2);
+
+    h.advance(120_000);
+    await h.poll();
+    await h.poll();
+    expect(h.word(), 'the status word froze while a request hung').toBe('OFFLINE');
+    // Still single-flight: the guard is kept, it just stops lying.
+    expect(h.requests(), 'the guard was dropped rather than fixed').toBe(2);
+    // And the held reading is untouched — labelled stale, not resurrected.
+    expect(h.content()).toContain('ZERA');
+    expect(h.content()).toContain('OFFLINE · showing data from the last successful fetch');
+  });
+
+  it('does not latch shut when the transport throws instead of rejecting', async () => {
+    // Production `fetch` against a constant path does not do this, so the
+    // guard is defensive — but the failure it prevents is the same permanent
+    // wedge through another door: an exception on the way out of `tick` skips
+    // the release and shuts the poller for the life of the page.
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, throws: true },
+      { status: 304, etag: 'W/"r1"' },
+    ]);
+    await h.settle();
+    // In a browser an exception out of a timer callback is reported and the
+    // timer keeps running; here it would propagate into the test, so it is
+    // contained deliberately. Once the fix is in, nothing is thrown at all.
+    try {
+      await h.poll();
+    } catch {
+      /* the transport threw, which is the case under test */
+    }
+    expect(h.requests()).toBe(2);
+
+    await h.poll();
+    expect(h.requests(), 'a transport that threw held the single-flight latch shut').toBe(3);
+    expect(h.word()).toBe('LIVE');
   });
 
   it('stops while hidden and refetches the moment it is shown again', async () => {
