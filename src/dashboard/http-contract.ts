@@ -25,6 +25,7 @@
  */
 
 import { canonicalJson, type PublicSnapshot } from './public-view.js';
+import type { DashboardAssetMap } from './ui-assets.js';
 
 /* ── the fixed surface ─────────────────────────────────────────────────────── */
 
@@ -84,6 +85,26 @@ export const CONSTANT_HEADERS: Readonly<Record<string, string>> = Object.freeze(
 
 /** The media type of every body this service produces. */
 export const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
+
+/**
+ * The policy a SERVED asset carries. Refusals keep `CONSTANT_HEADERS`.
+ *
+ * Still `default-src 'none'`: six `'self'` grants for the six things a
+ * same-origin application actually loads, and three further lock-downs. There
+ * is deliberately no `'unsafe-inline'`, which is not a detail — it is what
+ * makes `index.html` carry no inline script, no `<style>` and no `style=`
+ * attribute, and it is the difference between a policy and a decoration.
+ *
+ * `worker-src` is what governs registering the service worker; `manifest-src`
+ * governs `<link rel="manifest">`; `connect-src` governs the `fetch` to
+ * `/api/snapshot`. Each is present because something in this build needs it,
+ * and nothing else is.
+ */
+export const UI_CONTENT_SECURITY_POLICY =
+  "default-src 'none'; " +
+  "script-src 'self'; style-src 'self'; img-src 'self'; " +
+  "connect-src 'self'; manifest-src 'self'; worker-src 'self'; " +
+  "base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /* ── refusals ──────────────────────────────────────────────────────────────── */
 
@@ -373,6 +394,7 @@ export function respondToDashboardRequest(
   request: DashboardRequestFacts,
   allowedHosts: readonly string[],
   snapshot: () => PublicSnapshot,
+  assets: DashboardAssetMap = new Map(),
 ): DashboardHttpResponse {
   // ── 1. the Host ──────────────────────────────────────────────────────────
   //
@@ -389,7 +411,27 @@ export function respondToDashboardRequest(
   // ── 2. the route ─────────────────────────────────────────────────────────
   const path = pathOf(request.target);
   if (path === null) return refuse(400, 'BAD_REQUEST');
-  if (path !== SNAPSHOT_PATH) return refuse(404, 'NOT_FOUND');
+
+  // The API is decided BEFORE the asset map is consulted and never passes
+  // through it. That ordering is what stops an asset table ever shadowing
+  // the one route this service existed for before it had a UI.
+  if (path !== SNAPSHOT_PATH) {
+    const asset = assets.get(path);
+    if (asset === undefined) return refuse(404, 'NOT_FOUND');
+    if (request.method !== SNAPSHOT_METHOD) {
+      return refuse(405, 'METHOD_NOT_ALLOWED', { Allow: SNAPSHOT_METHOD });
+    }
+    return Object.freeze({
+      status: 200,
+      headers: Object.freeze({
+        ...CONSTANT_HEADERS,
+        'Content-Security-Policy': UI_CONTENT_SECURITY_POLICY,
+        'Content-Type': asset.contentType,
+        'Content-Length': String(bodyByteLength(asset.bytes)),
+      }),
+      body: asset.bytes,
+    });
+  }
 
   // ── 3. the method ────────────────────────────────────────────────────────
   //
