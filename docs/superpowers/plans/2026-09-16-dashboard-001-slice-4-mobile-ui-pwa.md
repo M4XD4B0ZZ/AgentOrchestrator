@@ -514,7 +514,7 @@ git commit -m "feat(dashboard): a response may carry bytes, because a PNG is not
 
 **Interfaces:**
 - Consumes: `DashboardAssetMap` (Task 1), `bodyByteLength` (Task 2).
-- Produces: `respondToDashboardRequest(request, allowedHosts, snapshot, assets)` — a **fourth** parameter; `UI_ASSET_HEADERS: Readonly<Record<string,string>>`.
+- Produces: `respondToDashboardRequest(request, allowedHosts, snapshot, assets)` — a **fourth** parameter; `UI_CONTENT_SECURITY_POLICY: string`.
 
 **Decision order, unchanged in shape:** Host → origin-form → `/api/snapshot` → assets → `404`. The API route is decided **before** the asset map is consulted and never passes through it.
 
