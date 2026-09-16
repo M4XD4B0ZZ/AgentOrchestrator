@@ -6,7 +6,10 @@
  *
  * Colour is never the only status signal: every #status-word state and the
  * .needs-you card carry a word in the markup (LIVE, STALE, OFFLINE, REFUSED,
- * NEEDS YOU). The rules here decorate that text; they do not replace it.
+ * UNREADABLE, NEEDS YOU). The rules here decorate that text; they do not
+ * replace it. UNREADABLE deliberately has no rule of its own — it takes the
+ * neutral default, and the error card app.js writes into #content is what
+ * carries the alarm.
  */
 
 :root {
@@ -83,6 +86,35 @@ body {
 #status-word[data-state="REFUSED"] {
   color: var(--offline);
   border-color: var(--offline);
+}
+
+/* Anchors. The drill-down rows and the detail view's back control are links,
+ * and this sheet carried no rule for them at all — an unstyled link is
+ * browser-blue and underlined, and its visited colour on this ground is close
+ * to unreadable. */
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A whole row is the link, and its text is body text — only the affordance at
+ * the end says "open". Link colour across the row would make it harder to
+ * read, not easier to use. */
+a.project {
+  color: inherit;
+}
+
+/* The back control is a tap target before it is a label: an installed PWA runs
+ * standalone and has no browser Back button to fall back on. */
+a.badge {
+  color: var(--accent);
+  border-color: var(--accent);
+  padding: 8px 14px;
 }
 
 .card {

@@ -1,13 +1,19 @@
 /**
  * DASHBOARD-001 slice 4 — the AO Manager page, view model half.
  *
- * Two halves, deliberately separated. Everything in this file is PURE: a value
- * in, a string out, no DOM, no network and no clock. That is not an
- * abstraction for its own sake — this repository has seven dependencies and no
- * DOM in its test runner, so a view model that renders to a STRING is the whole
- * difference between a UI that is pinned and one that is hoped for. The polling
- * loop and the DOM glue land in a later task of this slice and will sit below
- * this namespace; rendering is then a single `innerHTML` assignment.
+ * Two halves, deliberately separated, and the separation is a line in this
+ * file: everything ABOVE `── the network half ──` is PURE — a value in, a
+ * string out, no DOM, no network and no clock. That is not an abstraction for
+ * its own sake: this repository has seven dependencies and no DOM in its test
+ * runner, so a view model that renders to a STRING is the whole difference
+ * between a UI that is pinned and one that is hoped for.
+ *
+ * Below that line sit the poller and the DOM glue. The poller takes its
+ * transport, its clock and its callback as arguments — not to slip past the
+ * wiring, but because every property worth pinning about it is a property of a
+ * status code and of TIME, and none of those needs a browser. The glue is the
+ * only code here that touches `document`, it re-decides nothing the half above
+ * has already decided, and rendering is one `innerHTML` assignment.
  *
  * The page never asserts anything the snapshot does not carry. Three rules do
  * most of that work, and each has a test that fails without it:
@@ -82,8 +88,12 @@
     return typeof key === 'string' && Object.prototype.hasOwnProperty.call(table, key);
   }
 
+  function isArray(value) {
+    return Object.prototype.toString.call(value) === '[object Array]';
+  }
+
   function items(value) {
-    return Object.prototype.toString.call(value) === '[object Array]' ? value : [];
+    return isArray(value) ? value : [];
   }
 
   /* ── the lease, and what it does not prove ──────────────────────────────── */
@@ -709,6 +719,354 @@
     return renderLanding(snapshot, freshness);
   }
 
+  /* ── the network half ───────────────────────────────────────────────────── */
+
+  var SNAPSHOT_PATH = '/api/snapshot';
+  var POLL_MS = 10000;
+
+  /**
+   * Whether an answer is shaped like the public snapshot at all.
+   *
+   * Structure, and deliberately nothing else. Every question about what a
+   * reading MEANS is answered above and is not re-asked here; this asks only
+   * whether the six members the contract declares are present and of the kind
+   * the renderer walks. That is what stands between a body that is not a
+   * snapshot and a page rendering it as calm news — an empty object renders as
+   * "Repositories could not be listed", which is a sentence about AO and would
+   * be a lie about a proxy error page.
+   *
+   * A floor, not a schema. A newer Manager may widen the contract with members
+   * this build has never heard of, and refusing those would turn a compatible
+   * upgrade into a dead screen. What the floor does refuse is `null`, a string,
+   * an array, an error document and a redirect body.
+   */
+  function isSnapshotShaped(value) {
+    if (value === null || typeof value !== 'object') return false;
+    if (typeof value.observedAt !== 'string') return false;
+    if (typeof value.revision !== 'string') return false;
+    if (value.registry === null || typeof value.registry !== 'object') return false;
+    return isArray(value.repositories) && isArray(value.needsOperator) && isArray(value.notes);
+  }
+
+  /**
+   * The network state machine, with its clock and its transport injected.
+   *
+   * Injected because every property worth pinning here is about TIME and about
+   * a status code: that a 304 resets the freshness clock, that the conditional
+   * header is the ETag verbatim, that a refusal is not staleness, that an
+   * unreadable answer is neither, and that the last good snapshot survives a
+   * failure to reach the Manager. None of those needs a browser, and a test
+   * that needed one would not exist in this repository.
+   *
+   * One invariant holds the whole thing together: what it publishes always
+   * describes the outcome of the most recent COMPLETED attempt, plus whatever
+   * snapshot is still held. No outcome is sticky — a refusal and an unreadable
+   * answer are both cleared by the next attempt that completes — so neither can
+   * outlive the observation that produced it.
+   */
+  function createPoller(options) {
+    var fetchImpl = options.fetch;
+    var now = options.now;
+    var onState = options.onState;
+
+    var lastGoodAtMs = null;  // when the Manager last answered, by this clock
+    var heldTag = null;       // the ETag field value, verbatim, quotes included
+    var heldSnapshot = null;  // page memory only — never written anywhere
+    var refusedWith = null;   // the status of an answer that declined to serve
+    var unreadableWhy = null; // why the last answer was not usable as a reading
+    var inFlight = false;     // a request is out; the timer must not start one
+
+    function publish() {
+      var freshness;
+      // The two states the clock cannot express come first, because both are
+      // facts about an answer that ARRIVED and neither is a statement about
+      // age. Collapsing either into staleness is how "AO is misconfigured"
+      // becomes "your phone has bad signal".
+      if (unreadableWhy !== null) freshness = 'UNREADABLE';
+      else if (refusedWith !== null) freshness = 'REFUSED';
+      else freshness = classifyFreshness(lastGoodAtMs, now());
+      onState({
+        freshness: freshness,
+        snapshot: heldSnapshot,
+        lastGoodAtMs: lastGoodAtMs,
+        nowMs: now(),
+        refusal: refusedWith,
+        unreadable: unreadableWhy
+      });
+    }
+
+    function answered() {
+      refusedWith = null;
+      unreadableWhy = null;
+    }
+
+    /**
+     * An answer arrived and is not a snapshot. The held one is DROPPED.
+     *
+     * Dropped rather than kept, and that is the decision this state exists to
+     * make. Keeping it would put old task state back on screen the moment the
+     * held tag was answered 304 — a success, over data this page has already
+     * declared unreadable. Clearing the tag with it means the next request is
+     * unconditional, so recovery is one poll away.
+     *
+     * The contact clock goes too. It records when this page last obtained a
+     * READING, and a page holding none cannot report itself live on the
+     * strength of an answer it has just thrown away.
+     */
+    function unreadable(why) {
+      heldSnapshot = null;
+      heldTag = null;
+      lastGoodAtMs = null;
+      refusedWith = null;
+      unreadableWhy = why;
+      publish();
+    }
+
+    function accept(body, tag) {
+      if (!isSnapshotShaped(body)) {
+        unreadable('The answer was not shaped like a snapshot.');
+        return;
+      }
+      heldSnapshot = body;
+      heldTag = typeof tag === 'string' ? tag : null;
+      lastGoodAtMs = now();
+      answered();
+      publish();
+    }
+
+    function receive(response) {
+      if (response.status === 304) {
+        if (heldSnapshot === null) {
+          // A 304 answers a CONDITIONAL request, and one is only ever sent
+          // while a snapshot is held. Counting this would mark the page live
+          // with nothing to show for it.
+          unreadable('The Manager answered 304 with nothing held to show for it.');
+          return undefined;
+        }
+        // A 304 PROVES the Manager answered. Not counting it would drift an
+        // idle, healthy machine into OFFLINE while it answered every poll.
+        lastGoodAtMs = now();
+        answered();
+        publish();
+        return undefined;
+      }
+      if (response.status === 200) {
+        var tag = response.headers.get('ETag');
+        // Both outcomes of `json()` are handled HERE. A rejection raised inside
+        // this handler cannot reach the rejection handler of the `.then` that
+        // called it, so passing it to the transport handler below would leave
+        // an unparseable body unhandled and the previous render on screen.
+        return response.json().then(
+          function (body) { accept(body, tag); },
+          function () { unreadable('The answer was not readable JSON.'); }
+        );
+      }
+      // Answered, and declined. A configuration fault, not a slow network, and
+      // the code is carried out so the page can name it.
+      refusedWith = String(response.status);
+      unreadableWhy = null;
+      publish();
+      return undefined;
+    }
+
+    function release() {
+      inFlight = false;
+    }
+
+    function tick() {
+      // Single-flight. The timer does not wait for the previous request, so a
+      // Manager that takes longer than a poll interval to answer would collect
+      // one request per tick — and when those finally land out of order, the
+      // OLDER answer arrives last, moves the freshness clock backwards and
+      // puts an older snapshot on screen than the one already rendered.
+      if (inFlight) return Promise.resolve(undefined);
+      inFlight = true;
+
+      var headers = {};
+      // Verbatim. `W/"r1"`, never `r1`: the contract compares opaque strings
+      // including the quotes, so the bare revision matches nothing, forever.
+      if (heldTag !== null) headers['If-None-Match'] = heldTag;
+
+      // `no-store` because the conditional request is ours to make. A 200 the
+      // browser answered out of its own store would reset the freshness clock
+      // without the Manager having said anything at all.
+      return fetchImpl(SNAPSHOT_PATH, { headers: headers, cache: 'no-store' }).then(
+        receive,
+        function () {
+          // Never reached the Manager. The held snapshot stays on screen and
+          // the clock is NOT reset, so the renderer marks it stale or offline.
+          answered();
+          publish();
+          return undefined;
+        }
+      // Released on BOTH outcomes, including one thrown by a caller's own
+      // `onState`. A release that only ran on success would wedge the poller
+      // shut for the life of the page the first time anything threw.
+      ).then(release, release);
+    }
+
+    return { tick: tick, republish: publish };
+  }
+
+  /* ── the DOM half ───────────────────────────────────────────────────────── */
+
+  /**
+   * The cold launch: no answer has arrived in this session.
+   *
+   * Its own view rather than `renderRoute(hash, null, …)`, because that would
+   * print the PROJECTS heading and a sentence about the registry — and a page
+   * that has had no answer has read no registry to report on either way.
+   */
+  function noDataView() {
+    return '<section class="card"><p><strong>AO status unavailable</strong></p>' +
+      '<p>No live data received in this session.</p></section>';
+  }
+
+  /**
+   * The Manager answered, and the answer is not a reading this page can show.
+   *
+   * Distinct from the cold launch (nothing was ever received) and from a
+   * refusal (an answer that named its own status), because an operator acts on
+   * the three differently. It reuses `.needs-you` rather than adding a colour:
+   * the word is the signal, as it is for every other state on this page.
+   */
+  function unreadableView(why) {
+    return '<section class="card needs-you">' +
+      '<p><strong>AO status unreadable</strong></p>' +
+      '<p>The Manager answered, but this page could not read the answer. ' +
+      'Nothing on this screen is current AO state.</p>' +
+      '<p class="note">' + escapeHtml(why) + '</p></section>';
+  }
+
+  /**
+   * How long ago, by the page's own clock.
+   *
+   * Separate from `recordedAge` on purpose. That one measures a record against
+   * the observation and is frozen by construction; this one measures THIS PAGE
+   * against the Manager and must keep advancing, because it is the number that
+   * makes staleness legible.
+   */
+  function sinceWording(elapsedMs) {
+    if (elapsedMs < 1000) return 'just now';
+    var seconds = Math.floor(elapsedMs / 1000);
+    if (seconds < 60) return seconds + ' s ago';
+    var minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + ' min ago';
+    return Math.floor(minutes / 60) + ' h ago';
+  }
+
+  /** The line under the bar: what this page last heard, and when. */
+  function contactLine(state, freshness) {
+    if (freshness === 'REFUSED') {
+      return 'The Manager refused this request — HTTP ' + state.refusal +
+        '. No reading was taken.';
+    }
+    if (freshness === 'UNREADABLE') return 'The last answer could not be read.';
+    if (state.lastGoodAtMs === null || state.lastGoodAtMs === undefined) {
+      // "Usable", not "no answer": an answer that could not be read also
+      // leaves this page with nothing, and saying none arrived would be false.
+      return 'No usable answer yet in this session.';
+    }
+    return 'Last answer ' + sinceWording(state.nowMs - state.lastGoodAtMs) + '.';
+  }
+
+  /**
+   * The glue: three elements, one timer, and no opinion of its own.
+   *
+   * It decides nothing the view model has already decided. It does not know
+   * what a lease, a declaration or a state kind means, it never compares a
+   * reading against a name, and the only branch it takes on content is whether
+   * there is a snapshot to render at all.
+   */
+  function install() {
+    var content = document.getElementById('content');
+    var word = document.getElementById('status-word');
+    var age = document.getElementById('status-age');
+    if (content === null || word === null || age === null) return null;
+
+    function paint(state) {
+      var freshness = state.freshness;
+      var html;
+      if (freshness === 'UNREADABLE') {
+        html = unreadableView(state.unreadable);
+      } else if (state.snapshot === null || state.snapshot === undefined) {
+        html = noDataView();
+      } else {
+        try {
+          html = renderRoute(location.hash, state.snapshot, freshness);
+        } catch (error) {
+          // A body whose SHAPE passed the floor and whose contents the view
+          // model refuses — a null element in `repositories[]`, say. Letting
+          // this escape would leave the previous render exactly where it was:
+          // old task state, presented as current, which is the one outcome
+          // this screen may never produce. The status word moves with it,
+          // because an error card under a green LIVE badge is the same lie in
+          // a different font.
+          freshness = 'UNREADABLE';
+          html = unreadableView('The answer could not be rendered — ' + String(error));
+        }
+      }
+      // Assigned, never appended: the previous render is gone in every branch,
+      // including both error ones.
+      word.textContent = freshness;
+      word.setAttribute('data-state', freshness);
+      age.textContent = contactLine(state, freshness);
+      content.innerHTML = html;
+    }
+
+    var poller = createPoller({
+      fetch: function (url, init) { return fetch(url, init); },
+      now: function () { return Date.now(); },
+      onState: paint
+    });
+
+    var timer = null;
+    function start() {
+      if (timer === null) {
+        timer = setInterval(function () { void poller.tick(); }, POLL_MS);
+      }
+    }
+    function stop() {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+    function resume() {
+      void poller.tick();
+      start();
+    }
+
+    document.addEventListener('visibilitychange', function () {
+      // Refetched on becoming visible rather than at the next ten-second
+      // boundary: a page that comes back showing half-minute-old state is what
+      // the whole freshness apparatus exists to prevent.
+      if (document.visibilityState === 'visible') resume();
+      else stop();
+    });
+
+    // A route change is LOCAL, so it re-renders from the snapshot already held
+    // instead of going to the network. Fetching for it would leave a tap on a
+    // project showing the landing screen until a request answered — and on a
+    // connection that hangs open, forever.
+    window.addEventListener('hashchange', function () { poller.republish(); });
+
+    // Paint before the first request, so the page is never blank and never
+    // leaves the shell's pre-script placeholder up after the script has run.
+    // The hash is read here as well as on change, so a relaunch at
+    // `#/repo/<key>` opens on the detail view rather than the landing screen.
+    poller.republish();
+    if (document.visibilityState !== 'hidden') resume();
+
+    // Absent on an insecure origin. Unguarded, this throws and the page is blank.
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(function () {
+        /* no worker: the UI is network-only, which is reduced and not broken */
+      });
+    }
+    return poller;
+  }
+
   global.AO = {
     classifyFreshness: classifyFreshness,
     escapeHtml: escapeHtml,
@@ -719,6 +1077,12 @@
     recordedAge: recordedAge,
     renderLanding: renderLanding,
     renderDetail: renderDetail,
-    renderRoute: renderRoute
+    renderRoute: renderRoute,
+    createPoller: createPoller
   };
+
+  // What makes these bytes a page rather than a library. Guarded so the same
+  // file can be loaded by a test runner that has no document — which is how
+  // every case that measures this file reaches it.
+  if (typeof document !== 'undefined' && document.getElementById) install();
 })(typeof globalThis !== 'undefined' ? globalThis : this);

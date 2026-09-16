@@ -380,7 +380,12 @@ describe('the authored shell obeys the policy that serves it', () => {
   });
 
   it('names no vendor and no hostname this build cannot know', () => {
-    for (const name of ['index.html', 'app.css', 'manifest.webmanifest']) {
+    // Every authored text asset, including the two scripts. `app.js` is the
+    // largest file in the UI and the only one that names a URL at all, so it is
+    // exactly where a hostname gets hard-coded while someone is debugging
+    // against a machine of their own; leaving it out of this sweep put the
+    // guard everywhere except the place that needed it.
+    for (const name of ['index.html', 'app.css', 'app.js', 'manifest.webmanifest', 'sw.js']) {
       const text = read(name).toLowerCase();
       for (const forbidden of ['tailscale', 'ts.net', 'localhost', '0.0.0.0', '100.']) {
         expect(text, `${name} names ${forbidden}`).not.toContain(forbidden);

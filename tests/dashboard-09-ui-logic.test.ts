@@ -12,7 +12,7 @@ import type {
 } from '../src/dashboard/public-view.js';
 
 /**
- * The ten names `app.js` promises on `globalThis.AO`.
+ * The eleven names `app.js` promises on `globalThis.AO`.
  *
  * Spelled as a literal union rather than `Record<string, …>` for two reasons,
  * both of which this repository's compiler settings force. `Record<string, …>`
@@ -30,6 +30,7 @@ import type {
 type AoExport =
   | 'classifyFreshness'
   | 'completionLine'
+  | 'createPoller'
   | 'escapeHtml'
   | 'leaseWording'
   | 'likelyActiveTasks'
@@ -468,6 +469,565 @@ describe('every reading-note code has a written sentence', () => {
         'A reading could not be completed',
       );
       expect(html, `${code} is not rendered at all`).toContain(code);
+    }
+  });
+});
+
+/* ── the glue: the network half, the clock, and the DOM ─────────────────────
+ *
+ * Everything below drives the SHIPPED bytes of `app.js` — the same file the
+ * asset manifest serves — either through `createPoller`, whose transport and
+ * clock are constructor arguments, or through the whole page mounted against a
+ * hand-written document. Neither is a seam past the wiring: `install()` is the
+ * production entry point and it is what runs here, and the arguments
+ * `createPoller` takes are the shape production passes it.
+ */
+
+describe('the poller treats a 304 as a successful refresh', () => {
+  function pollerWith(responses: { status: number; etag?: string; body?: unknown }[]) {
+    let call = 0;
+    let clock = 1_000_000;
+    const seen: string[] = [];
+    const sentHeaders: (string | undefined)[] = [];
+    const poller = AO['createPoller']({
+      fetch: (_url: string, init: { headers?: Record<string, string> }) => {
+        sentHeaders.push(init?.headers?.['If-None-Match']);
+        const r = responses[Math.min(call++, responses.length - 1)]!;
+        return Promise.resolve({
+          status: r.status,
+          ok: r.status >= 200 && r.status < 300,
+          headers: { get: (n: string) => (n.toLowerCase() === 'etag' ? (r.etag ?? null) : null) },
+          json: () => Promise.resolve(r.body ?? {}),
+        });
+      },
+      now: () => clock,
+      onState: (s: { freshness: string }) => seen.push(s.freshness),
+    } as never) as { tick: () => Promise<void> };
+    return { poller, seen, sentHeaders, advance: (ms: number) => (clock += ms) };
+  }
+
+  it('resets the clock on a 304, so an idle machine never drifts offline', () => {
+    // The defect this catches: counting only 200 as success makes a perfectly
+    // healthy, unchanging machine march LIVE -> STALE -> OFFLINE while the
+    // Manager answers every single request.
+    const h = pollerWith([
+      { status: 200, etag: 'W/"r1"', body: { revision: 'r1', observedAt: '2026-09-16T10:00:00.000Z', registry: { reading: 'REGISTERED' }, repositories: [], needsOperator: [], notes: [] } },
+      { status: 304, etag: 'W/"r1"' },
+    ]);
+    return h.poller.tick().then(() => {
+      h.advance(30_000);
+      return h.poller.tick().then(() => {
+        expect(h.seen[h.seen.length - 1]).toBe('LIVE');
+      });
+    });
+  });
+
+  it('echoes the ETag header verbatim, never the bare revision', () => {
+    // The contract compares opaque tag strings INCLUDING their quotes. A client
+    // sending `r1` is answered 200 forever and the whole 304 path is dead code.
+    const h = pollerWith([
+      { status: 200, etag: 'W/"r1"', body: { revision: 'r1', observedAt: '2026-09-16T10:00:00.000Z', registry: { reading: 'REGISTERED' }, repositories: [], needsOperator: [], notes: [] } },
+      { status: 304, etag: 'W/"r1"' },
+    ]);
+    return h.poller.tick().then(() =>
+      h.poller.tick().then(() => {
+        expect(h.sentHeaders[0]).toBeUndefined();
+        expect(h.sentHeaders[1]).toBe('W/"r1"');
+      }),
+    );
+  });
+
+  it('reports a refusal as a refusal, not as staleness', () => {
+    const h = pollerWith([{ status: 421 }]);
+    return h.poller.tick().then(() => {
+      expect(h.seen[h.seen.length - 1]).toBe('REFUSED');
+    });
+  });
+
+  it('keeps the last good snapshot on screen when the network fails', () => {
+    const good = { revision: 'r1', observedAt: '2026-09-16T10:00:00.000Z', registry: { reading: 'REGISTERED' }, repositories: [], needsOperator: [], notes: [] };
+    let call = 0;
+    let clock = 0;
+    let lastRendered: unknown = null;
+    const poller = AO['createPoller']({
+      fetch: () => (call++ === 0
+        ? Promise.resolve({ status: 200, ok: true, headers: { get: () => 'W/"r1"' }, json: () => Promise.resolve(good) })
+        : Promise.reject(new Error('offline'))),
+      now: () => clock,
+      onState: (s: { snapshot: unknown }) => (lastRendered = s.snapshot),
+    } as never) as { tick: () => Promise<void> };
+    return poller.tick().then(() => {
+      clock += 120_000;
+      return poller.tick().then(() => {
+        // Kept, not cleared — and Task 6's renderer is what marks it stale.
+        expect(lastRendered).toEqual(good);
+      });
+    });
+  });
+});
+
+describe('the page survives having no service worker', () => {
+  it('registers nothing and still works when navigator.serviceWorker is absent', () => {
+    // On an insecure origin `navigator.serviceWorker` is simply absent, and an
+    // unguarded register() throws and takes the whole UI down — turning a
+    // missing offline feature into a blank screen.
+    const source = readFileSync(join(process.cwd(), 'src', 'dashboard', 'ui', 'app.js'), 'utf8');
+    expect(source).toContain("'serviceWorker' in navigator");
+    const guardIndex = source.indexOf("'serviceWorker' in navigator");
+    const registerIndex = source.indexOf('serviceWorker.register');
+    expect(registerIndex).toBeGreaterThan(guardIndex);
+  });
+});
+
+/* ── the whole page, mounted ─────────────────────────────────────────────────
+ *
+ * `install()` is not called from here: the file installs itself on load, which
+ * is what the browser does, so the mount below exercises the production entry
+ * point rather than a test-only door into it. The document is hand-written
+ * because this repository has no DOM and adds no dependency for one; it
+ * supplies exactly the members `install()` touches and nothing else.
+ */
+
+interface Answer {
+  readonly status: number;
+  readonly etag?: string;
+  readonly body?: unknown;
+  /** `json()` rejects — a truncated body, or one that is not JSON at all. */
+  readonly unparseable?: true;
+  /** the request never settles, as on a connection that hangs open */
+  readonly hangs?: true;
+  /** the request rejects, as it does with no network at all */
+  readonly fails?: true;
+}
+
+interface FakeElement {
+  innerHTML: string;
+  textContent: string;
+  readonly attributes: Record<string, string>;
+  setAttribute(name: string, value: string): void;
+}
+
+function element(): FakeElement {
+  const attributes: Record<string, string> = {};
+  return {
+    innerHTML: '',
+    textContent: '',
+    attributes,
+    setAttribute: (name: string, value: string) => {
+      attributes[name] = value;
+    },
+  };
+}
+
+/** Let every pending microtask run. Timers run after them, so one is enough. */
+const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+function mountPage(
+  answers: readonly Answer[],
+  options: { serviceWorker?: boolean; hash?: string } = {},
+) {
+  const source = readFileSync(join(process.cwd(), 'src', 'dashboard', 'ui', 'app.js'), 'utf8');
+  const content = element();
+  const word = element();
+  const age = element();
+  const elements: Record<string, FakeElement> = {
+    content,
+    'status-word': word,
+    'status-age': age,
+  };
+  const listeners: Record<string, ((...a: unknown[]) => void)[]> = {};
+  const sent: (string | undefined)[] = [];
+  const cacheModes: (string | undefined)[] = [];
+  const registered: string[] = [];
+  let clock = 1_700_000_000_000;
+  let call = 0;
+  let ticker: (() => void) | null = null;
+  let tickerMs: number | null = null;
+
+  const sandbox = {
+    window: {
+      addEventListener: (n: string, f: (...a: unknown[]) => void) => {
+        (listeners[n] ??= []).push(f);
+      },
+    },
+    document: {
+      addEventListener: (n: string, f: (...a: unknown[]) => void) => {
+        (listeners[n] ??= []).push(f);
+      },
+      getElementById: (id: string) => elements[id] ?? null,
+      visibilityState: 'visible',
+    },
+    navigator:
+      options.serviceWorker === true
+        ? {
+            serviceWorker: {
+              register: (url: string) => {
+                registered.push(url);
+                return Promise.resolve({});
+              },
+            },
+          }
+        : {},
+    location: { hash: options.hash ?? '' },
+    fetch: (_url: string, init: { headers?: Record<string, string>; cache?: string }) => {
+      sent.push(init?.headers?.['If-None-Match']);
+      cacheModes.push(init?.cache);
+      const answer = answers[call++];
+      if (answer === undefined) {
+        return Promise.reject(new Error('no answer was queued for this request'));
+      }
+      if (answer.hangs === true) return new Promise(() => undefined);
+      if (answer.fails === true) return Promise.reject(new Error('offline'));
+      return Promise.resolve({
+        status: answer.status,
+        ok: answer.status >= 200 && answer.status < 300,
+        headers: { get: (n: string) => (n.toLowerCase() === 'etag' ? answer.etag ?? null : null) },
+        json: () =>
+          answer.unparseable === true
+            ? Promise.reject(new SyntaxError('Unexpected end of JSON input'))
+            : Promise.resolve(answer.body),
+      });
+    },
+    setInterval: (f: () => void, ms: number) => {
+      ticker = f;
+      tickerMs = ms;
+      return 7;
+    },
+    clearInterval: () => {
+      ticker = null;
+      tickerMs = null;
+    },
+    Date: { now: () => clock, parse: Date.parse },
+    console,
+  };
+  (sandbox as { globalThis?: unknown }).globalThis = sandbox;
+  runInContext(source, createContext(sandbox), { filename: 'app.js' });
+
+  const fire = (name: string): void => {
+    for (const listener of listeners[name] ?? []) listener();
+  };
+
+  return {
+    content: (): string => content.innerHTML,
+    word: (): string => word.textContent,
+    stateAttribute: (): string => word.attributes['data-state'] ?? '',
+    age: (): string => age.textContent,
+    sent,
+    cacheModes,
+    registered,
+    requests: (): number => call,
+    pollMs: (): number | null => tickerMs,
+    polling: (): boolean => ticker !== null,
+    settle: flush,
+    advance: (ms: number): void => {
+      clock += ms;
+    },
+    poll: (): Promise<void> => {
+      if (ticker === null) throw new Error('the page is not polling, so nothing can be driven');
+      ticker();
+      return flush();
+    },
+    navigate: (hash: string): Promise<void> => {
+      sandbox.location.hash = hash;
+      fire('hashchange');
+      return flush();
+    },
+    hide: (): Promise<void> => {
+      sandbox.document.visibilityState = 'hidden';
+      fire('visibilitychange');
+      return flush();
+    },
+    show: (): Promise<void> => {
+      sandbox.document.visibilityState = 'visible';
+      fire('visibilitychange');
+      return flush();
+    },
+  };
+}
+
+/** A snapshot typed as the real contract, so this fixture cannot drift from it. */
+const LIVE_SNAPSHOT: PublicSnapshot = {
+  observedAt: '2026-09-16T10:08:00.000Z',
+  revision: 'r1',
+  registry: { reading: 'REGISTERED', entryCount: 1, maxConcurrentRepositories: 3 },
+  needsOperator: [],
+  notes: [],
+  repositories: [
+    {
+      repositoryKey: 'k1',
+      profile: { reading: 'DECLARED', repositoryId: 'ZERA', defaultBranch: 'main', maxReviewRounds: 2 },
+      declaredTasks: { reading: 'DISCOVERED', count: 2 },
+      runtimeScan: { reading: 'READ', stateFileCount: 1, truncated: false },
+      lease: { reading: 'FREE' },
+      tasks: [
+        {
+          taskId: 'T-1',
+          declaration: 'OPEN',
+          runtime: {
+            reading: 'LOADED',
+            state: 'REVIEWING',
+            stateKind: 'REGULAR',
+            stateEnteredAt: '2026-09-16T10:00:00.000Z',
+            reviewRound: 1,
+            reviewBudget: 2,
+            blockedAgent: null,
+            reportedResetAt: null,
+            workBranch: 'ao/task/T-1',
+            recordedCurrentCommit: null,
+            recordedPhaseAgent: null,
+          },
+          operational: 'ACTIONABLE',
+          action: null,
+          verification: { reading: 'NONE' },
+          delivery: { reading: 'NONE' },
+        },
+      ],
+    },
+  ],
+};
+
+/**
+ * Two malformed answers, failing in structurally different places.
+ *
+ * `NOT_SHAPED` is refused before the view model ever sees it. `THROWS_ON_RENDER`
+ * passes any shape check worth writing — it is an object carrying all six
+ * members and `repositories` really is an array — and detonates inside the
+ * renderer on the `null` element. Both must land in the same visible error
+ * state, and handling either one alone leaves the other unhandled.
+ */
+const NOT_SHAPED = { oops: true, repositories: 'not an array' };
+const THROWS_ON_RENDER = { ...LIVE_SNAPSHOT, revision: 'r2', repositories: [null] };
+
+describe('a malformed snapshot is an explicit error state, never old data', () => {
+  for (const [name, malformed] of [
+    ['one the renderer throws on', THROWS_ON_RENDER],
+    ['one that is not shaped like a snapshot at all', NOT_SHAPED],
+  ] as const) {
+    it(`replaces a good render entirely, then gives way to the next good one — ${name}`, async () => {
+      const h = mountPage([
+        { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+        { status: 200, etag: 'W/"bad"', body: malformed },
+        { status: 200, etag: 'W/"r3"', body: LIVE_SNAPSHOT },
+      ]);
+
+      // ── valid -> normal render ──────────────────────────────────────────
+      await h.settle();
+      expect(h.content()).toContain('ZERA');
+      expect(h.content()).toContain('PROJECTS');
+      expect(h.word()).toBe('LIVE');
+
+      // ── invalid -> explicit error view, with NO old content remaining ───
+      await h.poll();
+      // These absence assertions are the point of the test, and they name
+      // something distinctive from the first render rather than a generic
+      // string any page could fail to contain.
+      expect(h.content(), 'the repository name survived a malformed snapshot').not.toContain('ZERA');
+      expect(h.content(), 'the task id survived a malformed snapshot').not.toContain('T-1');
+      expect(h.content(), 'the landing screen survived a malformed snapshot').not.toContain('PROJECTS');
+      // Not blank either: a cleared screen is the other failure mode.
+      expect(h.content().length).toBeGreaterThan(0);
+      expect(h.content()).toContain('AO status unreadable');
+      // And not calm: the badge cannot read LIVE over an error card.
+      expect(h.word()).toBe('UNREADABLE');
+      expect(h.stateAttribute()).toBe('UNREADABLE');
+      // Nor is it the cold-launch copy — this page HAS had contact.
+      expect(h.content()).not.toContain('No live data received in this session');
+
+      // ── valid -> normal render restored ─────────────────────────────────
+      await h.poll();
+      expect(h.content()).toContain('ZERA');
+      expect(h.content()).toContain('T-1');
+      expect(h.content()).not.toContain('AO status unreadable');
+      expect(h.word()).toBe('LIVE');
+    });
+  }
+
+  it('treats an answer whose body is not JSON as unreadable, not as a dead network', async () => {
+    // `response.json()` rejects INSIDE the success handler, so a poller that
+    // only passes a rejection handler to the same `.then` never sees it: the
+    // page keeps the old render and the rejection goes unhandled.
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, etag: 'W/"r2"', unparseable: true },
+    ]);
+    await h.settle();
+    expect(h.content()).toContain('ZERA');
+    await h.poll();
+    expect(h.content()).not.toContain('ZERA');
+    expect(h.content()).toContain('AO status unreadable');
+    expect(h.word()).toBe('UNREADABLE');
+  });
+
+  it('does not let a held tag put the discarded snapshot back on screen', async () => {
+    // The trap: keep the ETag of an answer you refused, and the very next poll
+    // is answered 304 — a success, which re-renders the snapshot the page has
+    // just declared unreadable.
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, etag: 'W/"bad"', body: NOT_SHAPED },
+      { status: 304, etag: 'W/"r1"' },
+    ]);
+    await h.settle();
+    await h.poll();
+    expect(h.sent[2], 'a refused answer left its tag behind').toBeUndefined();
+    await h.poll();
+    expect(h.content()).not.toContain('ZERA');
+  });
+});
+
+describe('the page paints before the first answer, and says what it does not know', () => {
+  it('shows the cold-launch copy rather than a blank screen on a hung connection', async () => {
+    const h = mountPage([{ status: 200, hangs: true }]);
+    await h.settle();
+    expect(h.content()).toContain('AO status unavailable');
+    expect(h.content()).toContain('No live data received in this session.');
+    // renderRoute is never called with a null snapshot: its landing screen
+    // would print the PROJECTS heading, and this page has no projects to
+    // report — it has no reading at all.
+    expect(h.content()).not.toContain('PROJECTS');
+    expect(h.word()).toBe('OFFLINE');
+  });
+
+  it('asks for the snapshot without the browser cache in the way', async () => {
+    const h = mountPage([{ status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT }]);
+    await h.settle();
+    // A cached 200 the browser answered on its own would reset the freshness
+    // clock without the Manager having said anything at all.
+    expect(h.cacheModes[0]).toBe('no-store');
+    expect(h.sent[0]).toBeUndefined();
+  });
+});
+
+describe('what the poller holds, the screen labels', () => {
+  it('keeps the last good data through OFFLINE, frozen, and banners it as not current', async () => {
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, fails: true },
+    ]);
+    await h.settle();
+    expect(h.content()).toContain('recorded 8 min ago');
+
+    h.advance(120_000);
+    await h.poll();
+    expect(h.word()).toBe('OFFLINE');
+    // Still on screen — and still saying EIGHT minutes. Derived ages are
+    // measured against the snapshot's own observation, so they do not keep
+    // advancing on data the screen has already declared out of date.
+    expect(h.content()).toContain('ZERA');
+    expect(h.content()).toContain('recorded 8 min ago');
+    expect(h.content()).not.toContain('recorded 10 min ago');
+    // The banner is what carries the difference, and it comes from the
+    // freshness the glue passes down rather than from a second opinion here.
+    expect(h.content()).toContain('OFFLINE · showing data from the last successful fetch');
+  });
+
+  it('names the status code of a refusal, and does not dress it as staleness', async () => {
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 421 },
+    ]);
+    await h.settle();
+    await h.poll();
+    expect(h.word()).toBe('REFUSED');
+    expect(h.stateAttribute()).toBe('REFUSED');
+    expect(h.age(), 'a refusal that does not name its code is not actionable').toContain('421');
+  });
+});
+
+describe('the polling loop follows the page, not the tab it was opened in', () => {
+  it('polls every ten seconds while visible', async () => {
+    const h = mountPage([{ status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT }]);
+    await h.settle();
+    expect(h.pollMs()).toBe(10_000);
+    expect(h.polling()).toBe(true);
+  });
+
+  it('does not stack requests on a Manager that has stopped answering', async () => {
+    // The interval does not wait for the previous request. Without a guard, a
+    // Manager that takes longer than ten seconds to answer accumulates one
+    // request per tick — and when they finally land out of order, the older
+    // answer arrives last, moves the freshness clock BACKWARDS and puts an
+    // older snapshot on screen than the one already rendered.
+    const h = mountPage([
+      { status: 200, hangs: true },
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+    ]);
+    await h.settle();
+    expect(h.requests()).toBe(1);
+    await h.poll();
+    await h.poll();
+    expect(h.requests(), 'a request was started while one was still in flight').toBe(1);
+  });
+
+  it('stops while hidden and refetches the moment it is shown again', async () => {
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 304, etag: 'W/"r1"' },
+    ]);
+    await h.settle();
+    expect(h.requests()).toBe(1);
+
+    await h.hide();
+    expect(h.polling(), 'a hidden page kept its timer').toBe(false);
+    expect(h.requests()).toBe(1);
+
+    await h.show();
+    // Not on the next ten-second boundary: a page that comes back showing
+    // half-minute-old state with no way to know it is worse than no page.
+    expect(h.requests()).toBe(2);
+    expect(h.polling()).toBe(true);
+    expect(h.word()).toBe('LIVE');
+  });
+});
+
+describe('a drill-down is a local move', () => {
+  it('renders the detail view from the snapshot already held, with no new request', async () => {
+    // The hash route is in-page state. Fetching for it would leave a tap on a
+    // project showing the landing screen until the network answered — and on a
+    // connection that hangs, forever.
+    const h = mountPage([{ status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT }]);
+    await h.settle();
+    expect(h.requests()).toBe(1);
+
+    await h.navigate('#/repo/k1');
+    expect(h.content()).toContain('data-back');
+    expect(h.content()).toContain('ao/task/T-1');
+    expect(h.requests(), 'a local route change went to the network').toBe(1);
+  });
+
+  it('opens straight into the detail view when the page is launched at one', async () => {
+    const h = mountPage([{ status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT }], { hash: '#/repo/k1' });
+    await h.settle();
+    expect(h.content()).toContain('data-back');
+    expect(h.content()).toContain('ao/task/T-1');
+  });
+});
+
+describe('the worker is registered, and its absence is not a failure', () => {
+  it('registers the worker where the browser has one', async () => {
+    const h = mountPage([{ status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT }], { serviceWorker: true });
+    await h.settle();
+    expect(h.registered).toEqual(['/sw.js']);
+  });
+
+  it('renders normally where the browser has none', async () => {
+    const h = mountPage([{ status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT }]);
+    await h.settle();
+    expect(h.registered).toEqual([]);
+    expect(h.content()).toContain('ZERA');
+  });
+});
+
+describe('the last good snapshot lives in page memory and nowhere else', () => {
+  it('names no storage API at all', () => {
+    // A snapshot written to disk outlives the session that fetched it, and the
+    // next launch would render yesterday's AO state as though it were a
+    // reading. The page keeps it in a closure variable instead; this is the
+    // pin, because an added `localStorage.setItem` is a two-word edit.
+    const source = readFileSync(join(process.cwd(), 'src', 'dashboard', 'ui', 'app.js'), 'utf8');
+    for (const api of ['localStorage', 'sessionStorage', 'indexedDB', 'caches']) {
+      expect(source, `app.js names ${api}`).not.toContain(api);
     }
   });
 });
