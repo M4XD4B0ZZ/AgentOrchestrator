@@ -41,16 +41,19 @@ import type { Socket } from 'node:net';
 import { readDashboardSnapshot } from './read-model.js';
 import { toPublicSnapshot, type PublicSnapshot } from './public-view.js';
 import { respondToDashboardRequest, type DashboardHttpResponse } from './http-contract.js';
+import type { DashboardAssetMap } from './ui-assets.js';
 
 /**
  * Neutral server configuration, and the complete list of it.
  *
- * Three values, and every one of them is a property of an HTTP server rather
- * than of any particular way of reaching one. There is no public URL here, no
- * base path, no origin, no scheme, no tunnel, no proxy and no vendor. Nothing
- * in this build reads `process.env` to find any of it either: the values come
- * from the command line, which is the one place an operator can see what they
- * asked for.
+ * Four values now, and every one of them is a property of an HTTP server
+ * rather than of any particular way of reaching one. There is no public URL
+ * here, no base path, no origin, no scheme, no tunnel, no proxy and no vendor.
+ * Nothing in this build reads `process.env` to find any of it either: the
+ * first three come from the command line, which is the one place an operator
+ * can see what they asked for; the fourth comes from the shipped build
+ * itself, which is the one place this build's own UI can be asked what it
+ * contains.
  *
  * `allowedHosts` is the third, and it is the one worth being explicit about
  * because it looks like it could be transport configuration and is not. The
@@ -58,11 +61,21 @@ import { respondToDashboardRequest, type DashboardHttpResponse } from './http-co
  * `Host` against a set of opaque strings; whether one of them happens to name
  * a tunnel, a proxy, a VPN or the machine next door is invisible here and stays
  * invisible.
+ *
+ * `assets` is the fourth, and it is data rather than a seam on purpose: it is
+ * what this server serves, decided by the manifest and read before the socket
+ * opened, not a dependency a caller may substitute for one with more
+ * authority. `DashboardServerSeams` below exists precisely for the value a
+ * test needs to control — the read model — and `assets` is not that; every
+ * caller of this function, test or production, hands it the same map it
+ * loaded, because there is no second, more authoritative source of the UI
+ * this build ships.
  */
 export interface DashboardServerConfig {
   readonly bindHost: string;
   readonly port: number;
   readonly allowedHosts: readonly string[];
+  readonly assets: DashboardAssetMap;
 }
 
 /**
@@ -174,6 +187,7 @@ export function createDashboardServer(
           },
           config.allowedHosts,
           snapshot,
+          config.assets,
         ),
       );
     } catch {

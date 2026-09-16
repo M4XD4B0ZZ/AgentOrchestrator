@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,9 +13,11 @@ import {
 } from '../src/dashboard/ui-assets.js';
 import {
   DASHBOARD_BIND_HOST,
+  allowedHostsFor,
   respondToDashboardRequest,
   type DashboardRequestFacts,
 } from '../src/dashboard/http-contract.js';
+import { startDashboardServer } from '../src/dashboard/http-server.js';
 import type { PublicSnapshot } from '../src/dashboard/public-view.js';
 
 const roots: string[] = [];
@@ -234,5 +237,50 @@ describe('traversal has nowhere to go, and the refusal says which kind', () => {
   it('refuses an unlisted Host before it reveals that any asset exists', () => {
     const answer = ask({ target: '/app.css', hostHeaders: ['evil.example'] });
     expect(answer.status).toBe(421);
+  });
+});
+
+/** A port nothing is using right now. Bound explicitly, never by omission. */
+async function freePort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen({ host: '127.0.0.1', port: 0 }, resolve));
+  const port = (probe.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
+
+describe('a server carries its assets, and a missing one opens no socket', () => {
+  it('serves an asset over a real socket with the right bytes', async () => {
+    // The port is known BEFORE the config is built, so `allowedHosts` can be
+    // the real computed set rather than the empty one a Host header could
+    // never match — without it every request below would be a 421 and this
+    // test would prove nothing about `config.assets`.
+    const port = await freePort();
+    const outcome = await startDashboardServer(
+      {
+        bindHost: DASHBOARD_BIND_HOST,
+        port,
+        allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, []),
+        assets: fakeAssets(),
+      },
+      { snapshot: snapshotStub },
+    );
+    expect(outcome.outcome).toBe('LISTENING');
+    if (outcome.outcome !== 'LISTENING') return;
+    try {
+      expect(outcome.boundPort).toBe(port);
+
+      // The wiring this test exists to prove: `config.assets` reaches a real
+      // socket, not only the pure contract function `respondToDashboardRequest`
+      // is already pinned against. This would fail with `config.assets` left
+      // unwired — the route would 404 against the default empty map instead.
+      const response = await fetch(`http://127.0.0.1:${String(port)}/app.js`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe('text/javascript; charset=utf-8');
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      expect([...bytes]).toEqual([0x00, 0xff, 0x41]);
+    } finally {
+      await outcome.stop();
+    }
   });
 });

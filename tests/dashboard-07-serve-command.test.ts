@@ -53,6 +53,7 @@ import {
   EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_OK,
   EXIT_RUN_REFUSED,
+  EXIT_RUN_UNEXPECTED,
 } from '../src/cli/run-exit-codes.js';
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
@@ -93,6 +94,10 @@ async function serve(
       });
       return Promise.resolve(outcome);
     },
+    // A default that never touches the real filesystem. This suite is about
+    // the verb, not the shipped UI; the asset-refusal case below overrides
+    // this seam itself to exercise the one path that must not reach `start`.
+    loadAssets: () => ({ outcome: 'LOADED', assets: new Map() }),
     ...extra,
   });
 
@@ -322,6 +327,7 @@ describe('every ending is graded, and the grades are total', () => {
       SERVED: EXIT_RUN_OK,
       PORT_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
       ALLOW_HOST_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
+      UI_ASSETS_UNUSABLE: EXIT_RUN_UNEXPECTED,
       BIND_REFUSED: EXIT_RUN_REFUSED,
       BIND_NOT_LOOPBACK: EXIT_RUN_REFUSED,
     });
@@ -369,6 +375,30 @@ describe('every ending is graded, and the grades are total', () => {
     for (const guess of ['https://', 'ts.net', 'tailscale', '100.', '0.0.0.0', 'localhost']) {
       expect(run.out.toLowerCase(), guess).not.toContain(guess);
     }
+  });
+});
+
+/* ── 4b. every asset loads before any socket opens ───────────────────────── */
+
+describe('the shipped user interface must be complete before any socket opens', () => {
+  it('refuses to serve when a UI asset is missing, and binds nothing', async () => {
+    // The positive control is the `start` seam: if it is ever called, the
+    // refusal did not happen before the socket, which is the whole claim.
+    let started = 0;
+    const run = await serve([], listening().outcome, {
+      start: async () => {
+        started += 1;
+        return { outcome: 'BIND_FAILED', errnoCode: 'NOTREACHED' };
+      },
+      loadAssets: () => ({ outcome: 'MISSING', route: '/icon-512.png' }),
+    });
+
+    expect(started).toBe(0);
+    expect(run.exitCode).toBe(DASHBOARD_SERVE_EXIT.UI_ASSETS_UNUSABLE);
+    expect(run.err).toContain('/icon-512.png');
+    // A refusal reaches an operator, so it names the route and not this machine.
+    expect(run.err).not.toMatch(/[A-Za-z]:\\/);
+    expect(run.out).toBe('');
   });
 });
 

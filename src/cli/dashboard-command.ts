@@ -46,6 +46,7 @@ import {
   normaliseHost,
 } from '../dashboard/http-contract.js';
 import { startDashboardServer } from '../dashboard/http-server.js';
+import { loadUiAssets, uiAssetRoot, type UiAssetLoad } from '../dashboard/ui-assets.js';
 import { formatSafeError } from '../core/safe-error.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
@@ -58,18 +59,21 @@ import {
 /* ── outcomes ──────────────────────────────────────────────────────────────── */
 
 /**
- * Every way this command can end. A closed set of five.
+ * Every way this command can end. A closed set of six.
  *
  * Two of them are refusals of the command line, decided before a socket is
- * touched; two are a bind that did not produce the listener that was asked for;
- * one is the service having run and stopped. An exception is not a member —
- * reaching the `catch` below means a defect in this build rather than a state
- * of the machine, and grading it beside these would blur that line.
+ * touched; one is the shipped UI failing to load, also decided before a
+ * socket is touched; two are a bind that did not produce the listener that
+ * was asked for; one is the service having run and stopped. An exception is
+ * not a member — reaching the `catch` below means a defect in this build
+ * rather than a state of the machine, and grading it beside these would blur
+ * that line.
  */
 export const DASHBOARD_SERVE_OUTCOMES = [
   'SERVED',
   'PORT_UNUSABLE',
   'ALLOW_HOST_UNUSABLE',
+  'UI_ASSETS_UNUSABLE',
   'BIND_REFUSED',
   'BIND_NOT_LOOPBACK',
 ] as const;
@@ -96,12 +100,19 @@ export type DashboardServeOutcome = (typeof DASHBOARD_SERVE_OUTCOMES)[number];
  * a refusal rather than as a defect because the operator-visible fact is the
  * same one — no service is listening — and because the alternative is a build
  * that serves AgentOrchestrator's state to an address it did not choose.
+ *
+ * `UI_ASSETS_UNUSABLE` is `EXIT_RUN_UNEXPECTED` and deliberately not `4`. A
+ * refused invocation is one the operator could have typed differently; this one
+ * cannot be. Every asset is fixed by the manifest and shipped by the build, so
+ * a missing one means the artefact is defective — a different port, a different
+ * moment and a different machine all give the same answer.
  */
 export const DASHBOARD_SERVE_EXIT: Readonly<Record<DashboardServeOutcome, CliExitCode>> =
   Object.freeze({
     SERVED: EXIT_RUN_OK,
     PORT_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
     ALLOW_HOST_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
+    UI_ASSETS_UNUSABLE: EXIT_RUN_UNEXPECTED,
     BIND_REFUSED: EXIT_RUN_REFUSED,
     BIND_NOT_LOOPBACK: EXIT_RUN_REFUSED,
   });
@@ -138,6 +149,14 @@ export const DASHBOARD_SERVE_DESCRIPTION =
 /** Injectable dependencies. Production supplies none of them. */
 export interface DashboardCommandSeams {
   readonly start?: typeof startDashboardServer | undefined;
+  /**
+   * Loads the shipped UI. Production reads the real manifest off disk,
+   * beside this module; a test substitutes an outcome to drive the refusal
+   * path without a filesystem fixture. This is a seam and `assets` on
+   * `DashboardServerConfig` is not: this decides WHETHER the build is
+   * usable, before there is a config to build at all.
+   */
+  readonly loadAssets?: (() => UiAssetLoad) | undefined;
   readonly write?: ((text: string) => void) | undefined;
   readonly writeError?: ((text: string) => void) | undefined;
   /**
@@ -325,11 +344,29 @@ export function registerDashboardCommand(
           return;
         }
 
+        // Loaded, and refused if incomplete, BEFORE the socket. All-or-
+        // nothing, and before `start` so a partial UI is never the thing that
+        // ends up listening.
+        const loadAssets =
+          seams.loadAssets ?? ((): UiAssetLoad => loadUiAssets(uiAssetRoot(import.meta.url)));
+        const loaded = loadAssets();
+        if (loaded.outcome === 'MISSING') {
+          // The route, never the path. This sentence reaches an operator.
+          writeError(
+            `agent-loop: refused to serve. The shipped user interface is incomplete — ` +
+              `${loaded.route} is missing or unreadable. This build's assets are fixed, so ` +
+              `nothing was served and no socket was opened.\n`,
+          );
+          process.exitCode = DASHBOARD_SERVE_EXIT.UI_ASSETS_UNUSABLE;
+          return;
+        }
+
         const outcome = await start(
           {
             bindHost: DASHBOARD_BIND_HOST,
             port,
             allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, options.allowHost),
+            assets: loaded.assets,
           },
           {},
         );

@@ -332,6 +332,7 @@ async function serving(
       bindHost: DASHBOARD_BIND_HOST,
       port,
       allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, extraHosts),
+      assets: new Map(),
     },
     { snapshot },
   );
@@ -398,7 +399,7 @@ describe('the bind is the loopback literal, and it is measured', () => {
     // the string that was asked for, and the guard fires. This is the case that
     // proves the readback is capable of failing at all.
     const refused = await startDashboardServer(
-      { bindHost: 'localhost', port, allowedHosts: [] },
+      { bindHost: 'localhost', port, allowedHosts: [], assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(refused.outcome).toBe('BOUND_ELSEWHERE');
@@ -413,7 +414,7 @@ describe('the bind is the loopback literal, and it is measured', () => {
     // the guard had closed anything. Re-binding whatever the guard *reported*
     // is the only form of this proof that cannot pass vacuously.
     const after = await startDashboardServer(
-      { bindHost: refused.boundHost ?? DASHBOARD_BIND_HOST, port, allowedHosts: [] },
+      { bindHost: refused.boundHost ?? DASHBOARD_BIND_HOST, port, allowedHosts: [], assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(after.outcome).toBe('LISTENING');
@@ -428,7 +429,7 @@ describe('the bind is the loopback literal, and it is measured', () => {
     const release = await occupy(port);
     try {
       const outcome = await startDashboardServer(
-        { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: [] },
+        { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: [], assets: new Map() },
         { snapshot: realSnapshotOver(gitFreeRepository()) },
       );
       expect(outcome.outcome).toBe('BIND_FAILED');
@@ -657,7 +658,7 @@ describe('a failure is contained to the request that caused it', () => {
     // silently take over both the status choice and the socket's fate, and
     // nothing about the happy path would change.
     const server = createDashboardServer(
-      { bindHost: DASHBOARD_BIND_HOST, port: 1, allowedHosts: [] },
+      { bindHost: DASHBOARD_BIND_HOST, port: 1, allowedHosts: [], assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(server.listenerCount('clientError')).toBe(0);
@@ -669,7 +670,7 @@ describe('a failure is contained to the request that caused it', () => {
     // hang for as long as a browser kept its socket.
     const port = await freePort();
     const outcome = await startDashboardServer(
-      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, []) },
+      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, []), assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(outcome.outcome).toBe('LISTENING');
@@ -706,7 +707,7 @@ describe('a failure is contained to the request that caused it', () => {
 
     // Proof the listener is really gone rather than merely reported gone.
     const reused = await startDashboardServer(
-      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: [] },
+      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: [], assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(reused.outcome).toBe('LISTENING');
@@ -717,7 +718,7 @@ describe('a failure is contained to the request that caused it', () => {
     // `createDashboardServer` opens nothing. The split exists so a caller can
     // bind and fail; a constructor that listened would make that impossible.
     const server = createDashboardServer(
-      { bindHost: DASHBOARD_BIND_HOST, port: 1, allowedHosts: [] },
+      { bindHost: DASHBOARD_BIND_HOST, port: 1, allowedHosts: [], assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(server.listening).toBe(false);
@@ -751,7 +752,7 @@ describe('serving changes nothing on disk', () => {
     const home = scratch('ao-dash-home-empty-');
     const port = await freePort();
     const outcome = await startDashboardServer(
-      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, []) },
+      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, []), assets: new Map() },
       {
         snapshot: (): PublicSnapshot =>
           toPublicSnapshot(
