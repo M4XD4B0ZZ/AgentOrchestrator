@@ -5,6 +5,11 @@ import { createContext, runInContext } from 'node:vm';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import { READING_NOTE_CODES } from '../src/dashboard/read-model.js';
+import type {
+  PublicRepository,
+  PublicRuntimeScanReading,
+  PublicSnapshot,
+} from '../src/dashboard/public-view.js';
 
 /**
  * The ten names `app.js` promises on `globalThis.AO`.
@@ -221,39 +226,51 @@ describe('a failed reading never renders as calm', () => {
 });
 
 describe('the detail view shows what the landing screen leaves out', () => {
-  const full = {
+  // Typed as the real contract, and deliberately not cast. The brief's draft of
+  // this fixture carried `runtimeScan: { reading: 'SCANNED' }`, which is not a
+  // member of `PublicRuntimeScanReading` — an `as never` at every call site was
+  // what let a shape nothing emits sit here describing the production value.
+  // The annotation is the pin: this fixture now cannot drift from the contract
+  // without failing `npm run typecheck`. (It also surfaced a second gap the cast
+  // was hiding — the registry reading was missing both of its required counts.)
+  const k1: PublicRepository = {
+    repositoryKey: 'k1',
+    profile: { reading: 'DECLARED', repositoryId: 'ZERA', defaultBranch: 'main', maxReviewRounds: 2 },
+    declaredTasks: { reading: 'DISCOVERED', count: 2 },
+    runtimeScan: { reading: 'READ', stateFileCount: 2, truncated: true },
+    lease: { reading: 'HELD', acquiredAt: '2026-09-16T09:00:00.000Z', ownerLiveness: 'NOT_FOUND' },
+    tasks: [
+      {
+        taskId: 'T-1',
+        declaration: 'OPEN',
+        runtime: { reading: 'LOADED', state: 'REVIEWING', stateKind: 'REGULAR', stateEnteredAt: '2026-09-16T10:00:00.000Z', reviewRound: 2, reviewBudget: 3, blockedAgent: null, reportedResetAt: null, workBranch: 'ao/task/T-1', recordedCurrentCommit: null, recordedPhaseAgent: null },
+        operational: 'ACTIONABLE',
+        action: null,
+        verification: { reading: 'RECORDED', lastAttempt: { verdict: 'FAIL', attemptedAt: '2026-09-16T09:50:00.000Z', forCommit: 'abc', stoppedAtPhase: 'VERIFY', exitCode: 1 }, passRecordedForCommit: null, passMeasuredAt: null },
+        delivery: { reading: 'NONE' },
+      },
+    ],
+  };
+
+  const full: PublicSnapshot = {
     observedAt: '2026-09-16T10:08:00.000Z',
     revision: 'r',
-    registry: { reading: 'REGISTERED' },
+    registry: { reading: 'REGISTERED', entryCount: 1, maxConcurrentRepositories: 3 },
     needsOperator: [],
     notes: [
       { code: 'TASK_STATE_UNREADABLE', repositoryKey: 'k1', taskId: 'T-1', detail: 'EACCES' },
       { code: 'REGISTRY_UNUSABLE', repositoryKey: null, taskId: null, detail: null },
     ],
-    repositories: [
-      {
-        repositoryKey: 'k1',
-        profile: { reading: 'DECLARED', repositoryId: 'ZERA', defaultBranch: 'main', maxReviewRounds: 2 },
-        declaredTasks: { reading: 'DISCOVERED', count: 2 },
-        runtimeScan: { reading: 'SCANNED' },
-        lease: { reading: 'HELD', acquiredAt: '2026-09-16T09:00:00.000Z', ownerLiveness: 'NOT_FOUND' },
-        tasks: [
-          {
-            taskId: 'T-1',
-            declaration: 'OPEN',
-            runtime: { reading: 'LOADED', state: 'REVIEWING', stateKind: 'REGULAR', stateEnteredAt: '2026-09-16T10:00:00.000Z', reviewRound: 2, reviewBudget: 3, blockedAgent: null, reportedResetAt: null, workBranch: 'ao/task/T-1', recordedCurrentCommit: null, recordedPhaseAgent: null },
-            operational: 'ACTIONABLE',
-            action: null,
-            verification: { reading: 'RECORDED', lastAttempt: { verdict: 'FAIL', attemptedAt: '2026-09-16T09:50:00.000Z', forCommit: 'abc', stoppedAtPhase: 'VERIFY', exitCode: 1 }, passRecordedForCommit: null, passMeasuredAt: null },
-            delivery: { reading: 'NONE' },
-          },
-        ],
-      },
-    ],
+    repositories: [k1],
   };
 
+  const withScan = (runtimeScan: PublicRuntimeScanReading): PublicSnapshot => ({
+    ...full,
+    repositories: [{ ...k1, runtimeScan }],
+  });
+
   it('renders the readings the landing screen deliberately omits', () => {
-    const html = AO['renderDetail'](full as never, 'k1') as string;
+    const html = AO['renderDetail'](full, 'k1') as string;
     expect(html).toContain('ZERA');
     // The stale-lease wording must survive into the detail view unchanged.
     expect(html).toContain('Lease held · recorded owner is gone');
@@ -261,10 +278,40 @@ describe('the detail view shows what the landing screen leaves out', () => {
     expect(html).toContain('recorded 8 min ago');
     expect(html).toContain('FAIL');
     expect(html).toContain('ao/task/T-1');
+    // The READ branch is the only one that interpolates its two fields, and
+    // both of them reach the operator.
+    expect(html).toContain('Runtime records read: 2 · list truncated');
+  });
+
+  it('renders each runtime-scan reading the contract can actually carry', () => {
+    // All three real members. `withScan` takes a `PublicRuntimeScanReading`, so
+    // a member that stops existing fails to compile rather than falling through
+    // to the wording fallback unnoticed.
+    expect(AO['renderDetail'](withScan({ reading: 'READ', stateFileCount: 7, truncated: false }), 'k1')).toContain(
+      'Runtime records read: 7',
+    );
+    expect(AO['renderDetail'](withScan({ reading: 'READ', stateFileCount: 7, truncated: false }), 'k1')).not.toContain(
+      'list truncated',
+    );
+    expect(AO['renderDetail'](withScan({ reading: 'DIRECTORY_ABSENT' }), 'k1')).toContain(
+      'No runtime directory',
+    );
+    expect(AO['renderDetail'](withScan({ reading: 'DIRECTORY_UNREADABLE' }), 'k1')).toContain(
+      'Runtime directory could not be listed',
+    );
+  });
+
+  it('names a runtime-scan reading it does not recognise, rather than rendering nothing', () => {
+    // Built WITHOUT claiming to be a `PublicRuntimeScanReading`, because the
+    // whole point of the branch is a value that union does not contain — which
+    // is what a newer writer widening the contract looks like from here. A cast
+    // on a fixture that claims the contract would assert the opposite.
+    const widened = { ...full, repositories: [{ ...k1, runtimeScan: { reading: 'SCANNED' } }] };
+    expect(AO['renderDetail'](widened, 'k1')).toContain('Runtime scan reading: SCANNED');
   });
 
   it('shows only that repository’s notes, never the snapshot-level one', () => {
-    const html = AO['renderDetail'](full as never, 'k1') as string;
+    const html = AO['renderDetail'](full, 'k1') as string;
     expect(html).toContain('TASK_STATE_UNREADABLE');
     expect(html).not.toContain('REGISTRY_UNUSABLE');
   });
@@ -273,18 +320,18 @@ describe('the detail view shows what the landing screen leaves out', () => {
     // An installed PWA runs in `display: standalone` and has no browser Back
     // button. A drill-down with no way out is a dead end on the device this
     // slice exists for.
-    expect(AO['renderDetail'](full as never, 'k1') as string).toContain('data-back');
+    expect(AO['renderDetail'](full, 'k1') as string).toContain('data-back');
   });
 
   it('says so rather than blanking when the key names no repository', () => {
-    const html = AO['renderDetail'](full as never, 'nosuchkey') as string;
+    const html = AO['renderDetail'](full, 'nosuchkey') as string;
     expect(html).toContain('not in this snapshot');
   });
 
   it('routes on the hash, and falls back to the landing screen', () => {
-    expect(AO['renderRoute']('#/repo/k1', full as never, 'LIVE') as string).toContain('ao/task/T-1');
-    expect(AO['renderRoute']('', full as never, 'LIVE') as string).toContain('PROJECTS');
-    expect(AO['renderRoute']('#/nonsense', full as never, 'LIVE') as string).toContain('PROJECTS');
+    expect(AO['renderRoute']('#/repo/k1', full, 'LIVE') as string).toContain('ao/task/T-1');
+    expect(AO['renderRoute']('', full, 'LIVE') as string).toContain('PROJECTS');
+    expect(AO['renderRoute']('#/nonsense', full, 'LIVE') as string).toContain('PROJECTS');
   });
 });
 
@@ -344,6 +391,48 @@ describe('a repository that cannot name itself is still named honestly', () => {
     expect(named).toContain('profile unusable');
     expect(named).toContain('PROFILE_UNUSABLE');
     expect(named).not.toContain('deadbeef');
+  });
+
+  /*
+   * A missing profile and a profile whose reading this build does not
+   * understand are structurally different, and an operator acts on them
+   * differently: the second one is ON DISK, so calling it absent sends them
+   * looking for a file that is already there. `leaseWording` and
+   * `completionLine` both already split these two cases; this is the same
+   * distinction, and the three cases below are its three lines.
+   */
+  const ABSENT = 'Unnamed repository · profile reading absent';
+
+  it('says the reading is ABSENT only when there is no reading to name', () => {
+    expect(AO['repositoryName']({ repositoryKey: 'deadbeef' })).toBe(ABSENT);
+    expect(AO['repositoryName']({ repositoryKey: 'deadbeef', profile: null })).toBe(ABSENT);
+    expect(AO['repositoryName']({ repositoryKey: 'deadbeef', profile: {} })).toBe(ABSENT);
+  });
+
+  it('names a profile reading it does not recognise, as unrecognised', () => {
+    const named = AO['repositoryName']({
+      repositoryKey: 'deadbeef',
+      profile: { reading: 'SOMETHING_NEWER' },
+    }) as string;
+    expect(named).toContain('unrecognised');
+    expect(named).toContain('SOMETHING_NEWER');
+    expect(named).not.toContain('absent');
+    expect(named).not.toContain('deadbeef');
+  });
+
+  it('never answers ABSENT for a profile that carries a reading', () => {
+    // The property, not a nicety. A single return covering both cases satisfies
+    // either of the two cases above on its own; only this one makes the
+    // collapse impossible to land silently, for every shape of unrecognised
+    // value rather than the one a case happened to pick.
+    for (const reading of ['SOMETHING_NEWER', 'DECLARED_V2', 'declared', '', 0, 42, false]) {
+      const named = AO['repositoryName']({
+        repositoryKey: 'deadbeef',
+        profile: { reading },
+      }) as string;
+      expect(named, `reading ${JSON.stringify(reading)}`).not.toBe(ABSENT);
+      expect(named, `reading ${JSON.stringify(reading)}`).not.toContain('absent');
+    }
   });
 });
 

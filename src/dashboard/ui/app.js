@@ -139,14 +139,29 @@
    * is never omitted — a repository AO cannot identify is itself
    * operator-relevant — and its `repositoryKey` is a digest that is never
    * silently substituted for a name.
+   *
+   * Three lines, and the third is the one that used to be missing. A profile
+   * whose reading this build does not understand is NOT an absent profile: it
+   * is on disk, and saying "absent" sends an operator looking for a file that
+   * is already there. `leaseWording` and `completionLine` split the same two
+   * cases; this function used to fold them into one return.
+   *
+   * "Absent" therefore means there is no reading to name — no profile, or a
+   * profile carrying no `reading` at all. Anything else is present, and is
+   * named as unrecognised with the value echoed, uninterpreted. Routing a
+   * `null`/`undefined` reading to "absent" rather than to the echo is what
+   * keeps a literal "undefined" out of the operator's face.
    */
   function repositoryName(repository) {
     var profile = repository ? repository.profile : null;
-    if (profile && profile.reading === 'DECLARED') return profile.repositoryId;
-    if (profile && profile.reading === 'UNUSABLE') {
+    if (!profile || profile.reading === null || profile.reading === undefined) {
+      return 'Unnamed repository · profile reading absent';
+    }
+    if (profile.reading === 'DECLARED') return profile.repositoryId;
+    if (profile.reading === 'UNUSABLE') {
       return 'Unnamed repository · profile unusable (' + profile.code + ')';
     }
-    return 'Unnamed repository · profile reading absent';
+    return 'Unnamed repository · unrecognised profile reading: ' + profile.reading;
   }
 
   /* ── counts, never mixed across dimensions ──────────────────────────────── */
