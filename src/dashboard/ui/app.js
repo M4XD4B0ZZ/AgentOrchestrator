@@ -885,7 +885,27 @@
         // an unparseable body unhandled and the previous render on screen.
         return response.json().then(
           function (body) { accept(body, tag); },
-          function () { unreadable('The answer was not readable JSON.'); }
+          function (error) {
+            // The budget is STILL ARMED while the body is being read — headers
+            // resolve the `fetch` promise, and a stalled body is exactly the
+            // hang this page has to survive — so this rejection can be our own
+            // abort rather than the Manager's bytes. The two want opposite
+            // answers and must not be collapsed.
+            //
+            // `unreadable` drops the held snapshot on purpose, because bytes
+            // that would not parse mean the DATA is suspect. An abandoned read
+            // says nothing whatever about the Manager's data: it says this page
+            // gave up on the link. Reporting it as unreadable throws away a
+            // perfectly good snapshot, destroys the freshness reference, and
+            // tells the operator the Manager sent garbage — sending them after
+            // a fault that is not there. It is the mirror of the confusion
+            // `publish` is ordered to avoid, running the other way.
+            if (error && error.name === 'AbortError') {
+              unreached();
+              return;
+            }
+            unreadable('The answer was not readable JSON.');
+          }
         );
       }
       // Answered, and declined. A configuration fault, not a slow network, and
@@ -938,21 +958,31 @@
       var timer = null;
 
       /**
-       * The one exit. Stops the budget timer, then drops the latch.
+       * The one exit. Drops the latch, THEN stops the budget timer.
        *
-       * Idempotent on the timer by nulling the handle before clearing it, so a
-       * double call cannot cancel a handle the host has since handed to
-       * somebody else, and a call before one was ever started does nothing.
-       * Both matter: this runs from the `catch` below as well as from the
-       * settled request, and exactly one of those started a timer.
+       * That order is not arbitrary and must not be reversed. `release()` is
+       * the line this whole task exists for, so nothing may stand in front of
+       * it: a `clearTimer` that threw would skip it and reproduce the exact
+       * wedge being fixed. Run the other way round the worst case is a timer
+       * left running, and a budget that fires after its request has settled
+       * merely aborts a controller nobody is waiting on — a no-op. So the
+       * recoverable failure is put second.
+       *
+       * The handle is nulled before it is cleared, so a second call cannot
+       * cancel a handle the host has since handed to somebody else, and a call
+       * before one was ever started does nothing. The timer callback nulls it
+       * too, for the same reason: once the budget has fired its handle is
+       * spent, and clearing a spent handle is exactly what that sentence is
+       * about. Both paths matter — this runs from the `catch` below as well as
+       * from the settled request, and only one of those started a timer.
        */
       function settled() {
+        release();
         if (timer !== null) {
           var started = timer;
           timer = null;
           clearTimer(started);
         }
-        release();
       }
 
       var pending;
@@ -964,7 +994,14 @@
         // constructor this UI cannot do without is not worth a silent
         // fallback — but it is worth being unable to wedge anything.
         var controller = new AbortController();
-        timer = setTimer(function () { controller.abort(); }, ABORT_MS);
+        timer = setTimer(function () {
+          // Spent the moment it fires, so `settled` does not go on to clear a
+          // handle the host may already have reissued. Nulled BEFORE the abort
+          // for the same reason the latch drops first: `abort()` is what this
+          // callback exists to do.
+          timer = null;
+          controller.abort();
+        }, ABORT_MS);
         // `no-store` because the conditional request is ours to make. A 200 the
         // browser answered out of its own store would reset the freshness clock
         // without the Manager having said anything at all.
@@ -986,12 +1023,23 @@
       // `onState`. A release that only ran on success would wedge the poller
       // shut the first time anything threw.
       //
-      // An abort lands here as a rejection, so it needs no branch of its own
-      // and gets none: `unreached` is already the right answer to it. The held
-      // snapshot stays on screen, `lastGoodAtMs` is NOT moved — an abandoned
-      // request is not contact and must never make held data look fresh — and
-      // nothing is retried from in here. The next ordinary tick is the retry,
-      // which is why the budget sits under the poll interval.
+      // An abort has TWO landing sites, and saying so is the point of this
+      // paragraph. A budget that expires before any headers arrive rejects the
+      // `fetch` promise and lands on `unreached` here. One that expires after
+      // headers, while the body is still being read, rejects `response.json()`
+      // instead and lands inside `receive` — and it was written as a branch
+      // there deliberately, because the handler it would otherwise have fallen
+      // into reports the Manager's bytes as unreadable. An earlier draft of
+      // this comment claimed the path was total and needed no branch at all,
+      // which is how that second site went unnoticed; if a third ever appears,
+      // it belongs on this list.
+      //
+      // Both route to `unreached`, and that is what makes the semantics hold
+      // wherever the budget lands: the held snapshot stays on screen,
+      // `lastGoodAtMs` is NOT moved — an abandoned request is not contact and
+      // must never make held data look fresh — and nothing is retried from in
+      // here. The next ordinary tick is the retry, which is why the budget
+      // sits under the poll interval.
       return pending.then(receive, unreached).then(settled, settled);
     }
 

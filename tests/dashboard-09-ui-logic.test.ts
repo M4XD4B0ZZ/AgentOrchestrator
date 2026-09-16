@@ -581,6 +581,94 @@ describe('the poller treats a 304 as a successful refresh', () => {
   });
 });
 
+describe('the budget may not become the wedge it was added to prevent', () => {
+  it('drops the single-flight latch even when clearing the timer throws', async () => {
+    // Defensive, exactly like the `try/catch` around the transport beside it,
+    // and for the same class of reason. `release()` is the line this whole
+    // guard exists for, so nothing may run in front of it: a `clearTimer` that
+    // threw while the latch was still held would reproduce the very wedge this
+    // task closed — the poller shut for the life of the page — and it would do
+    // it on the code added to prevent it.
+    //
+    // No browser `clearTimeout` throws, which is why the order can only be
+    // measured through the seam `createPoller` already takes. Run the right way
+    // round the worst case is a timer left running, and a budget that fires
+    // after its request has settled aborts a controller nobody is waiting on.
+    const good = {
+      revision: 'r1',
+      observedAt: '2026-09-16T10:00:00.000Z',
+      registry: { reading: 'REGISTERED' },
+      repositories: [],
+      needsOperator: [],
+      notes: [],
+    };
+    let calls = 0;
+    const poller = AO['createPoller']({
+      fetch: () => {
+        calls++;
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          headers: { get: () => 'W/"r1"' },
+          json: () => Promise.resolve(good),
+        });
+      },
+      now: () => 0,
+      setTimer: () => 1,
+      clearTimer: () => {
+        throw new Error('the host refused to clear the timer');
+      },
+      onState: () => undefined,
+    } as never) as { tick: () => Promise<void> };
+
+    // The throw still escapes, and that is fine — in a browser an exception out
+    // of a timer callback is reported and the loop keeps running. What may not
+    // happen is the latch staying shut behind it.
+    await poller.tick().catch(() => undefined);
+    expect(calls).toBe(1);
+    await poller.tick().catch(() => undefined);
+    expect(calls, 'a throwing clearTimer held the single-flight latch shut').toBe(2);
+  });
+
+  it('never clears a budget handle that has already fired', async () => {
+    // What the exit's idempotence sentence actually promises. A browser hands
+    // out timer ids monotonically and will not reissue a spent one, but the
+    // point of the sentence is not to depend on that: once the budget has
+    // fired, its handle is gone, and cancelling a handle you no longer own is
+    // how you cancel somebody else's timer on a host that recycles them.
+    //
+    // The companion property — that an UNFIRED budget is always cleared — is
+    // measured end to end by `pendingTimers()` in the mounted cases, so a
+    // production change that simply stopped clearing anything fails there.
+    const cleared: number[] = [];
+    const budgets: (() => void)[] = [];
+    const poller = AO['createPoller']({
+      fetch: (_url: string, init: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          const signal = init.signal;
+          if (signal === undefined) return;
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+      now: () => 0,
+      setTimer: (fn: () => void) => {
+        budgets.push(fn);
+        return 42;
+      },
+      clearTimer: (id: number) => {
+        cleared.push(id);
+      },
+      onState: () => undefined,
+    } as never) as { tick: () => Promise<void> };
+
+    const pending = poller.tick();
+    expect(budgets.length, 'no budget was armed for the request').toBe(1);
+    budgets[0]!();
+    await pending;
+
+    expect(cleared, 'the exit cancelled a budget handle that had already fired').toEqual([]);
+  });
+});
+
 describe('the page survives having no service worker', () => {
   it('registers nothing and still works when navigator.serviceWorker is absent', () => {
     // On an insecure origin `navigator.serviceWorker` is simply absent, and an
@@ -621,6 +709,18 @@ interface Answer {
    * and a test asserting the wrong thing would pass over the unfixed defect.
    */
   readonly hangs?: true;
+  /**
+   * The headers arrive and the BODY stalls — the other hang shape, and on a
+   * cellular link arguably the commoner one: a fast Manager answers 200
+   * immediately and the path carrying the body dies under it.
+   *
+   * Worth its own fixture rather than folding into `hangs`, because the two
+   * reach production through different doors. `hangs` rejects the `fetch`
+   * promise; this one resolves it and rejects `response.json()` instead, which
+   * is what a real `fetch` does — headers resolve the promise, and the abort
+   * then errors the body stream with the abort reason.
+   */
+  readonly bodyHangs?: true;
   /** the request rejects, as it does with no network at all */
   readonly fails?: true;
   /** `fetch` throws synchronously instead of returning a rejected promise */
@@ -666,6 +766,8 @@ function mountPage(
   const sent: (string | undefined)[] = [];
   const cacheModes: (string | undefined)[] = [];
   const signals: (AbortSignal | undefined)[] = [];
+  /** Per request: the clock reading when its abort landed, or null if none did. */
+  const abortedAt: (number | null)[] = [];
   const registered: string[] = [];
   let clock = 1_700_000_000_000;
   let call = 0;
@@ -711,38 +813,61 @@ function mountPage(
       _url: string,
       init: { headers?: Record<string, string>; cache?: string; signal?: AbortSignal },
     ) => {
+      const index = call;
       sent.push(init?.headers?.['If-None-Match']);
       cacheModes.push(init?.cache);
       signals.push(init?.signal);
+      abortedAt.push(null);
       const answer = answers[call++];
       if (answer === undefined) {
         return Promise.reject(new Error('no answer was queued for this request'));
       }
-      if (answer.hangs === true) {
-        return new Promise((_resolve, reject) => {
+      /**
+       * A promise that never settles on its own and abandons itself on abort.
+       *
+       * Shared by the two stall shapes, because a real `fetch` abandons both
+       * the same way and a fixture that treated them differently would be
+       * inventing semantics. `controller.abort()` cannot reach into a
+       * hand-written promise and reject it, so without this a poller that
+       * wired the abort perfectly and one that wired nothing at all would be
+       * indistinguishable here — nothing would reject, the latch would stay
+       * shut, and a case asserting the wrong thing would pass over the unfixed
+       * defect. `signal.reason` is rejected verbatim: the host
+       * `AbortController` builds a `DOMException` named `AbortError`, which is
+       * what a browser rejects with, and production now reads that name.
+       *
+       * The clock is recorded as the abort lands, which is the transport's own
+       * view of WHEN it was given up on.
+       */
+      const abandonedOnAbort = (): Promise<never> =>
+        new Promise<never>((_resolve, reject) => {
           const signal = init?.signal;
           // No signal means no way out, which is the pre-task behaviour and
           // exactly what a case measuring the wedge should see.
           if (signal === undefined) return;
-          // `signal.reason` verbatim: the host `AbortController` builds a
-          // `DOMException` named `AbortError`, which is what a browser's
-          // `fetch` rejects with. Rejecting with an invented error would make
-          // this fixture's abort semantics this repository's own.
-          const abandon = (): void => reject(signal.reason);
+          const abandon = (): void => {
+            abortedAt[index] = clock;
+            reject(signal.reason);
+          };
           if (signal.aborted) abandon();
           else signal.addEventListener('abort', abandon, { once: true });
         });
-      }
+      if (answer.hangs === true) return abandonedOnAbort();
       if (answer.fails === true) return Promise.reject(new Error('offline'));
       if (answer.throws === true) throw new TypeError('Failed to construct the request');
       return Promise.resolve({
         status: answer.status,
         ok: answer.status >= 200 && answer.status < 300,
         headers: { get: (n: string) => (n.toLowerCase() === 'etag' ? answer.etag ?? null : null) },
-        json: () =>
-          answer.unparseable === true
+        json: () => {
+          // Headers arrived; the body is what stalls. The budget is still
+          // armed here, so this is where a real `fetch` errors the body stream
+          // with the abort reason and `json()` propagates it.
+          if (answer.bodyHangs === true) return abandonedOnAbort();
+          return answer.unparseable === true
             ? Promise.reject(new SyntaxError('Unexpected end of JSON input'))
-            : Promise.resolve(answer.body),
+            : Promise.resolve(answer.body);
+        },
       });
     },
     setInterval: (f: () => void, ms: number) => {
@@ -786,12 +911,15 @@ function mountPage(
     sent,
     cacheModes,
     signals,
+    abortedAt,
     registered,
     requests: (): number => call,
     pollMs: (): number | null => tickerMs,
     polling: (): boolean => ticker !== null,
     /** Timers still owed. A budget timer that outlives its request is a leak. */
     pendingTimers: (): number => timers.size,
+    /** The virtual clock, which is the one `Date.now` answers inside the page. */
+    nowMs: (): number => clock,
     settle: flush,
     /**
      * Move the clock, firing whatever falls due on the way.
@@ -800,6 +928,15 @@ function mountPage(
      * budget that expires part-way through a long advance sees the clock it
      * would really have seen. Rescanning after each one means a timer that
      * schedules another is picked up by the same pass.
+     *
+     * That due-time fidelity is measured, and it took a deliberate instrument
+     * to measure it: nothing the page does reads the clock synchronously
+     * inside a timer callback — the abort callback only calls `abort()`, and
+     * the `publish` that follows runs as a microtask once this function has
+     * already landed on the destination. So the page cannot tell the two
+     * apart, and the only observer that can is the transport being abandoned.
+     * `abortedAt` is that observer, and the budget case below is what stops
+     * this claim rotting into prose nothing checks.
      *
      * Synchronous, so the promise work an abort sets off runs afterwards:
      * follow an advance that is meant to abort something with `settle()`.
@@ -1193,6 +1330,106 @@ describe('the polling loop follows the page, not the tab it was opened in', () =
     expect(h.content(), 'the page recovered but rendered nothing new').toContain('KESTREL');
     expect(h.content(), 'the render before the hung request was never replaced').not.toContain('ZERA');
     expect(h.word()).toBe('LIVE');
+  });
+
+  it('treats a body read it gave up on as a lost link, not as bytes it could not read', async () => {
+    // The budget's SECOND landing site, and the one that is easy to miss.
+    // Headers resolve the `fetch` promise, so a budget that expires while the
+    // body is still arriving rejects `response.json()` instead — and the
+    // nearest handler there reports an unreadable ANSWER, which drops the held
+    // snapshot, the held tag and the freshness reference on purpose, because
+    // bytes that will not parse mean the DATA is suspect.
+    //
+    // Nothing about an abandoned read is a statement about the Manager's data.
+    // Letting it fall through replaces a good reading with "the Manager sent
+    // garbage" and sends the operator after a fault that is not there — the
+    // mirror of the confusion `publish` is ordered to avoid. On a cellular
+    // link this is arguably the commoner hang: the Manager answers at once and
+    // the path carrying the body dies under it.
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, etag: 'W/"r1"', bodyHangs: true },
+      { status: 200, fails: true },
+      { status: 200, fails: true },
+    ]);
+    await h.settle();
+    expect(h.content()).toContain('ZERA');
+
+    await h.poll();
+    expect(h.requests()).toBe(2);
+
+    h.advance(8_000);
+    await h.settle();
+
+    // The three operator-visible facts, none of them an internal.
+    expect(h.word(), 'an abandoned body read was reported as bad data').not.toBe('UNREADABLE');
+    expect(h.content(), 'a held reading was thrown away by an abort').toContain('ZERA');
+    expect(h.content()).not.toContain('AO status unreadable');
+    // Ageing from the first answer, which is still the only one this page has
+    // had — not restarted by the abort, and not destroyed by it either.
+    expect(h.word()).toBe('LIVE');
+    expect(h.age()).toBe('Last answer 8 s ago.');
+
+    // The realistic follow-up, and where the old behaviour turned permanent: a
+    // body that stalls is evidence the link is bad, so the next poll fails too.
+    // With the held reading already discarded the page settled on "No usable
+    // data received in this session" — false, it had received one — and stayed
+    // there for as long as the link was down.
+    await h.poll();
+    expect(h.sent[2], 'the held tag was destroyed, so no 304 is possible again').toBe('W/"r1"');
+    expect(h.content(), 'a failed follow-up poll finished off the held reading').toContain('ZERA');
+    expect(h.content()).not.toContain('No usable data received in this session');
+
+    // And it ages the way every other lost link does: labelled, not erased.
+    h.advance(120_000);
+    await h.poll();
+    expect(h.word()).toBe('OFFLINE');
+    expect(h.content()).toContain('ZERA');
+    expect(h.content()).toContain('OFFLINE · showing data from the last successful fetch');
+  });
+
+  it('spends exactly its budget before giving up, and spends it on the freshness clock', async () => {
+    // The number is load-bearing: 8000 ms sits under POLL_MS 10000 precisely so
+    // an abandoned request can never still be running when its replacement is
+    // due. Nothing measured it. Every case above advances far past the budget,
+    // so a later edit setting it to 30000 — or to anything under the advance —
+    // would leave all of them green while the guarantee quietly went.
+    //
+    // It is also the only case that can tell whether a timer fires at its own
+    // due time or merely at the destination of an advance, because the page
+    // cannot: the abort callback reads no clock, and the `publish` after it
+    // runs once `advance` has already landed. The transport is the one party
+    // that observes the moment it was given up on, so it is asked.
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, hangs: true },
+      { status: 200, etag: 'W/"r2"', body: NEXT_SNAPSHOT },
+    ]);
+    await h.settle();
+    const started = h.nowMs();
+
+    await h.poll();
+    expect(h.requests()).toBe(2);
+
+    // One millisecond short of the budget. Nothing has been given up on, so the
+    // latch is still held and the tick landing here must start no request.
+    h.advance(7_999);
+    await h.settle();
+    expect(h.abortedAt[1], 'the budget expired early').toBeNull();
+    await h.poll();
+    expect(h.requests(), 'the request was abandoned before its budget ran out').toBe(2);
+
+    // And the millisecond that completes it.
+    h.advance(1);
+    await h.settle();
+    expect(
+      h.abortedAt[1],
+      'the budget did not expire at 8000 ms on the clock freshness reads',
+    ).toBe(started + 8_000);
+
+    await h.poll();
+    expect(h.requests(), 'the budget expired and nothing took the freed slot').toBe(3);
+    expect(h.content()).toContain('KESTREL');
   });
 
   it('does not let an abandoned request pass for contact with the Manager', async () => {
