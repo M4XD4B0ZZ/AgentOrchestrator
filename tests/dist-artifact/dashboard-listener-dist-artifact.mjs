@@ -403,12 +403,21 @@ async function theManagerServesOnLoopbackOnly() {
       const missing = await ask(port, { path });
       check(missing.status === 404, `${path} answered ${String(missing.status)}, expected 404`);
     }
+    // `Allow` is asserted for every one of them, `HEAD` included. It used to be
+    // skipped there, with no comment saying why, and the only premise that
+    // would have justified the exception is false: Node discards a `HEAD`
+    // response's BODY and leaves its header block alone, so `headers.allow` is
+    // as readable here as on a `POST` — measured, and the assertion passes.
+    // The exception was worth removing rather than documenting, because `HEAD`
+    // is the method whose `405` is this service's stated departure from RFC
+    // 9110, which makes `Allow: GET` the half of the refusal a caller can act
+    // on, and this harness the only place a `HEAD` reaches the SHIPPED
+    // listener. A gate that declines to look at exactly the value most likely
+    // to be got wrong is the control that overclaims.
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']) {
       const refused = await ask(port, { method });
       check(refused.status === 405, `${method} answered ${String(refused.status)}, expected 405`);
-      if (method !== 'HEAD') {
-        check(refused.headers.allow === 'GET', `${method} did not name the allowed method`);
-      }
+      check(refused.headers.allow === 'GET', `${method} did not name the allowed method`);
     }
 
     /* exactly one listener, on the loopback literal */

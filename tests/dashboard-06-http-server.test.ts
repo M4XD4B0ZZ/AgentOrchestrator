@@ -849,6 +849,60 @@ describe('the server writes what the contract decided, and nothing more', () => 
     });
   });
 
+  /**
+   * The other body-less branch — and the only one this build does not write.
+   *
+   * `write` hands Node the same refusal for a `HEAD` as for a `POST`: the
+   * contract decided one `405` with a body and a `Content-Length` describing
+   * it, and Node then discards every body byte because the request method was
+   * `HEAD`. So on this one path the header block IS the whole answer, and
+   * whether `Allow` survived a rewrite this build never performs is a property
+   * of the socket rather than of the decision. `dashboard-05` cannot reach it:
+   * it calls a pure function, which returns the same value for both methods
+   * whatever the wire would afterwards do to it.
+   *
+   * RFC 9110 requires a `405` to carry `Allow`, and this service's `405` on a
+   * `HEAD` is a deliberate, stated departure from the `HEAD`-follows-`GET`
+   * rule — which makes `Allow: GET` the half of that refusal a caller can act
+   * on, and the half worth pinning where the bytes are.
+   *
+   * Measured against the `POST` beside it rather than against literals. The
+   * `POST` is the positive control: without it the byte count is an absence
+   * over nothing, and would pass against a server that had stopped sending a
+   * refusal body at all.
+   */
+  it('keeps every header a 405 declared when Node strips the HEAD body', async () => {
+    const refusal = (port: number, method: string): string =>
+      [
+        `${method} /api/snapshot HTTP/1.1`,
+        `Host: ${DASHBOARD_BIND_HOST}:${String(port)}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n');
+
+    await serving(realSnapshotOver(gitFreeRepository()), async (port) => {
+      const bodied = await raw(port, refusal(port, 'POST'));
+      const headed = await raw(port, refusal(port, 'HEAD'));
+
+      for (const answer of [bodied, headed]) {
+        expect(answer.status).toBe(405);
+        expect(answer.headers.get('allow')).toBe('GET');
+      }
+
+      // The same declared length on both, because the contract decided one
+      // refusal and `HEAD` is answered from it unchanged.
+      expect(headed.headers.get('content-length')).toBe(bodied.headers.get('content-length'));
+
+      // Everything after the blank line, counted in bytes rather than compared
+      // to a string, so a single stray newline fails this.
+      expect(Buffer.byteLength(headed.body, 'utf8')).toBe(0);
+      expect(Buffer.byteLength(bodied.body, 'utf8')).toBe(
+        Number(bodied.headers.get('content-length')),
+      );
+    });
+  });
+
   it('writes exactly the bytes it declared for a 200', async () => {
     await serving(realSnapshotOver(gitFreeRepository()), async (port) => {
       const answer = await raw(port, getRequest(port));
