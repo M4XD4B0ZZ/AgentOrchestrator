@@ -527,13 +527,42 @@ describe('the process stops when it is asked, and stops harder when asked twice'
 
 /* ── 6. the boundary, swept over src/ ─────────────────────────────────────── */
 
+/**
+ * Every text file this build ships from `src/`, not only its TypeScript.
+ *
+ * The cases below say "the only place in src", "no module", "every listen call
+ * in this build" — sentences about the whole tree. They only hold if the walk
+ * reads the whole tree. Until DASHBOARD-001 slice 4 that was `.ts` and nothing
+ * else, so the filter and the sentence agreed by accident; slice 4 put shipped
+ * JavaScript under `src/` for the first time, alongside `.html`, `.css` and a
+ * `.webmanifest`, and the `.ts` filter quietly narrowed every one of them.
+ *
+ * No current UI asset matches `createServer(` or `.listen(`, so nothing here
+ * was *false*. What was wrong is that nothing had read the files — and this is
+ * the sweep slice 3's "only one verb listens" claim rests on.
+ *
+ * `.png` is left out deliberately and by name: the two icons are binary, and
+ * `codeOf` would hand these patterns mojibake rather than source.
+ */
+const SWEPT_EXTENSIONS = ['.ts', '.js', '.html', '.css', '.webmanifest'];
+
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) return sourceFiles(path);
-    return entry.isFile() && entry.name.endsWith('.ts') ? [path] : [];
+    if (!entry.isFile()) return [];
+    return SWEPT_EXTENSIONS.some((extension) => entry.name.endsWith(extension)) ? [path] : [];
   });
 }
+
+/** The shipped browser assets, by name, so the widening is asserted and not assumed. */
+const SHIPPED_UI_ASSETS = [
+  'dashboard/ui/app.css',
+  'dashboard/ui/app.js',
+  'dashboard/ui/index.html',
+  'dashboard/ui/manifest.webmanifest',
+  'dashboard/ui/sw.js',
+];
 
 /** Source with comments removed, so a module's prose is not an exception. */
 function codeOf(path: string): string {
@@ -547,6 +576,26 @@ function named(path: string): string {
 }
 
 describe('one module listens, and it is named', () => {
+  it('reads the files this build ships that are not TypeScript', () => {
+    // The *filter's* false-negative guard, a different instrument from the
+    // pattern guards beside it. Every sweep in this section is an absence
+    // assertion over a file list, so a narrowed or mistyped extension list
+    // restores the blind spot with all of them still green — which is exactly
+    // the state slice 4 left this file in. This case is the one that fails
+    // when the walk stops reading a shipped asset.
+    //
+    // Bidirectional on purpose. One direction fails when the walk stops reading
+    // an asset; the other fails when a sixth one is added, so a new shipped
+    // file has to be put on this list by somebody who has decided that these
+    // sweeps should read it. The two `.png` icons are absent from both sides,
+    // which is what "`.png` is excluded by name" looks like when it is measured
+    // rather than merely written down.
+    const swept = sourceFiles(SRC)
+      .map(named)
+      .filter((file) => file.startsWith('dashboard/ui/'));
+    expect(swept.sort()).toEqual(SHIPPED_UI_ASSETS);
+  });
+
   it('is the only place in src that builds or binds a server', () => {
     const creates = /createServer\s*\(|\.listen\s*\(/;
     const offenders = sourceFiles(SRC).filter((path) => creates.test(codeOf(path)));
@@ -658,11 +707,34 @@ describe('what may not appear in production source', () => {
     // A watcher or a held stream is the one way a reader can make the writer
     // fail: AO publishes durable state by renaming over the old file, and on
     // NTFS an open handle refuses that rename.
+    //
+    // Widening the walk to `.js` brought one construct with it, and it is named
+    // here rather than filtered away with the file that carries it. A service
+    // worker spells the browser Cache API `caches.open(NAME)`, which
+    // `\bopen\s*\(` matches; that is a handle on a browser's cache store, held
+    // in the browser's process, and it cannot refuse a rename AO makes. The
+    // *file* stays in the sweep — `sw.js` is still read for `watch(`,
+    // `createReadStream(`, `openSync(` and every other `open(` — because
+    // excluding the file would put back the blind spot this change removes.
+    const BROWSER_CACHE_HANDLE = /\bcaches\.open\s*\(/g;
     const watchers = /\bwatch(File)?\s*\(|createReadStream\s*\(|\bopenSync\s*\(|\bopen\s*\(/;
     const offenders = files
       .filter((path) => named(path).startsWith('dashboard/'))
-      .filter((path) => watchers.test(codeOf(path)));
+      .filter((path) => watchers.test(codeOf(path).replace(BROWSER_CACHE_HANDLE, '')));
     expect(offenders.map(named)).toEqual([]);
+  });
+
+  it('strips the browser cache handle and nothing else', () => {
+    // The carve-out's own control, so it cannot quietly grow into an exclusion
+    // of the file. `caches.open(` is removed; any other `open(` in the same
+    // file is not, and this fails if that stops being true.
+    const worker = codeOf(join(SRC, 'dashboard', 'ui', 'sw.js'));
+    expect(/\bcaches\.open\s*\(/.test(worker), 'sw.js no longer uses the Cache API').toBe(true);
+    const stripped = worker.replace(/\bcaches\.open\s*\(/g, '');
+    expect(/\bopen\s*\(/.test(stripped), 'the carve-out hid more than it names').toBe(false);
+    expect(/\bopen\s*\(/.test(`${stripped}\nfs.open(statePath);\n`), 'a real open() survives').toBe(
+      true,
+    );
   });
 
   it('adds no runtime dependency for one route', () => {

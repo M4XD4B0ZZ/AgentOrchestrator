@@ -672,11 +672,45 @@ describe('the network surface of this build is two modules', () => {
   const MAY_SEND = ['notify/ntfy-transport.ts'];
   const MAY_LISTEN = ['dashboard/http-server.ts'];
 
+  /**
+   * The browser half of `fetch(`, named rather than filtered away.
+   *
+   * DASHBOARD-001 slice 4 put shipped JavaScript under `src/` for the first
+   * time, and both of those files call `fetch(`. Neither is process egress:
+   * they are bytes this build *serves*, and the call runs in a browser, against
+   * the same loopback origin the page was loaded from. The AO process still
+   * reaches out from exactly one place, which is what `MAY_SEND` says and what
+   * this slice did not change.
+   *
+   * They are listed instead of excluded because an exclusion is invisible. A
+   * third browser file that calls `fetch`, or one that names an origin this
+   * build did not serve, has to be added here by somebody — which is a
+   * decision. A filter that never read the file is not.
+   */
+  const BROWSER_MAY_FETCH = ['dashboard/ui/app.js', 'dashboard/ui/sw.js'];
+
+  /**
+   * Every text file this build ships from `src/`, not only its TypeScript.
+   *
+   * The case below says it "names every place that can send" and sweeps over
+   * the tree rather than by convention. That only holds if the walk reads what
+   * the tree actually holds. Until slice 4 that was `.ts` and nothing else; it
+   * is now also `.js`, `.html`, `.css` and `.webmanifest`, and the `.ts`-only
+   * filter left two files that call `fetch(` invisible to the one sweep whose
+   * whole purpose is to name them.
+   *
+   * `.png` is left out deliberately and by name: the two icons are binary, and
+   * reading them as UTF-8 would feed these patterns mojibake rather than
+   * source.
+   */
+  const SWEPT_EXTENSIONS = ['.ts', '.js', '.html', '.css', '.webmanifest'];
+
   function sourceFiles(directory: string): string[] {
     return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) return sourceFiles(path);
-      return entry.isFile() && entry.name.endsWith('.ts') ? [path] : [];
+      if (!entry.isFile()) return [];
+      return SWEPT_EXTENSIONS.some((extension) => entry.name.endsWith(extension)) ? [path] : [];
     });
   }
 
@@ -697,7 +731,29 @@ describe('the network surface of this build is two modules', () => {
   it('names every place that can send', () => {
     // Over the tree rather than by convention: a reviewer cannot maintain
     // "egress happens in one file" by reading diffs.
-    expect(offenders(/(^|[^\w.])fetch\s*\(/)).toEqual(MAY_SEND);
+    //
+    // Two sets, one sweep. The process half and the browser half are separate
+    // sentences — `MAY_SEND` is what this process does, `BROWSER_MAY_FETCH` is
+    // what it ships for somebody else's process to do — and a file appearing on
+    // the wrong side of that line fails here.
+    expect(offenders(/(^|[^\w.])fetch\s*\(/)).toEqual([...MAY_SEND, ...BROWSER_MAY_FETCH].sort());
+  });
+
+  it('reads the files this build ships that are not TypeScript', () => {
+    // The *filter's* false-negative guard, which is a different instrument from
+    // the pattern guards below. Every case in this section is an absence
+    // assertion over a file list, so a narrowed or mistyped extension list
+    // restores the blind spot with all of them still green. This is the only
+    // case that fails when the walk stops reading a shipped file.
+    const swept = sourceFiles(SRC).map((path) => relative(SRC, path).split('\\').join('/'));
+    for (const file of [
+      ...BROWSER_MAY_FETCH,
+      'dashboard/ui/index.html',
+      'dashboard/ui/app.css',
+      'dashboard/ui/manifest.webmanifest',
+    ]) {
+      expect(swept, `the walk does not read ${file}`).toContain(file);
+    }
   });
 
   it('names every place that can open a socket of its own', () => {
@@ -712,6 +768,17 @@ describe('the network surface of this build is two modules', () => {
     expect(offenders(/(^|[^\w.])fetch\s*\(/)).not.toContain('dashboard/http-server.ts');
     expect(offenders(/['"]node:(http|https|net|tls|dgram|dns)['"]/)).not.toContain(
       'notify/ntfy-transport.ts',
+    );
+    // And the browser half is a third set, disjoint from the other two —
+    // measured over the tree rather than asserted between two literals of this
+    // file, which would pin nothing. Take the shipped assets out of the fetch
+    // sweep and what is left is this process's own egress, and it is one
+    // module; take everything else out and what is left is both assets, which
+    // fails if the walk ever stops reading them.
+    const senders = offenders(/(^|[^\w.])fetch\s*\(/);
+    expect(senders.filter((path) => !BROWSER_MAY_FETCH.includes(path))).toEqual(MAY_SEND);
+    expect(senders.filter((path) => BROWSER_MAY_FETCH.includes(path))).toEqual(
+      [...BROWSER_MAY_FETCH].sort(),
     );
   });
 
