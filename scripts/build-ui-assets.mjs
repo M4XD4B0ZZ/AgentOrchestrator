@@ -9,12 +9,15 @@
  * script exists to prevent. `npm run build` writes `build/`; `npm run deploy`
  * writes `dist/`, which is the runtime the production supervisor actually
  * executes — and `deploy-runtime.mjs` RE-COMPILES with `tsc` rather than
- * copying `build/`, so it emits no `.html`, `.css`, `.js`, `.png` or
- * `.webmanifest` of its own. `tsconfig.build.json` includes TypeScript sources
- * only, and there is no copy step anywhere in `scripts/`. A deployed runtime
- * with no assets fails `loadUiAssets`'s all-or-nothing rule and refuses to
- * start the Manager — while every gate stays green, because every
- * dist-artefact harness runs against `build/`.
+ * copying `build/`, so none of the interface reaches it by itself. A `tsc` run
+ * emits a great deal of JavaScript and not one byte of the UI:
+ * `tsconfig.build.json` includes the TypeScript sources under `src/` and
+ * nothing else, the UI's `.html`, `.css`, `.png` and `.webmanifest` are not
+ * TypeScript, its `app.js` and `sw.js` are hand-written rather than compiled,
+ * and there is no copy step anywhere in `scripts/`. A deployed runtime with no
+ * assets fails `loadUiAssets`'s all-or-nothing rule and refuses to start the
+ * Manager — while every gate stays green, because every dist-artefact harness
+ * runs against `build/`.
  *
  * `native/ao-launch.exe` is the precedent: it is the other non-`tsc` artefact,
  * and it already has exactly these two call sites.

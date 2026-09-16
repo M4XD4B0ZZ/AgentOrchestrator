@@ -286,6 +286,12 @@ describe('one route, compared literally', () => {
   });
 
   it('does not decode, collapse or normalise the path', () => {
+    // `/` is deliberately not in this list, and its absence is a decision.
+    // `answer()` builds the contract with an EMPTY asset map, so `/` here would
+    // measure the empty map rather than the route — and since slice 4 the root
+    // is the document a browser asks for. What it really answers is pinned in
+    // dashboard-08, against the real manifest, and end to end against the
+    // shipped artefact. No target below is a route any manifest names.
     for (const target of [
       '/api/snapshot/',
       '/api%2Fsnapshot',
@@ -293,7 +299,6 @@ describe('one route, compared literally', () => {
       '/api//snapshot',
       '/./api/snapshot',
       '/nope',
-      '/',
     ]) {
       expect(answer({ target }).status, target).toBe(404);
     }

@@ -2,11 +2,11 @@
  * DASHBOARD-001 slice 3 — the HTTP contract, decided without a socket.
  *
  * Every question this service answers about a request — is this Host allowed,
- * is this the one route, is this the one method, is the caller's copy still
- * good, which headers go out — is decided here, in a pure function over a
- * description of the request. `http-server.ts` is the only module that owns a
- * socket, and all it does is read those facts off a Node request, call this,
- * and write the answer back.
+ * is this a route this build answers, is this the one method, is the caller's
+ * copy still good, which headers go out — is decided here, in a pure function
+ * over a description of the request. `http-server.ts` is the only module that
+ * owns a socket, and all it does is read those facts off a Node request, call
+ * this, and write the answer back.
  *
  * The split is not tidiness. The properties worth pinning are refusals — a
  * duplicated `Host`, a request target that is not origin-form, a method nobody
@@ -51,7 +51,7 @@ export const DASHBOARD_DEFAULT_PORT = 47113;
 /** The one data route. Compared literally — never decoded, never normalised. */
 export const SNAPSHOT_PATH = '/api/snapshot';
 
-/** The one method that route offers. */
+/** The one method this service offers, on that route and on every asset. */
 export const SNAPSHOT_METHOD = 'GET';
 
 /**
@@ -60,9 +60,13 @@ export const SNAPSHOT_METHOD = 'GET';
  * `no-store` because a snapshot is a momentary observation and a shared cache
  * holding one is worse than no answer at all. `nosniff` because the body is
  * JSON and a browser guessing otherwise is the whole content-type-confusion
- * class. The policy is the empty one: this service serves no HTML, no script
- * and no image, so a document that somehow renders one of its responses may
- * load nothing and may not be framed.
+ * class. The policy is the empty one, and it governs exactly the responses
+ * this constant is the whole of: every refusal, and the snapshot. None of them
+ * is a document, so one that somehow rendered may load nothing and may not be
+ * framed. A served asset replaces this single line with
+ * `UI_CONTENT_SECURITY_POLICY` below and keeps every other header — which is
+ * the right way round, because it leaves the empty policy as the default a new
+ * kind of response inherits by forgetting rather than by choosing.
  *
  * Four things are deliberately absent, and each is a decision rather than an
  * omission:
@@ -75,7 +79,9 @@ export const SNAPSHOT_METHOD = 'GET';
  *  - **cookies** — nothing here has a session, and a `Set-Cookie` on a
  *    read-only observation is a credential looking for somewhere to be sent.
  *  - **`Referrer-Policy`** — it governs what a *document* sends when it
- *    navigates, and this service returns no document.
+ *    navigates somewhere else. No response these headers are the whole of is a
+ *    document, and the page slice 4 added links nowhere but its own fragments,
+ *    so there is still no navigation for a policy to govern.
  */
 export const CONSTANT_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   'Cache-Control': 'no-store',

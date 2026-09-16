@@ -2,10 +2,12 @@
  * `agent-loop dashboard serve` — the AO Manager's read-only HTTP surface
  * (DASHBOARD-001 slice 3).
  *
- * One long-lived process that binds `127.0.0.1` and answers exactly one
- * question: `GET /api/snapshot`, returning the public dashboard snapshot slice 2
- * settled. It is the first **inbound** socket this build has ever had, and it
- * is opened only when this command is typed.
+ * One long-lived process that binds `127.0.0.1` and answers two kinds of
+ * question. `GET /api/snapshot` returns the public dashboard snapshot slice 2
+ * settled; `GET /` and one route per file it loads return the mobile-first page
+ * slice 4 added, which is a client of that snapshot and nothing more. It is the
+ * first **inbound** socket this build has ever had, and it is opened only when
+ * this command is typed.
  *
  * ── Why this is a command and not a mode of something else ─────────────────
  *
@@ -128,21 +130,27 @@ export const DASHBOARD_GROUP_DESCRIPTION =
 /**
  * What `serve` is for, printed in `--help`.
  *
- * Says what is *not* offered as plainly as what is, because both surprises an
- * operator can get here are absences: there is no user interface at this
- * address yet, and there is nothing authenticating in front of it.
+ * Says what is *not* offered as plainly as what is, because the surprise an
+ * operator can get here is an absence: there is a page to look at now, and
+ * there is still nothing authenticating in front of it. That pairing is the
+ * whole reason this sentence is written rather than generated — the moment an
+ * interface appears is the moment "there is a UI now" starts to sound like
+ * "so something checks who I am", and only the help text can say otherwise
+ * before the operator opens the port.
  */
 export const DASHBOARD_SERVE_DESCRIPTION =
   `Start the read-only HTTP server. It binds ${DASHBOARD_BIND_HOST} — loopback, never a LAN or ` +
   `public address — on port ${DASHBOARD_DEFAULT_PORT} unless --port says otherwise, and answers ` +
-  `one route: ${SNAPSHOT_METHOD} ${SNAPSHOT_PATH}, the public dashboard snapshot as JSON with a ` +
-  'weak ETag so a poll that changed nothing costs a 304. There is no user interface and nothing ' +
-  'authenticates: whatever can reach this port can read the snapshot, which is why it is bound ' +
-  'to loopback and why reaching it from elsewhere is an access layer an operator puts in front ' +
-  'of it rather than anything this build does. The port is fixed — a collision is reported and ' +
-  'no other port is tried. It writes nothing, takes no lease and starts no program, and it says ' +
-  'nothing about whether AgentOrchestrator itself is running, because this build records ' +
-  'nothing that would answer that.';
+  'the dashboard: a mobile-first page at / — with the stylesheet, script, service worker, web ' +
+  `manifest and icons it loads, each on a route of its own — and ${SNAPSHOT_METHOD} ` +
+  `${SNAPSHOT_PATH}, the public snapshot that page polls, as JSON with a weak ETag so a poll ` +
+  'that changed nothing costs a 304. There is something to look at and nothing authenticates: ' +
+  'whatever can reach this port can read the snapshot, which is why it is bound to loopback and ' +
+  'why reaching it from elsewhere is an access layer an operator puts in front of it rather ' +
+  'than anything this build does. The port is fixed — a collision is reported and no other ' +
+  'port is tried. It writes nothing, takes no lease and starts no program, and it says nothing ' +
+  'about whether AgentOrchestrator itself is running, because this build records nothing that ' +
+  'would answer that.';
 
 /* ── seams ─────────────────────────────────────────────────────────────────── */
 

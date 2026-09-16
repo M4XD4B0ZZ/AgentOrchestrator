@@ -470,11 +470,14 @@ npm run build                # emit build/ (Node-executable CLI), the dashboard
                              # UI build/dashboard/ui/, the native launch
                              # boundary build/native/ao-launch.exe, and
                              # build/.ao-provenance.json. NEVER writes dist/
-npm run build:ui             # only the dashboard UI. `tsc` emits no .html,
-                             # .css, .js, .png or .webmanifest, so this step
-                             # copies them and substitutes the service worker's
-                             # build-time digest; `npm run deploy` calls the
-                             # same function into its own staging directory
+npm run build:ui             # only the dashboard UI. `tsconfig.build.json`
+                             # compiles src/**/*.ts and copies nothing, and the
+                             # UI is not TypeScript — not its .html, .css, .png
+                             # or .webmanifest, and not its hand-written .js —
+                             # so this step copies it and substitutes the
+                             # service worker's build-time digest; `npm run
+                             # deploy` calls the same function into its own
+                             # staging directory
 npm run build:boundary       # only the native launch boundary
 npm run test:dist-boundary   # only the real-process launch-boundary check
                              # (tests/dist-artifact/launch-boundary-dist-artifact.mjs),
@@ -14532,7 +14535,7 @@ request. A dependent task still requires its predecessor `SETTLED` — an
 operator's word unblocks the ledger, not the next task's start — and that is
 stated here rather than discovered.
 
-## The AO Manager listens, and only when asked (DASHBOARD-001 slice 3)
+## The AO Manager listens, and only when asked (DASHBOARD-001 slices 3 and 4)
 
 Slice 1 composed AO's own readers into one honest observation. Slice 2 decided
 what of it may cross to a browser, and gave that value a change token. This
@@ -14542,12 +14545,15 @@ ever **accepted** a connection rather than made one.
 ```text
 agent-loop dashboard serve
   -> http://127.0.0.1:47113
+     GET /              ->  200, the page — and one route per file it loads
      GET /api/snapshot  ->  200 + ETag: W/"<revision>"
                         ->  304 when the caller already holds that revision
 ```
 
-One command, one address, one route, one method. Everything else about it is a
-refusal, and each refusal is a decision rather than an omission.
+One command, one address, one method, and two kinds of answer: the document a
+browser asks for, and the JSON that document polls. The page arrived in slice 4
+and is described below; everything else about this listener is a refusal, and
+each refusal is a decision rather than an omission.
 
 ### The address is a constant, and the port does not move
 
@@ -14705,17 +14711,40 @@ fatal therefore killed the Manager on the very call the gate exists to watch and
 reported it as egress. The bound is on the subject instead — the loopback
 literals pass, any other name is fatal.
 
-### What this slice does not ship
+### The interface arrived in slice 4, and none of the absences left with it
 
-No user interface: there is nothing to look at at that address yet, only JSON.
-No authentication. No remote access, and no integration with anything that could
-provide it — reaching this from a phone is an access layer an operator puts in
-front of it, and this build neither provides one, configures one, detects one,
-parses its headers nor grows a setting for it. No TLS: this process terminates
-none and asserts nothing about what might sit in front of it, which is why it
-sends no HSTS. No write route, no control plane, no WebSocket, no server-sent
-events, and no `READY_FOR_PR` transition — that state is still terminal and this
-service still only reads.
+Slice 4 puts a page in front of the snapshot. `/` is a small mobile-first
+document, and the stylesheet, script, service worker, web manifest and two icons
+it loads are each a route of their own. They are served from a **closed
+manifest** — `src/dashboard/ui-assets.ts` — and not from a directory, which is
+the difference between a lookup and a file server: a request is a key in a `Map`
+compared exactly as it arrived, so `..`, `%2e%2e` and a backslash are strings
+that are not keys. Traversal is not mitigated here; it has nowhere to go.
+
+The API is decided **before** the asset map is consulted and never passes
+through it, so no asset table — this one or a later one — can shadow the route
+this service existed for before it had a UI. A served asset carries a stricter
+policy than a refusal does: still `default-src 'none'`, with one `'self'` grant
+for each thing a same-origin page actually loads and no `'unsafe-inline'`, which
+is what makes `index.html` carry no inline script, no `<style>` and no `style=`
+attribute.
+
+The page is a client and decides nothing. It reads the same public snapshot
+slice 2 settled, over the same one JSON route, and forms no opinion the server
+did not already hand it.
+
+### What this listener does not ship
+
+No authentication — and that is the absence that most needs stating now,
+because an operator who has something to look at is the operator most likely to
+assume something started checking who they are. Nothing does. No remote
+access, and no integration with anything that could provide it — reaching this
+from a phone is an access layer an operator puts in front of it, and this build
+neither provides one, configures one, detects one, parses its headers nor grows
+a setting for it. No TLS: this process terminates none and asserts nothing about
+what might sit in front of it, which is why it sends no HSTS. No write route, no
+control plane, no WebSocket, no server-sent events, and no `READY_FOR_PR`
+transition — that state is still terminal and this service still only reads.
 
 ## Not implemented yet
 

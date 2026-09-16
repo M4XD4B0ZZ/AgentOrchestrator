@@ -194,12 +194,12 @@ describe('the verb an operator actually types', () => {
     expect(serveCommand?.description()).toContain('loopback');
   });
 
-  it('says in its own help what it does not do', () => {
+  it('says in its own help what it offers and what it still does not do', () => {
     for (const promise of [
       'read-only',
       DASHBOARD_BIND_HOST,
       SNAPSHOT_PATH,
-      'no user interface',
+      'a mobile-first page at /',
       'nothing authenticates',
       'takes no lease',
       'nothing about whether AgentOrchestrator itself is running',
@@ -207,6 +207,26 @@ describe('the verb an operator actually types', () => {
       expect(DASHBOARD_SERVE_DESCRIPTION, promise).toContain(promise);
     }
     expect(DASHBOARD_SERVE_DESCRIPTION).not.toContain('localhost');
+  });
+
+  it('retracts the sentence slice 4 made false, in the help an operator prints', () => {
+    // Read off the REGISTERED command rather than the exported constant. The
+    // loop above would stay green if the description Commander prints stopped
+    // being that constant, and a retraction that can be satisfied by an
+    // unprinted string is not a retraction.
+    //
+    // `nothing authenticates` is asserted here as well as above, and the
+    // duplication is the point: this is the pair that must not come apart. The
+    // interface arriving is exactly the moment an operator might read "there is
+    // a UI now" and infer "so something checks who I am", and the sentence that
+    // stops that inference is the one kept beside the one being removed.
+    const description = dashboard()
+      ?.commands.find((command) => command.name() === 'serve')
+      ?.description();
+    expect(typeof description).toBe('string');
+    expect(description).not.toContain('no user interface');
+    expect(description).not.toContain('one route');
+    expect(description).toContain('nothing authenticates');
   });
 });
 

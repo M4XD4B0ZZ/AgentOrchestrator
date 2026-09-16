@@ -564,7 +564,11 @@ describe('the one route, over a real socket', () => {
 
   it('answers 404 and 405 deterministically, and offers no write route', async () => {
     await serving(realSnapshotOver(gitFreeRepository()), async (port) => {
-      expect((await raw(port, getRequest(port, '/'))).status).toBe(404);
+      // `/nope` and not `/`: `serving()` starts this listener with an empty
+      // asset map, so `/` would answer 404 here for a reason that has nothing
+      // to do with routing, while since slice 4 the shipped build answers the
+      // document there. dashboard-08 pins that half against the real manifest.
+      expect((await raw(port, getRequest(port, '/nope'))).status).toBe(404);
       expect((await raw(port, getRequest(port, '/api/snapshot/'))).status).toBe(404);
 
       for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {

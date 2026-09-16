@@ -21,7 +21,7 @@
  *  3. `dashboard serve` under the bounded mode comes up on `127.0.0.1` and on
  *     nothing else — the address is read back off the listener rather than from
  *     the argument that asked for it — announces itself on stdout, answers the
- *     one route with the caching semantics the slice specified, refuses a Host
+ *     API route with the caching semantics the slice specified, refuses a Host
  *     nobody allowed, and opens exactly ONE listener for the whole run;
  *  4. a port already held produces a refusal carrying `EADDRINUSE`, exit 4, and
  *     **zero** listeners. No fallback port, no fallback address.
@@ -318,7 +318,7 @@ async function theManagerServesOnLoopbackOnly() {
       );
     }
 
-    /* the one route */
+    /* the API route */
     const ok = await ask(port);
     check(ok.status === 200, `GET /api/snapshot answered ${String(ok.status)}`);
     check(
