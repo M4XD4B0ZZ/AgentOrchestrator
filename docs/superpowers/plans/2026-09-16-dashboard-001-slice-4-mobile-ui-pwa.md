@@ -349,56 +349,80 @@ git commit -m "feat(dashboard): a closed asset manifest, read all at once or not
 - Consumes: nothing from Task 1.
 - Produces: `DashboardHttpResponse.body: string | Uint8Array | null`.
 
-**Why this task exists:** `write()` currently calls `response.end(decided.body, 'utf8')`. Two of the seven assets are PNGs. A UTF-8 round trip replaces every byte outside the ASCII range with U+FFFD and reports a `Content-Length` that does not match what is sent. This must land **before** any icon is served, and it is separable, so it gets its own reviewable commit.
+**Why this task exists:** `DashboardHttpResponse.body` is `string | null`, so two of the seven assets — the PNGs — cannot be expressed at all. The type must widen before Task 3 can serve them, and `Content-Length` must be computed in bytes for both arms. It is separable, so it gets its own reviewable commit.
 
-> **Pre-flight ruling (F-4).** Skip Step 1's provisional test form below and
-> write **Step 3d's final test directly**, together with its `rawBytes` helper.
-> Step 1's version fails because a helper is undefined, which is the wrong
-> reason — it proves nothing about the defect under test. Keep the fail-first
-> discipline by writing the final test and its helper, running it against the
-> **unchanged** `write()`, and watching it fail on the byte comparison. There is
-> no `/__bytes-probe` route, in the test or anywhere else.
+> **Correction, measured.** An earlier draft of this task claimed the defect was
+> that `response.end(bytes, 'utf8')` corrupts the bytes. **That is false**, and
+> it was measured over a real socket: `89504e47ff00c3` goes out and
+> `89504e47ff00c3` comes back. Node applies an `encoding` only to a *string*
+> chunk; for a byte chunk the argument is inert. The real corruption path is
+> holding bytes **in a string** and re-encoding them, which is why the type —
+> not the encoding argument — is the thing that has to change. Dropping the
+> inert `'utf8'` on the bytes arm is honesty about what is being sent, not a
+> bug fix.
+
+> **Scope, also corrected.** There is **no honest wire-level byte test at this
+> point in the sequence**, and this task must not pretend otherwise. No
+> production path can produce a bytes body until Task 3 gives the contract its
+> asset arm, and the only injectable seam is `snapshot`, which returns a string.
+> A test that stands up its own `node:http` server to prove "bytes survive"
+> proves only that Node works — it would pass with `http-server.ts` deleted.
+> The wire-level pin lives in **Task 3** (contract: a `Uint8Array` body with a
+> byte-counted `Content-Length`) and **Task 11** (dist gate: a served icon
+> compared to the file on disk, byte for byte, through the built CLI). What
+> this task pins instead is `bodyByteLength`, which is real production code
+> with two call sites.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/dashboard-06-http-server.test.ts`, inside the
-`describe('the server writes what the contract decided, and nothing more')`
-block (after the `keeps every header a 405 declared…` case):
+`bodyByteLength` is what this task can honestly pin: it is real production
+code, Step 3 gives it two call sites, and it has no test today. A wrong
+`Content-Length` is a response that lies about itself.
+
+Append to `tests/dashboard-05-http-contract.test.ts` — the pure-contract suite,
+where that export lives:
 
 ```ts
-  /**
-   * Bytes, not text.
-   *
-   * The icons slice 4 serves are PNG, and a PNG is full of bytes that are not
-   * valid UTF-8. `write` used to end every response with an explicit `'utf8'`
-   * encoding, which silently replaces each of them with U+FFFD and then
-   * reports a `Content-Length` describing bytes that were never sent. A test
-   * asserting only the status and the content type passes against exactly that
-   * corruption, which is why this one counts and compares the bytes.
-   */
-  it('writes a binary body byte for byte, and describes it by byte length', async () => {
-    // A deliberately hostile little payload: a real PNG signature, a lone 0xFF
-    // (never valid UTF-8), an embedded NUL, and a byte above 0x7F.
-    const payload = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xc3]);
+describe('a body is measured in bytes, because that is what the wire carries', () => {
+  it('counts a multi-byte string in bytes rather than in code units', () => {
+    // The string is chosen so the two numbers DISAGREE. An ASCII-only string
+    // would pass against a `String.prototype.length` implementation and prove
+    // nothing at all — which is the whole defect class here.
+    const text = 'café 🎛';
+    expect(text.length).not.toBe(Buffer.byteLength(text, 'utf8'));
+    expect(bodyByteLength(text)).toBe(Buffer.byteLength(text, 'utf8'));
+    expect(bodyByteLength(text)).not.toBe(text.length);
+  });
 
-    await serving(realSnapshotOver(gitFreeRepository()), async (port) => {
-      const answer = await rawBytes(port, getRequest(port, '/__bytes-probe'));
-      expect(answer.status).toBe(200);
-      expect(answer.headers.get('content-length')).toBe(String(payload.byteLength));
-      expect(Buffer.compare(answer.body, Buffer.from(payload))).toBe(0);
-    });
-  }, { /* see Step 3 for how the probe route is supplied */ });
+  it('counts a byte array by its byteLength', () => {
+    expect(bodyByteLength(Uint8Array.from([0x89, 0x50, 0xff, 0x00]))).toBe(4);
+  });
+
+  it('counts an empty body of either arm as zero', () => {
+    expect(bodyByteLength('')).toBe(0);
+    expect(bodyByteLength(new Uint8Array(0))).toBe(0);
+  });
+
+  it('is the number the contract actually declares', () => {
+    // The units above prove the function; this proves a CALL SITE uses it. A
+    // refusal body is ASCII, so this one cannot distinguish the two
+    // implementations by itself — it pins that the header is derived from the
+    // body at all, and Task 3's 200 branch carries the non-ASCII case.
+    const refusal = answer({ target: '/nope' });
+    expect(header(refusal, 'Content-Length')).toBe(
+      String(Buffer.byteLength(refusal.body as string, 'utf8')),
+    );
+  });
+});
 ```
 
-> **Note for the implementer:** the probe route does not exist and must not be
-> added to production. Supply it instead through the test's own server
-> construction — see Step 3. Do not add a `/__bytes-probe` route to
-> `http-contract.ts`.
+Add `bodyByteLength` to this file's import from `../src/dashboard/http-contract.js`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `node_modules/.bin/vitest run tests/dashboard-06-http-server.test.ts -t "binary body"`
-Expected: FAIL — `rawBytes` is not defined.
+Run: `node_modules/.bin/vitest run tests/dashboard-05-http-contract.test.ts -t "measured in bytes"`
+Expected: FAIL — `bodyByteLength` is not exported yet. It fails because the
+production function does not exist, which is the right reason to fail.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -461,91 +485,22 @@ function write(response: ServerResponse, decided: DashboardHttpResponse): void {
 }
 ```
 
-**3d.** In `tests/dashboard-06-http-server.test.ts`, add the byte-reading
-helper beside `raw`, and a server that answers the probe route:
-
-```ts
-interface RawByteAnswer {
-  readonly status: number;
-  readonly headers: ReadonlyMap<string, string>;
-  readonly body: Buffer;
-}
-
-/**
- * The same hand-written request as `raw`, but the reply is kept as BYTES.
- *
- * `raw` decodes to a UTF-8 string, which is the right instrument for a JSON
- * refusal and the wrong one here: it would perform in the test exactly the
- * corruption this case exists to detect in the server.
- */
-async function rawBytes(port: number, requestText: string): Promise<RawByteAnswer> {
-  const chunks = await bounded(
-    new Promise<Buffer[]>((resolve, reject) => {
-      const received: Buffer[] = [];
-      const socket = connect({ host: '127.0.0.1', port }, () => socket.write(requestText));
-      socket.on('data', (chunk: Buffer) => received.push(chunk));
-      socket.on('close', () => resolve(received));
-      socket.on('error', reject);
-    }),
-    `a reply to ${requestText.split('\r\n')[0] ?? 'a request'}`,
-  );
-
-  const all = Buffer.concat(chunks);
-  const split = all.indexOf('\r\n\r\n');
-  const head = split < 0 ? all.toString('latin1') : all.subarray(0, split).toString('latin1');
-  const body = split < 0 ? Buffer.alloc(0) : all.subarray(split + 4);
-  const lines = head.split('\r\n');
-  const headers = new Map<string, string>();
-  for (const line of lines.slice(1)) {
-    const colon = line.indexOf(':');
-    if (colon > 0) headers.set(line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim());
-  }
-  return { status: Number((lines[0] ?? '').split(' ')[1] ?? '0'), headers, body };
-}
-```
-
-Replace the test body from Step 1 with one that builds its own server, so no
-probe route enters production:
-
-```ts
-  it('writes a binary body byte for byte, and describes it by byte length', async () => {
-    const payload = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xc3]);
-
-    // A server whose contract answers one route with bytes. `createServer` is
-    // used directly rather than the production composition, because the point
-    // is what `write` does with a `Uint8Array`, not what any route decides.
-    const server = createServer((_request, response) => {
-      response.writeHead(200, {
-        'Content-Type': 'image/png',
-        'Content-Length': String(payload.byteLength),
-      });
-      response.end(payload);
-    });
-    const port = await freePort();
-    await new Promise<void>((settle) => server.listen({ host: '127.0.0.1', port }, () => settle()));
-    try {
-      const answer = await rawBytes(port, getRequest(port, '/'));
-      expect(answer.status).toBe(200);
-      expect(answer.headers.get('content-length')).toBe(String(payload.byteLength));
-      expect(Buffer.compare(answer.body, Buffer.from(payload))).toBe(0);
-    } finally {
-      await new Promise<void>((settle) => server.close(() => settle()));
-    }
-  });
-```
-
-Add `createServer` to the `node:http` imports at the top of the test file.
+**3d.** Nothing — and deliberately so. There is no socket-level test in this
+task and no `rawBytes` helper, for the reason in the scope correction above: no
+production path can produce a bytes body until Task 3. The byte path is pinned
+in Task 3 (contract) and Task 11 (dist gate, real icon, built CLI).
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `node_modules/.bin/vitest run tests/dashboard-06-http-server.test.ts`
-Expected: PASS — all cases including the new one.
+Run: `node_modules/.bin/vitest run tests/dashboard-05-http-contract.test.ts tests/dashboard-06-http-server.test.ts tests/dashboard-08-ui-assets.test.ts`
+Expected: PASS — the new cases and every existing one. The neighbours are run
+because Step 3 changes `refuse` and the `200` branch, which they cover.
 
 - [ ] **Step 5: Typecheck and commit**
 
 ```bash
 npm run typecheck
-git add src/dashboard/http-contract.ts src/dashboard/http-server.ts tests/dashboard-06-http-server.test.ts
+git add src/dashboard/http-contract.ts src/dashboard/http-server.ts tests/dashboard-05-http-contract.test.ts
 git commit -m "feat(dashboard): a response may carry bytes, because a PNG is not text"
 ```
 
