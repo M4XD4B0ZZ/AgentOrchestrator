@@ -7849,8 +7849,8 @@ topic: <your topic>
 token: <optional access token>
 ```
 
-No file: notifications are off, no transport is constructed, and no socket is
-opened. A file that cannot be used is also off — reported immediately, by a
+No file: notifications are off, no transport is constructed, and no outbound
+socket is opened. A file that cannot be used is also off — reported immediately, by a
 closed code, and the run still proceeds: a notifier with authority over whether
 work happens is the one thing this may not be.
 
@@ -7952,7 +7952,12 @@ that mutant dies here.
 
 `test:dist-notify-egress` runs `build/cli/index.js` twice as a real process, with
 a self-verifying preload that points the OS profile at a scratch directory and
-arms every socket surface — `fetch`, `net`, `http`, `https`, `dns`.
+arms every **egress** surface — `fetch`, `net`, `http`, `https`, `dns`.
+
+It watches one direction. An accepted inbound connection calls none of those, so
+a listening socket is invisible to this gate; the inbound direction is measured
+by `test:dist-dashboard-listen` instead (see "The AO Manager listens, and only
+when asked" below).
 
 Without a configuration the run must complete having opened nothing. That control
 is not vacuous, and the measurement is on the record: with the opt-in check
@@ -14520,6 +14525,191 @@ to run is one the operator wrote down. A task ended this way opens no pull
 request. A dependent task still requires its predecessor `SETTLED` — an
 operator's word unblocks the ledger, not the next task's start — and that is
 stated here rather than discovered.
+
+## The AO Manager listens, and only when asked (DASHBOARD-001 slice 3)
+
+Slice 1 composed AO's own readers into one honest observation. Slice 2 decided
+what of it may cross to a browser, and gave that value a change token. This
+slice puts HTTP around the result, and it is the first time this product has
+ever **accepted** a connection rather than made one.
+
+```text
+agent-loop dashboard serve
+  -> http://127.0.0.1:47113
+     GET /api/snapshot  ->  200 + ETag: W/"<revision>"
+                        ->  304 when the caller already holds that revision
+```
+
+One command, one address, one route, one method. Everything else about it is a
+refusal, and each refusal is a decision rather than an omission.
+
+### The address is a constant, and the port does not move
+
+The bind host is written out — `127.0.0.1` — and there is no flag that can
+widen it. Node reads an *omitted* host as every interface, so an omitted host is
+not a smaller bind than the loopback literal; it is the opposite one. A flag
+able to move the listener off loopback is exactly the public exposure this slice
+exists not to have, and an operator who wants this reachable from elsewhere puts
+an access layer in front of it rather than asking the product to listen wider.
+
+`localhost` is not used anywhere in the service, for the reason `notify.yaml`
+already refuses it for an endpoint: it is a name, and what it resolves to is a
+property of a hosts file rather than of this build.
+
+The port is fixed. A collision is reported with the address, the port and the
+errno, and the command exits `4` — the grade for an invocation that was refused
+while the state is fine. It never tries another port, and `--port 0` is refused
+outright, because port `0` asks the operating system to choose and this command
+does not choose ports.
+
+And the bind is **measured, not assumed**: after the listener comes up, the
+address actually bound is read back off it and compared with the address asked
+for. A disagreement closes the listener and refuses to serve. An instrument that
+cannot fail is not an instrument, so that guard is provoked in the suite — a
+bind asked for by *name* is refused, and the socket it opened is proved closed
+by re-binding **the address the guard itself reported**.
+
+That last clause is a correction, and it is worth keeping because the mistake is
+easy to repeat. The first version re-bound `127.0.0.1`; on this machine
+`localhost` resolves to `::1`, so the re-bind succeeded on a different socket
+and would have succeeded whether or not the guard had closed anything. A closure
+proof has to name the thing that was opened.
+
+### The Host allow-list is routing hardening, and is not authentication
+
+The address being bound is always accepted — in both the spellings a client may
+use for it. That second word is a fix, and it was measured rather than reasoned:
+the derived entry used to be `<host>:<port>` and nothing else, so with
+`--port 80` the allow-list held only `127.0.0.1:80` while `curl
+http://127.0.0.1/api/snapshot` puts `Host: 127.0.0.1` on the wire — 80 being the
+default port of the one scheme this service speaks, a client leaves it out.
+Every request to the address the command had just printed was answered `421`.
+Both spellings name the same authority, so both are derived; `443` is not
+affected and is not special-cased, because it is the default for a scheme this
+service does not speak.
+
+`--allow-host` adds more, and the
+values are **opaque**: this build folds them to lower case over ASCII, compares
+them, and derives nothing at all from what they might name. A well-formed Host
+that is not on the list gets `421 Misdirected Request`. No Host, or two, gets
+`400` — nothing was misdirected; the request never said where it was aimed, or
+said it twice, and answering the second case by taking the first header is what
+a smuggled request relies on.
+
+None of that authenticates anybody. This slice ships no authentication at all,
+and it derives no trust from a remote address, from `X-Forwarded-For`, from
+`Forwarded`, from any vendor's identity header or from membership of any
+network.
+
+What the allow-list buys is narrower than it first looks, and the narrower
+sentence is the one worth writing down. It refuses a request naming an
+authority this service was never told to answer for — the DNS-rebinding shape,
+where an attacker's own name resolves to the loopback address and the victim's
+browser therefore puts *that name* in `Host`. It does **not** stop a page on
+another origin from reaching this port: a browser sends the authority of the URL
+it was given, so a page anywhere fetching `http://127.0.0.1:47113/api/snapshot`
+sends an allowed Host and is answered in full. What keeps the bytes from that
+page is the absence of `Access-Control-Allow-*` — which is why that absence is a
+decision rather than an omission, and is pinned on every status this service can
+produce.
+
+The first version of this section said the allow-list stopped the cross-origin
+case, in three places at once. It was measured and it does not.
+
+### The ETag is the slice-2 revision, and it is weak on purpose
+
+`revisionOf` deliberately excludes `observedAt` — the instant the reader looked
+is not something a reader can act on — so two responses carrying the same
+revision are the *same observation* while differing byte for byte in that one
+field. RFC 9110 calls exactly that a weak validator, and `If-None-Match` is
+specified to use the weak comparison function. `W/` is therefore the honest
+classification rather than a cautious one.
+
+The HTTP layer hashes nothing of its own. Hashing the response would have
+invented a second change token beside the one slice 2 already defends with its
+own pins, and the two would drift. The body is serialised by `canonicalJson` —
+the same function the revision is taken over — so the encoding is not free to
+move under a tag that says the representation has not.
+
+### It reads, and that is the whole of it
+
+No lease is taken. No task state is written, advanced or created. No worktree,
+no Git child, no writer, no reviewer, no verification, no pull request, no
+registry edit, no heartbeat file, no address written into AO's state. The suite
+compares every byte **and every modification time** in a fixture repository
+before and after a run of requests, and checks that the operator profile
+directory is still empty afterwards.
+
+There is no cache. Each request reads afresh, measured at roughly 20 ms against
+this machine's real state (1 repository, 13 tasks, a 9.4 KB body) — cheap enough
+that the alternative is not worth what it costs, which is a handle. AO publishes
+durable state by renaming a temporary file over the old one, and on NTFS a
+reader holding a handle across that rename makes the **writer** fail. So there
+is no watcher and no stream, and the suite provokes the hazard rather than
+asserting its absence: after a request has read a task's state, that file is
+renamed over, which throws if anything still holds it.
+
+### The Manager is a separate process, and says nothing about AO
+
+Running `dashboard serve` starts no orchestration, and no orchestration starts
+it. They share durable state on disk and share nothing else — no lifetime, no
+lease, no pipe, no parent. The dashboard dying leaves orchestration untouched;
+orchestration dying leaves the dashboard answering for whatever is on disk.
+
+Which is also why nothing here reports that AgentOrchestrator is running. This
+build writes no heartbeat, no pid file and no daemon record, so "AO is idle",
+"AO finished" and "AO was never started" are one observation from outside. A
+listening Manager is evidence about the Manager. A durable liveness contract is
+its own decision, and it is not this slice's.
+
+### Command-scoped capability, proved against the shipped binary
+
+The claim is not "this build has a server" but "this build opens an inbound
+socket only when one verb asks for one", and that needs two different kinds of
+evidence.
+
+A source sweep pins `createServer` and `.listen(` to one module, and pins that
+module to one importer. `tests/v2-10-operator-notification.test.ts` — the sweep
+that used to say the network surface of this build is *one* file — now names two
+and says which direction each is, and its `node:*` branch finally has a
+false-negative guard: until this slice that branch matched nothing anywhere in
+`src/`, so it was an absence assertion with no subject.
+
+`test:dist-dashboard-listen` is the behavioural half, against
+`build/cli/index.js` in real processes, with a preload that replaces
+`net.Server.prototype.listen` and `dgram.createSocket`. The existing egress gate
+could not see any of this: it arms `fetch`, `connect`, `dns` and the request
+builders — every way a process reaches out — and an accepted connection calls
+none of them. Four runs:
+
+1. an ordinary command (`attention`) completes with every listening surface
+   fatal and opens none;
+2. the **same** tripwire kills `dashboard serve` with exit 88 — the positive
+   control, without which the first case is a green light that measures nothing;
+3. the bounded run comes up on `127.0.0.1` only (read back off the listener),
+   announces itself on stdout, answers the route with its caching and Host
+   semantics, and opens exactly one listener;
+4. a port already held produces exit `4` carrying `EADDRINUSE` with **zero**
+   listeners, which is the no-fallback claim.
+
+One measurement is worth recording because it nearly made the gate lie:
+`net.Server.prototype.listen` resolves its `host` option through `dns.lookup`
+*even when the host is already an IP literal*. A tripwire that made any lookup
+fatal therefore killed the Manager on the very call the gate exists to watch and
+reported it as egress. The bound is on the subject instead — the loopback
+literals pass, any other name is fatal.
+
+### What this slice does not ship
+
+No user interface: there is nothing to look at at that address yet, only JSON.
+No authentication. No remote access, and no integration with anything that could
+provide it — reaching this from a phone is an access layer an operator puts in
+front of it, and this build neither provides one, configures one, detects one,
+parses its headers nor grows a setting for it. No TLS: this process terminates
+none and asserts nothing about what might sit in front of it, which is why it
+sends no HSTS. No write route, no control plane, no WebSocket, no server-sent
+events, and no `READY_FOR_PR` transition — that state is still terminal and this
+service still only reads.
 
 ## Not implemented yet
 

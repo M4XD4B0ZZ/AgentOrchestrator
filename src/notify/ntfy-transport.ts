@@ -194,7 +194,10 @@ function attentionBodyFor(topic: string, notification: AttentionPush): string {
  * It lives **in this file** because the property worth keeping is not "one
  * transport" but "egress happens in one place", which is what
  * `tests/v2-10-operator-notification.test.ts` measures over the tree. A second
- * socket-opening module would have broken that whatever it was called.
+ * EGRESS module would have broken that whatever it was called — and the word is
+ * load-bearing now: DASHBOARD-001 slice 3 added `dashboard/http-server.ts`,
+ * which opens an inbound socket and reaches nothing, so that sweep runs as two
+ * directional halves and this file is still the only one on the egress half.
  *
  * One bounded attempt, no retry, no redirect, no response body — identical to
  * its sibling, for the reasons this file's header gives.

@@ -20,7 +20,7 @@
  * ── Absence is the switch ──────────────────────────────────────────────────
  *
  * No file means notifications are off, and "off" is total: no transport is
- * constructed, no host is resolved, no socket is opened. That is the whole
+ * constructed, no host is resolved, no outbound socket is opened. That is the whole
  * opt-in mechanism, and it is the absence of a file rather than the default of a
  * flag — a default is something a later edit can flip by forgetting a case.
  *

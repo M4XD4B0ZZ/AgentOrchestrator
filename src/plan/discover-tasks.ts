@@ -85,7 +85,6 @@
 import { readdirSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 
-import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import {
   proveContainedDirectory,
   readContainedFile,
@@ -201,6 +200,37 @@ const FAILURE_DETAIL: Readonly<Record<TaskDiscoveryFailureCode, string>> = Objec
   TASK_ID_FILENAME_MISMATCH:
     'A task file’s declared identifier is not the identifier its filename states.',
 });
+
+/**
+ * Everything discovery needs in order to find a repository's task files.
+ *
+ * ── Why this is narrower than `ResolvedRepository` ─────────────────────────
+ *
+ * It is the exact subset {@link discoverTasks} reads, and the parameter used to
+ * be the whole resolved repository — thirteen fields, of which this function
+ * touches two. That was not merely generous, it was *untrue about the
+ * requirement*, and the difference is load-bearing for a read-only caller.
+ *
+ * `ResolvedRepository` can only be produced by `resolveRepository`, which runs
+ * five `git` children plus a delivery-target read. Discovery itself starts no
+ * process at all: its whole runtime I/O is one `readdirSync` and a bounded read
+ * per file. So a caller that must not spawn — a dashboard polling durable state
+ * every few seconds — was blocked by the *type*, never by the work.
+ *
+ * Such a caller cannot honestly build a `ResolvedRepository` either. Its
+ * `gitCommonDir` is a question only Git answers, and fabricating one to satisfy
+ * a cast would be a lie told to the type system about which repository this is.
+ * Naming the real requirement is the honest fix.
+ *
+ * Nothing is taken away: `ResolvedRepository` is structurally assignable to
+ * this, so every existing caller compiles and behaves exactly as before.
+ */
+export interface TaskSourceLocation {
+  /** Canonical, absolute repository root. Never CWD-derived. */
+  readonly root: string;
+  /** The declared task source. Only `path` is read; `kind` is not consulted. */
+  readonly taskSource: { readonly path: string };
+}
 
 export interface TaskDiscoverySuccess {
   readonly ok: true;
@@ -348,12 +378,20 @@ function isFailure(value: TaskDefinition | TaskDiscoveryFailure): value is TaskD
 }
 
 /**
- * Discovers every task declared by a resolved repository.
+ * Discovers every task a repository declares.
  *
- * Never throws for an expected condition: every failure is a
- * {@link TaskDiscoveryFailure} carrying a closed code.
+ * Takes {@link TaskSourceLocation} — the two fields it reads — rather than a
+ * whole `ResolvedRepository`, so that a caller which must not start a process
+ * can state its input truthfully. See that type for why.
+ *
+ * Starts no subprocess and makes no network call. Never throws for an expected
+ * condition: every failure is a {@link TaskDiscoveryFailure} carrying a closed
+ * code. Note that it is **all-or-nothing** — the first unusable task file ends
+ * discovery and no tasks are returned — and that an empty source directory is
+ * `TASK_SOURCE_EMPTY` rather than an empty list, deliberately, so that "no tasks
+ * were found" can never be read as "all tasks are complete".
  */
-export function discoverTasks(repository: ResolvedRepository): TaskDiscoveryResult {
+export function discoverTasks(repository: TaskSourceLocation): TaskDiscoveryResult {
   const root = repository.root;
 
   // --- 1. Locate the task source, from the canonical root ------------------

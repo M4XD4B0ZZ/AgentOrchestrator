@@ -645,9 +645,32 @@ describe('the transport puts a bounded JSON document on the socket', () => {
 
 /* ───────────────── 7. one file may reach the network, and one only ───────── */
 
-describe('the network surface of this build is one module', () => {
+describe('the network surface of this build is two modules', () => {
   const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
-  const ALLOWED = 'notify/ntfy-transport.ts';
+
+  /**
+   * TWO sweeps, not one allow-list over one combined pattern.
+   *
+   * The distinction is the whole point and the first version of this change did
+   * not implement it. `notify/ntfy-transport.ts` is the one place this build
+   * *sends* anything — the opt-in operator notification, and the reason this
+   * sweep was written. `dashboard/http-server.ts` is the one place it
+   * *receives* anything — DASHBOARD-001 slice 3's loopback listener, opened
+   * only by `dashboard serve`. Those are separate facts: egress is something
+   * this process decides to do, a listener is something it decides to allow.
+   *
+   * A single allow-list checked against `fetch( OR node:*` would have admitted
+   * both members to both halves, so the listener module would have been free to
+   * call `fetch` with nothing to notice — a widening dressed as a second entry.
+   * A review caught exactly that. Each direction therefore has its own pattern
+   * and its own expected set, and neither file is on the other's list.
+   *
+   * Sorted on both sides. The previous single-element form compared against
+   * whatever order the directory walk produced, which is a filesystem property
+   * rather than a property of this build. The sets are still pinned exactly.
+   */
+  const MAY_SEND = ['notify/ntfy-transport.ts'];
+  const MAY_LISTEN = ['dashboard/http-server.ts'];
 
   function sourceFiles(directory: string): string[] {
     return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -657,27 +680,66 @@ describe('the network surface of this build is one module', () => {
     });
   }
 
-  it('is the only place that can open a socket', () => {
-    // Over the tree rather than by convention: the property is that egress
-    // happens in one file, and a reviewer cannot maintain that by reading
-    // diffs. Comments are stripped first, so this module's own prose about the
-    // rule does not become an exception to it.
-    const network = /(^|[^\w.])fetch\s*\(|['"]node:(http|https|net|tls|dgram|dns)['"]/;
-    const offenders = sourceFiles(SRC).filter((path) => {
-      const code = readFileSync(path, 'utf8')
-        .replace(/\/\*[\s\S]*?\*\//g, '')
-        .replace(/^\s*\/\/.*$/gm, '');
-      return network.test(code);
-    });
+  /** Comments stripped, so a module's own prose is not an exception to it. */
+  function codeOf(path: string): string {
+    return readFileSync(path, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+  }
 
-    expect(offenders.map((path) => relative(SRC, path).split('\\').join('/'))).toEqual([ALLOWED]);
+  function offenders(pattern: RegExp): string[] {
+    return sourceFiles(SRC)
+      .filter((path) => pattern.test(codeOf(path)))
+      .map((path) => relative(SRC, path).split('\\').join('/'))
+      .sort();
+  }
+
+  it('names every place that can send', () => {
+    // Over the tree rather than by convention: a reviewer cannot maintain
+    // "egress happens in one file" by reading diffs.
+    expect(offenders(/(^|[^\w.])fetch\s*\(/)).toEqual(MAY_SEND);
   });
 
-  it('would notice if the pattern stopped matching the module it is aimed at', () => {
+  it('names every place that can open a socket of its own', () => {
+    expect(offenders(/['"]node:(http|https|net|tls|dgram|dns)['"]/)).toEqual(MAY_LISTEN);
+  });
+
+  it('keeps the two directions apart: neither module is on the other’s list', () => {
+    // The pin that makes the split mean something. If the listener module ever
+    // calls `fetch`, or the transport ever imports a socket builtin, the sweep
+    // above fails — which a single combined allow-list would not have done.
+    expect(MAY_SEND).not.toEqual(expect.arrayContaining(MAY_LISTEN));
+    expect(offenders(/(^|[^\w.])fetch\s*\(/)).not.toContain('dashboard/http-server.ts');
+    expect(offenders(/['"]node:(http|https|net|tls|dgram|dns)['"]/)).not.toContain(
+      'notify/ntfy-transport.ts',
+    );
+  });
+
+  it('would notice if the fetch pattern stopped matching the module it is aimed at', () => {
     // The false-negative guard: a scan that matches nothing is a scan that
     // passes for any tree at all.
     const code = readFileSync(join(SRC, 'notify', 'ntfy-transport.ts'), 'utf8');
     expect(/(^|[^\w.])fetch\s*\(/.test(code)).toBe(true);
+  });
+
+  /**
+   * The same guard for the other half of the pattern, which had none.
+   *
+   * Until the dashboard listener shipped, the `node:(http|https|net|…)` branch
+   * matched nothing anywhere under `src/` — the one occurrence in the tree was
+   * the word inside a comment in `ntfy-transport.ts`, which the sweep strips
+   * before testing. So that branch was an absence assertion with no subject:
+   * it would have gone on passing if it had been deleted, mistyped or narrowed
+   * to a module list nobody could reach.
+   *
+   * Comments are stripped here exactly as the sweep strips them, so this proves
+   * the branch matches the module's *code* rather than its prose.
+   */
+  it('would notice if the node-builtin pattern stopped matching the module it is aimed at', () => {
+    const code = readFileSync(join(SRC, 'dashboard', 'http-server.ts'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    expect(/['"]node:(http|https|net|tls|dgram|dns)['"]/.test(code)).toBe(true);
   });
 });
 

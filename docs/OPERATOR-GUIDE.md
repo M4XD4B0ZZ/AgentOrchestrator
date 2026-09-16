@@ -397,7 +397,9 @@ Test-Path "$env:USERPROFILE\.agent-orchestrator\notify.yaml"
 Soll: `True`.
 
 **Opt-in ist die Abwesenheit der Datei.** Ohne sie öffnet dieser Build keinen
-Socket — das ist gegen das ausgelieferte Artefakt gemessen, nicht behauptet.
+**ausgehenden** Socket — das ist gegen das ausgelieferte Artefakt gemessen,
+nicht behauptet. (Eingehend gibt es genau einen Fall, und er ist ein eigener
+Befehl: `dashboard serve`, siehe Abschnitt 19b.)
 
 Beim Start erscheint eine von drei Zeilen:
 
@@ -1935,6 +1937,65 @@ in diesem Satz.
 **Das ist ein Filter, kein Index.** Es wird weiterhin **jeder** Eintrag geöffnet
 und bewertet, um die Frage zu beantworten. `L-V4-14-3` ist damit ein zweites Mal
 verkleinert und immer noch offen.
+
+---
+
+## 19b. Das Dashboard lokal ansehen (DASHBOARD-001 Slice 3) — read-only
+
+```powershell
+agent-loop dashboard serve
+```
+
+Startet einen **lesenden** HTTP-Server und lässt ihn laufen, bis du Strg+C
+drückst:
+
+```text
+AO Manager listening on http://127.0.0.1:47113
+GET /api/snapshot — read-only. Stop with Ctrl+C.
+```
+
+Es gibt genau eine Route:
+
+```powershell
+curl http://127.0.0.1:47113/api/snapshot
+```
+
+Die Antwort ist JSON: was AO auf dieser Maschine über seine eigenen Repositories
+und Tasks sagen kann, ohne Pfade dieser Maschine preiszugeben. Jede Antwort trägt
+ein `ETag`; schickt man es beim nächsten Mal als `If-None-Match` zurück, kommt
+`304` ohne Body, solange sich inhaltlich nichts geändert hat. Ein Handy, das im
+Sekundentakt fragt, kostet damit fast nichts.
+
+**Was der Befehl nicht tut, und das ist der wichtigere Teil:**
+
+* Er **schreibt nichts**. Keine Lease, kein Task-State, kein Worktree, kein Git,
+  kein Agent, kein Pull Request.
+* Er bindet **ausschließlich `127.0.0.1`**. Es gibt keinen Schalter, der das
+  verbreitert. AO selbst macht ihn also von keinem anderen Gerät erreichbar —
+  ob eine Zugangsschicht, die du außerhalb von AO einrichtest, das tut, ist
+  eine Aussage über diese Schicht, und die kann dieser Build nicht treffen.
+* Er **authentifiziert niemanden**. Wer diesen Port erreicht, liest den Snapshot.
+  Genau deshalb ist er an Loopback gebunden.
+* Er terminiert **kein TLS** und weiß nichts über irgendeine Zugangsschicht davor.
+  Wenn du ihn vom Handy erreichen willst, ist das eine Sache, die du **außerhalb**
+  von AO einrichtest; AO kennt sie nicht und konfiguriert sie nicht.
+* Es gibt **keine Oberfläche**. Nur JSON.
+* Er sagt **nicht**, ob AO gerade läuft. Dieser Build schreibt keinen Heartbeat,
+  also sind „AO ist untätig", „AO ist fertig" und „AO wurde nie gestartet" von
+  außen dieselbe Beobachtung. Der Snapshot behauptet keine der drei.
+
+**Der Port ist fest.** Ist er belegt, bricht der Befehl ab und sagt, welche
+Adresse und welcher Fehler — er sucht sich **keinen** anderen Port:
+
+```text
+agent-loop: could not bind 127.0.0.1:47113 [EADDRINUSE]. The port is fixed: nothing else was tried.
+```
+
+Exit-Code `4`. Mit `--port <n>` kann man einen anderen festen Port wählen.
+`--port 0` wird abgelehnt, weil das „such dir einen aus" bedeutet.
+
+Der Server ist ein **eigener Prozess**. Er startet kein AO, AO startet ihn nicht,
+und wenn einer von beiden stirbt, merkt der andere nichts davon.
 
 ---
 

@@ -19,6 +19,7 @@ import { Command } from 'commander';
 
 import { formatSafeError } from '../core/safe-error.js';
 import { registerBlockCommand } from './block-command.js';
+import { registerDashboardCommand } from './dashboard-command.js';
 import { registerDeliveryCommand } from './delivery-command.js';
 import { registerDoctorCommand } from './doctor-command.js';
 import { registerLeaseCommand } from './lease-command.js';
@@ -80,12 +81,38 @@ const DESCRIPTION = [
   '    together show only the records naming that one branch — anything this',
   '    build could not read in full is shown either way — and it is a filter and',
   '    not an index: every entry is still read to answer it',
+  '  - `attention`: the read-only outbox of every condition this machine has',
+  '    written down that no run can move on its own, and which of them have not',
+  '    reached a notification endpoint. It reads one directory under this OS',
+  '    user’s profile, names no repository and removes nothing. An empty listing',
+  '    means nothing is open, which is an answer; a store that could not be read',
+  '    says so on its own line and is never reported as empty',
+  '  - `dashboard serve`: the AO Manager. A read-only HTTP server bound to',
+  '    127.0.0.1 that answers one route with what this machine can observe of its',
+  '    own durable state, for a browser on this machine. It writes nothing, takes',
+  '    no lease and starts no program, and it cannot say whether orchestration is',
+  '    running — this build records nothing that would answer that',
   '',
-  'Network access, stated in full. Exactly one request is made by this process',
-  'itself, and it is opt-in:',
-  '  - the operator notification for a block run that needs a human: off unless',
-  '    ~/.agent-orchestrator/notify.yaml exists, and never enabled by anything',
-  '    inside a repository',
+  'Network access, stated in full. It has two directions and they are separate',
+  'facts. Outbound, every request this process makes itself is opt-in on one',
+  'file, and there is no other way to arm one:',
+  '  - the operator notification: off unless ~/.agent-orchestrator/notify.yaml',
+  '    exists, and never enabled by anything inside a repository. That includes',
+  '    the ending of a block run that needs a human, and the attention items a',
+  '    waiting `repositories --attended` pass has found nobody has been told',
+  '    about yet',
+  '',
+  'Inbound, a socket is listened on where an invocation asks for one, and that',
+  'is the rule rather than a list of which verbs do it today:',
+  '  - `dashboard serve` binds 127.0.0.1 — the loopback address, and never a',
+  '    name for a resolver to answer, a LAN address or a public one — and serves',
+  '    one read-only route to whatever can already reach this machine. It',
+  '    accepts a request whose Host header it was told to accept and refuses the',
+  '    rest, which is routing hardening and is not authentication: this build',
+  '    authenticates nobody, derives no trust from a remote address or a',
+  '    forwarding header, and terminates no TLS. Reaching it from a phone is an',
+  '    access layer an operator puts in front of it, which this build neither',
+  '    provides nor learns about',
   '',
   'Every other request this build is answerable for is made by a program it',
   'starts. That still counts as network access here, under the same rule the',
@@ -256,6 +283,7 @@ export function buildProgram(): Command {
   registerPublicationCommand(program);
   registerRepositoriesCommand(program);
   registerAttentionCommand(program);
+  registerDashboardCommand(program);
 
   return program;
 }

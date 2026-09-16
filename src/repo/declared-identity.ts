@@ -19,9 +19,11 @@
  *
  * This asks the *same* contract the resolver asks, through the same steps — the
  * shared containment-and-safety chain, `loadProfileDocument`,
- * `safeParseRepoProfile` — and stops once it has the identity. It deliberately
- * re-implements no validation, because a second opinion about what a valid
- * profile is would drift from the first one.
+ * `safeParseRepoProfile` — and stops there, without resolving anything. It
+ * deliberately re-implements no validation, because a second opinion about what
+ * a valid profile is would drift from the first one. For the same reason the
+ * identity is a *projection* of the profile reader rather than a second chain
+ * of its own.
  *
  * ── What it does not claim ─────────────────────────────────────────────────
  *
@@ -37,7 +39,7 @@
 import { readContainedFile } from './internal/contained-file.js';
 import { loadProfileDocument } from './profile-yaml.js';
 import { repoProfilePath } from './profile-location.js';
-import { safeParseRepoProfile } from './repo-profile.js';
+import { safeParseRepoProfile, type RepoProfile } from './repo-profile.js';
 
 /**
  * Largest profile this reader will parse.
@@ -74,14 +76,41 @@ const FAILED: DeclaredIdentityFailure = Object.freeze({
   code: 'REPOSITORY_PROFILE_UNUSABLE' as const,
 });
 
+/** A profile this checkout declares, validated. */
+export interface DeclaredProfile {
+  readonly ok: true;
+  /** The whole parsed profile, exactly as the contract validates it. */
+  readonly profile: RepoProfile;
+}
+
+export type DeclaredProfileResult = DeclaredProfile | DeclaredIdentityFailure;
+
 /**
- * Reads `repository.id` from the profile at the one canonical location.
+ * Reads the whole profile at the one canonical location, without resolving it.
  *
  * Synchronous, read-only, and never throws: every failure is the single code
  * above. No Git, no network, no capability probe — this is a question about a
  * file, and answering it must not depend on the repository being *workable*.
+ *
+ * ── Why the whole profile, and not only the identity ───────────────────────
+ *
+ * This chain always parsed the whole document; the narrower reader below simply
+ * projected one field out of it and dropped the rest. A second reader for the
+ * other fields would have been the second opinion this module's header refuses,
+ * so the reader was widened and the identity became a projection of it. There
+ * is still exactly one git-free profile reader and exactly one parse.
+ *
+ * The caller that needed this is a read-only observer. `taskSource.path` is
+ * enough to discover a repository's declared tasks — see `TaskSourceLocation` in
+ * `plan/discover-tasks.ts` — and obtaining it through `resolveRepository` would
+ * have cost five `git` children for a value that is sitting in a committed file.
+ *
+ * Note the ceiling: {@link MAX_DECLARED_IDENTITY_BYTES} is narrower than the
+ * resolver's own profile ceiling, so a profile between the two sizes resolves
+ * and is refused here. That is the existing contract of this reader and is not
+ * widened by this function.
  */
-export function readDeclaredRepositoryId(repositoryRoot: string): DeclaredIdentityResult {
+export function readDeclaredProfile(repositoryRoot: string): DeclaredProfileResult {
   const read = readContainedFile(
     repositoryRoot,
     repoProfilePath(repositoryRoot),
@@ -95,5 +124,18 @@ export function readDeclaredRepositoryId(repositoryRoot: string): DeclaredIdenti
   const parsed = safeParseRepoProfile(document.document);
   if (!parsed.success) return FAILED;
 
-  return Object.freeze({ ok: true as const, id: parsed.data.repository.id });
+  return Object.freeze({ ok: true as const, profile: parsed.data });
+}
+
+/**
+ * Reads `repository.id` from the profile at the one canonical location.
+ *
+ * A projection of {@link readDeclaredProfile}, rather than a second chain, so
+ * the two can never grow two opinions about what a valid profile is. Its
+ * contract is unchanged: synchronous, read-only, never throws, one failure code.
+ */
+export function readDeclaredRepositoryId(repositoryRoot: string): DeclaredIdentityResult {
+  const read = readDeclaredProfile(repositoryRoot);
+  if (!read.ok) return read;
+  return Object.freeze({ ok: true as const, id: read.profile.repository.id });
 }
