@@ -11,10 +11,15 @@
  *     a value that must survive and a value that must not;
  *  3. the configuration is the opt-in, and every way of being unusable is a
  *     printed code rather than an exception or a default;
- *  4. the transport is the only network surface, which is measured over the tree
- *     — and its bytes are measured against a real loopback server rather than a
- *     stub, because "what does this actually put on a socket" is not a question
- *     an injected seam can answer.
+ *  4. the network surface is two process modules, measured over the tree in two
+ *     directions that are kept apart: the transport is the only place this
+ *     build *sends*, and DASHBOARD-001's loopback listener the only place it
+ *     *opens a socket of its own*. (Slice 4 added browser files that call
+ *     `fetch`; those are bytes this build serves, and the call runs in a
+ *     browser, so they are named in their own list rather than in either of
+ *     these.) The transport's bytes are then measured against a real loopback
+ *     server rather than a stub, because "what does this actually put on a
+ *     socket" is not a question an injected seam can answer.
  *
  * What is **not** claimed here: that the shipped binary opens no socket without
  * a configuration file. Every notifier in this file is either built over a
