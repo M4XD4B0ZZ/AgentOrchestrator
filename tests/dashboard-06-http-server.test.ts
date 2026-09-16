@@ -918,3 +918,57 @@ describe('the server writes what the contract decided, and nothing more', () => 
     });
   });
 });
+
+/* ── 7. the claim about caching, in every copy of it ──────────────────────── */
+
+describe('the no-cache claim is scoped to the thing that is actually re-read', () => {
+  /**
+   * The cases above measure the property: no handle is held across
+   * AgentOrchestrator's atomic rename, and nothing on disk moves. This one
+   * pins the SENTENCE, because the sentence went out of date on its own.
+   *
+   * Until slice 4 this server answered one route by reading the disk, so "every
+   * request reads afresh" described every request there was. Since slice 4 it
+   * also answers the UI from a map loaded before the socket existed, and those
+   * requests read nothing — so the old sentence claims disk I/O that does not
+   * happen, in a paragraph whose whole point is which I/O happens.
+   *
+   * Both copies are checked in one case because they are one claim.
+   * `http-server.ts` states it for a reader of the module and `README.md`
+   * states it for an operator, and fixing a sentence in one copy while its twin
+   * stands is the defect this branch has hit more often than any other.
+   */
+  const flatten = (at: string): string =>
+    readFileSync(new URL(at, import.meta.url), 'utf8')
+      // Strip a JSDoc line's leading `*`, but never Markdown's `**bold**`.
+      .replace(/^[ \t]*\*(?!\*)[ \t]?/gm, '')
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+
+  // Retracted: true of slice 3, false of six of this build's eight routes.
+  const RETRACTED = [
+    'every request reads afresh',
+    'each request reads afresh',
+    'there is no cache.',
+  ];
+
+  // The argument that survives, and the half slice 4 added to it. The second is
+  // what makes the first stronger rather than narrower: an asset cannot hold a
+  // handle across a rename either, because it never opens one.
+  const REQUIRED = ['the snapshot is never cached', 'reads nothing at all'];
+
+  it('never says, in either copy, that every request reads afresh', () => {
+    // Asserted as booleans rather than through `toContain`, because a failing
+    // `toContain` prints its subject — and one of these subjects is the whole
+    // of README.md. A message naming the phrase and the file is the useful one.
+    for (const copy of ['../src/dashboard/http-server.ts', '../README.md']) {
+      const text = flatten(copy);
+      for (const phrase of RETRACTED) {
+        expect(text.includes(phrase), `${copy} still says "${phrase}"`).toBe(false);
+      }
+      for (const phrase of REQUIRED) {
+        expect(text.includes(phrase), `${copy} does not say "${phrase}"`).toBe(true);
+      }
+    }
+  });
+});

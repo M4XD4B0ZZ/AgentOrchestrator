@@ -14652,14 +14652,25 @@ compares every byte **and every modification time** in a fixture repository
 before and after a run of requests, and checks that the operator profile
 directory is still empty afterwards.
 
-There is no cache. Each request reads afresh, measured at roughly 20 ms against
-this machine's real state (1 repository, 13 tasks, a 9.4 KB body) — cheap enough
-that the alternative is not worth what it costs, which is a handle. AO publishes
-durable state by renaming a temporary file over the old one, and on NTFS a
-reader holding a handle across that rename makes the **writer** fail. So there
-is no watcher and no stream, and the suite provokes the hazard rather than
-asserting its absence: after a request has read a task's state, that file is
-renamed over, which throws if anything still holds it.
+**The snapshot is never cached.** Each request for it reads afresh, measured at
+roughly 20 ms against this machine's real state (1 repository, 13 tasks, a 9.4
+KB body) — cheap enough that the alternative is not worth what it costs, which
+is a handle. AO publishes durable state by renaming a temporary file over the
+old one, and on NTFS a reader holding a handle across that rename makes the
+**writer** fail. So there is no watcher and no stream, and the suite provokes
+the hazard rather than asserting its absence: after a request has read a task's
+state, that file is renamed over, which throws if anything still holds it.
+
+The UI's own bytes are held in memory, and that strengthens the argument rather
+than conceding ground to it: a request for an asset reads nothing at all,
+because every asset was read once before the socket existed and is answered from
+memory afterwards. So no request this server answers — snapshot or asset — can
+be holding a handle when AO renames a file over it.
+
+In the browser there *is* a cache, and its boundary is written down rather than
+implied. The service worker caches only its versioned application shell.
+`/api/snapshot` is never cached, and caches outside the `ao-shell-*` namespace
+are left untouched. `src/dashboard/ui/sw.js` argues both halves in full.
 
 ### The Manager is a separate process, and says nothing about AO
 

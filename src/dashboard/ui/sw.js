@@ -1,5 +1,20 @@
 /**
- * DASHBOARD-001 slice 4 — the shell cache, and nothing else.
+ * DASHBOARD-001 slice 4 — its own versioned shell cache, and never the snapshot.
+ *
+ * Stated as the boundary `activate` actually implements, because the vaguer
+ * sentence that stood here was wrong in both directions at once. This worker
+ * writes ONE cache, `ao-shell-<digest>`, named for this build's shell, and
+ * writes it at install and never again. It never caches `/api/snapshot`, which
+ * is the single thing this slice exists to prevent. Inside its own namespace it
+ * is an owner and behaves like one: `activate` deletes every superseded
+ * `ao-shell-*`. Outside the `ao-shell-*` namespace it touches nothing, whoever
+ * left the cache there.
+ *
+ * The heading used to end "and nothing else". That reads as a claim about the
+ * ORIGIN — that no other cache is present — which this worker neither knows nor
+ * controls, and it blurred the half it does control, because a superseded shell
+ * of its own is deleted on purpose rather than spared. A prefix test is a
+ * boundary a reader can check; a disclaimer is not.
  *
  * ── Why there is a fetch handler at all ────────────────────────────────────
  *

@@ -25,14 +25,20 @@
  *
  * ── Handles ────────────────────────────────────────────────────────────────
  *
- * There is no watcher, no `fs.watch`, no open descriptor kept between requests
- * and no cached snapshot. Every request reads afresh through readers that open,
- * read and close within one synchronous call. That matters on NTFS in
- * particular: AgentOrchestrator publishes durable state by writing a temporary
- * file and renaming it over the old one, and a reader holding a handle across
- * that rename is a reader that can make the *writer* fail. A poll that costs a
- * few milliseconds and holds nothing is worth more than a cache that holds a
- * file open.
+ * There is no watcher, no `fs.watch`, no open descriptor kept between requests,
+ * and the snapshot is never cached: every request for `/api/snapshot` reads
+ * afresh through readers that open, read and close within one synchronous call.
+ * A request for a UI asset reads nothing at all — every asset was read into
+ * memory before this module was handed a port, and is answered from there
+ * afterwards.
+ *
+ * That matters on NTFS in particular: AgentOrchestrator publishes durable state
+ * by writing a temporary file and renaming it over the old one, and a reader
+ * holding a handle across that rename is a reader that can make the *writer*
+ * fail. Neither kind of request can be holding one. A poll that costs a few
+ * milliseconds and holds nothing is worth more than a cache that holds a file
+ * open; an asset holds nothing because its bytes are already here, and its one
+ * visit to the disk happened before the socket existed.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';

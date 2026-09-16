@@ -89,7 +89,7 @@ export const CONSTANT_HEADERS: Readonly<Record<string, string>> = Object.freeze(
   'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
 });
 
-/** The media type of every body this service produces. */
+/** The media type of the snapshot body. Each asset carries its own instead. */
 export const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
 
 /**

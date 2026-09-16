@@ -312,6 +312,30 @@ describe('the worker persists no orchestration state', () => {
   });
 });
 
+describe('the file claims only the cache it owns', () => {
+  it('never says its shell cache is the only cache on this origin', () => {
+    // The retracted heading ended "and nothing else", which claims something
+    // about the ORIGIN that this worker neither knows nor controls — and it
+    // blurred the half it does control, because inside its own namespace this
+    // worker is an owner: `activate` deletes every superseded `ao-shell-*`.
+    // The boundary it actually implements is a prefix test, so the sentence is
+    // pinned on the namespace rather than on a disclaimer. The heading is the
+    // subject because it is the first sentence a reader of this file gets, and
+    // it was the one sentence in the file that overreached.
+    const flat = SOURCE.replace(/^[ 	]*\*(?!\*)[ 	]?/gm, '')
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+
+    expect(flat).not.toContain('the shell cache, and nothing else');
+
+    // What it owns, what it refuses to hold, and where it stops — the last one
+    // named as the namespace `activate` tests for, not as a vaguer promise.
+    expect(flat).toContain('its own versioned shell cache');
+    expect(flat).toContain('never caches `/api/snapshot`');
+    expect(flat).toContain('outside the `ao-shell-*` namespace it touches nothing');
+  });
+});
+
 describe('the build tokens are what ships', () => {
   it('carries both placeholders verbatim and unsubstituted', () => {
     // Task 9 substitutes these. A committed file that already had a digest in
