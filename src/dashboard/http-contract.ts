@@ -129,8 +129,31 @@ export interface DashboardRequestFacts {
 export interface DashboardHttpResponse {
   readonly status: number;
   readonly headers: Readonly<Record<string, string>>;
-  /** `null` means no body at all — not an empty one. */
-  readonly body: string | null;
+  /**
+   * `null` means no body at all — not an empty one.
+   *
+   * `Uint8Array` is not a convenience. Two of this build's assets are PNG, and
+   * a PNG is full of bytes that are not valid UTF-8. `write` (in
+   * `http-server.ts`) sends the string arm with an explicit `'utf8'`
+   * encoding, which re-interprets every UTF-16 code unit as a Unicode code
+   * point and re-encodes it — the identity mapping only below U+0080. A byte
+   * held in a string this way is therefore not the byte that reaches the
+   * wire, and the declared `Content-Length` ends up describing bytes that
+   * never left. The two arms are measured separately, by `bodyByteLength`
+   * below, for that same reason.
+   */
+  readonly body: string | Uint8Array | null;
+}
+
+/**
+ * The length of a body in bytes, for either arm.
+ *
+ * `String.prototype.length` counts UTF-16 code units and is the wrong number
+ * for any non-ASCII character; `Buffer.byteLength` counts what goes on the
+ * wire. A `Uint8Array` is already bytes.
+ */
+export function bodyByteLength(body: string | Uint8Array): number {
+  return typeof body === 'string' ? Buffer.byteLength(body, 'utf8') : body.byteLength;
 }
 
 /* ── hosts ─────────────────────────────────────────────────────────────────── */
@@ -285,7 +308,7 @@ function refuse(
       ...CONSTANT_HEADERS,
       ...extra,
       'Content-Type': JSON_CONTENT_TYPE,
-      'Content-Length': String(Buffer.byteLength(body, 'utf8')),
+      'Content-Length': String(bodyByteLength(body)),
     }),
     body,
   });
@@ -414,7 +437,7 @@ export function respondToDashboardRequest(
       ...CONSTANT_HEADERS,
       ETag: tag,
       'Content-Type': JSON_CONTENT_TYPE,
-      'Content-Length': String(Buffer.byteLength(body, 'utf8')),
+      'Content-Length': String(bodyByteLength(body)),
     }),
     body,
   });

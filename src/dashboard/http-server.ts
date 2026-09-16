@@ -140,7 +140,16 @@ function write(response: ServerResponse, decided: DashboardHttpResponse): void {
     response.end();
     return;
   }
-  response.end(decided.body, 'utf8');
+  if (typeof decided.body === 'string') {
+    response.end(decided.body, 'utf8');
+    return;
+  }
+  // No encoding argument. Node's own stream contract applies `encoding` only
+  // to a string chunk, and this one is already a `Uint8Array` — there is
+  // nothing here for an encoding to do. The omission states plainly what is
+  // being sent (bytes, not text) rather than passing an argument that would
+  // be inert.
+  response.end(decided.body);
 }
 
 /**

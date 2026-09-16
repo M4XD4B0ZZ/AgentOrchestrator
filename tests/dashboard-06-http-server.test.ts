@@ -33,6 +33,7 @@
  */
 
 import { createServer, connect, type AddressInfo } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import {
   mkdirSync,
   mkdtempSync,
@@ -307,6 +308,44 @@ async function raw(port: number, requestText: string): Promise<RawAnswer> {
     body,
     raw: text,
   };
+}
+
+interface RawByteAnswer {
+  readonly status: number;
+  readonly headers: ReadonlyMap<string, string>;
+  readonly body: Buffer;
+}
+
+/**
+ * The same hand-written request as `raw`, but the reply is kept as BYTES.
+ *
+ * `raw` decodes to a UTF-8 string, which is the right instrument for a JSON
+ * refusal and the wrong one here: it would perform in the test exactly the
+ * corruption this case exists to detect in the server.
+ */
+async function rawBytes(port: number, requestText: string): Promise<RawByteAnswer> {
+  const chunks = await bounded(
+    new Promise<Buffer[]>((resolve, reject) => {
+      const received: Buffer[] = [];
+      const socket = connect({ host: '127.0.0.1', port }, () => socket.write(requestText));
+      socket.on('data', (chunk: Buffer) => received.push(chunk));
+      socket.on('close', () => resolve(received));
+      socket.on('error', reject);
+    }),
+    `a reply to ${requestText.split('\r\n')[0] ?? 'a request'}`,
+  );
+
+  const all = Buffer.concat(chunks);
+  const split = all.indexOf('\r\n\r\n');
+  const head = split < 0 ? all.toString('latin1') : all.subarray(0, split).toString('latin1');
+  const body = split < 0 ? Buffer.alloc(0) : all.subarray(split + 4);
+  const lines = head.split('\r\n');
+  const headers = new Map<string, string>();
+  for (const line of lines.slice(1)) {
+    const colon = line.indexOf(':');
+    if (colon > 0) headers.set(line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim());
+  }
+  return { status: Number((lines[0] ?? '').split(' ')[1] ?? '0'), headers, body };
 }
 
 function getRequest(port: number, path = '/api/snapshot', extra: readonly string[] = []): string {
@@ -901,6 +940,45 @@ describe('the server writes what the contract decided, and nothing more', () => 
         Number(bodied.headers.get('content-length')),
       );
     });
+  });
+
+  /**
+   * Bytes, not text.
+   *
+   * The icons slice 4 serves are PNG, and a PNG is full of bytes that are not
+   * valid UTF-8. `write` used to end every response with an explicit `'utf8'`
+   * encoding, which silently replaces each of them with U+FFFD and then
+   * reports a `Content-Length` describing bytes that were never sent. A test
+   * asserting only the status and the content type passes against exactly that
+   * corruption, which is why this one counts and compares the bytes.
+   *
+   * There is no `/__bytes-probe` route, in production or in this test: the
+   * point is what `write` does with a `Uint8Array`, not what any route
+   * decides, so this case builds its own throwaway server directly on
+   * `node:http` rather than adding a route nothing else would ever use.
+   */
+  it('writes a binary body byte for byte, and describes it by byte length', async () => {
+    // A deliberately hostile little payload: a real PNG signature, a lone 0xFF
+    // (never valid UTF-8), an embedded NUL, and a byte above 0x7F.
+    const payload = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xc3]);
+
+    const server = createHttpServer((_request, response) => {
+      response.writeHead(200, {
+        'Content-Type': 'image/png',
+        'Content-Length': String(payload.byteLength),
+      });
+      response.end(payload);
+    });
+    const port = await freePort();
+    await new Promise<void>((settle) => server.listen({ host: '127.0.0.1', port }, () => settle()));
+    try {
+      const answer = await rawBytes(port, getRequest(port, '/'));
+      expect(answer.status).toBe(200);
+      expect(answer.headers.get('content-length')).toBe(String(payload.byteLength));
+      expect(Buffer.compare(answer.body, Buffer.from(payload))).toBe(0);
+    } finally {
+      await new Promise<void>((settle) => server.close(() => settle()));
+    }
   });
 
   it('writes exactly the bytes it declared for a 200', async () => {

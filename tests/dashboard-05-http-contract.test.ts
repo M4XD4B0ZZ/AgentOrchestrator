@@ -391,7 +391,13 @@ describe('the body is the public snapshot, serialised once', () => {
     const snapshot = snapshotWith(REVISION);
     const response = answer({}, DEFAULT_ALLOWED, snapshot);
     expect(response.body).toBe(`${canonicalJson(snapshot)}\n`);
-    expect(JSON.parse(response.body ?? '')).toEqual(snapshot);
+    // The contract's 200 branch always serialises to a string; the widened
+    // `body` type is for `http-server.ts`'s write path (slice 4's PNG
+    // assets), which this contract never produces. Narrowed here rather than
+    // cast, so a future contract change that actually returned bytes would
+    // fail this assertion instead of being silently coerced past it.
+    expect(typeof response.body).toBe('string');
+    expect(JSON.parse(typeof response.body === 'string' ? response.body : '')).toEqual(snapshot);
   });
 
   it('is the same bytes for the same snapshot, every time', () => {
