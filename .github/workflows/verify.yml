@@ -80,6 +80,10 @@ jobs:
     # from the feeling that it is too small again.
     #
     # 2026-09-15: eighteen dist-artefact checks, not sixteen.
+    # 2026-09-15 (later): nineteen. DASHBOARD-001 slice 3 added
+    # `test:dist-dashboard-listen`, which compiles nothing extra — it reuses the
+    # build the chain already made — and spends its time on four short real
+    # processes rather than on a compile. The ceiling is not raised for it.
     # AO-RUNTIME-ISOLATION-001 added `test:dist-runtime-isolation` and
     # `test:dist-runtime-deployment`, and each compiles the project once more —
     # so the gate now performs three full compiles rather than one. The ceiling

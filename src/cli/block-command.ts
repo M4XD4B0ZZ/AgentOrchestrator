@@ -156,9 +156,11 @@ export interface BlockCommandSeams {
    * arguments — so a test that wants an armed one writes a configuration into a
    * scratch profile and builds the real notifier over it. And nothing this seam
    * can be handed causes real egress: the transport it carries *is* the
-   * substitute. That the shipped binary opens no socket without the file is
-   * therefore not measured here at all, but against `dist` in a process with no
-   * seams in it.
+   * substitute. That the shipped binary opens no *outbound* socket without the
+   * file is therefore not measured here at all, but against `dist` in a process
+   * with no seams in it. (The direction matters since DASHBOARD-001 slice 3:
+   * `dashboard serve` opens an inbound one with no such file anywhere, which is
+   * a different claim measured by a different gate.)
    */
   readonly notifier?: OperatorNotifier;
 }
