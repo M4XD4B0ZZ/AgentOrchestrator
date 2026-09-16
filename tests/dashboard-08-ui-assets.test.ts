@@ -326,3 +326,81 @@ describe('a server carries its assets, and a missing one opens no socket', () =>
     }
   });
 });
+
+import { readFileSync as readSource } from 'node:fs';
+import { join as joinPath } from 'node:path';
+
+const UI_DIR = joinPath(process.cwd(), 'src', 'dashboard', 'ui');
+const read = (name: string): string => readSource(joinPath(UI_DIR, name), 'utf8');
+
+describe('the authored shell obeys the policy that serves it', () => {
+  it('has no inline script, no style element and no style attribute', () => {
+    // Not a nicety. The served policy carries no 'unsafe-inline', so any of
+    // these would be silently dropped by the browser and the page would be
+    // broken in a way no server-side test can see.
+    const html = read('index.html');
+    expect(html).not.toMatch(/<script(?![^>]*\ssrc=)/i);
+    expect(html).not.toMatch(/<style[\s>]/i);
+    expect(html).not.toMatch(/\sstyle\s*=/i);
+    expect(html).not.toMatch(/\son[a-z]+\s*=/i);
+  });
+
+  it('references everything root-relative, and nothing off this origin', () => {
+    const html = read('index.html');
+    expect(html).toContain('href="/app.css"');
+    expect(html).toContain('src="/app.js"');
+    expect(html).toContain('href="/manifest.webmanifest"');
+    expect(html).not.toMatch(/https?:\/\//);
+    // crossorigin on the manifest link changes credential behaviour for no
+    // reason here, and is a common copy-paste that breaks installability.
+    expect(html).not.toMatch(/rel="manifest"[^>]*crossorigin/i);
+  });
+
+  it('declares a manifest that can actually install', () => {
+    const manifest = JSON.parse(read('manifest.webmanifest')) as Record<string, unknown>;
+    expect(manifest['name']).toBe('AO Manager');
+    expect(manifest['short_name']).toBe('AO');
+    expect(manifest['start_url']).toBe('/');
+    expect(manifest['scope']).toBe('/');
+    expect(manifest['display']).toBe('standalone');
+    const icons = manifest['icons'] as { src: string; sizes: string; type: string }[];
+    expect(icons.map((i) => i.sizes).sort()).toEqual(['192x192', '512x512']);
+    for (const icon of icons) {
+      expect(icon.type).toBe('image/png');
+      expect(icon.src.startsWith('/')).toBe(true);
+    }
+  });
+
+  it('ships real PNG bytes, not a placeholder', () => {
+    for (const name of ['icon-192.png', 'icon-512.png']) {
+      const bytes = readSource(joinPath(UI_DIR, name));
+      expect(Buffer.compare(bytes.subarray(0, 8), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), name).toBe(0);
+      expect(bytes.byteLength, name).toBeGreaterThan(100);
+    }
+  });
+
+  it('names no vendor and no hostname this build cannot know', () => {
+    for (const name of ['index.html', 'app.css', 'manifest.webmanifest']) {
+      const text = read(name).toLowerCase();
+      for (const forbidden of ['tailscale', 'ts.net', 'localhost', '0.0.0.0', '100.']) {
+        expect(text, `${name} names ${forbidden}`).not.toContain(forbidden);
+      }
+    }
+  });
+});
+
+describe('the default asset root resolves for real, against the source tree', () => {
+  it('loads every manifest route from defaultUiAssetRoot() with no argument substitution', () => {
+    // The production default path, exercised for real: no temp directory, no
+    // stand-in root — the same call `dashboard serve` makes. This fails today
+    // because src/dashboard/ui/ does not exist; it is the first time in this
+    // slice that call can succeed against the source tree.
+    const loaded = loadUiAssets(defaultUiAssetRoot());
+    expect(loaded.outcome).toBe('LOADED');
+    if (loaded.outcome !== 'LOADED') return;
+    expect(loaded.assets.size).toBe(UI_ASSET_MANIFEST.length);
+    for (const entry of UI_ASSET_MANIFEST) {
+      expect(loaded.assets.has(entry.route), entry.route).toBe(true);
+    }
+  });
+});
