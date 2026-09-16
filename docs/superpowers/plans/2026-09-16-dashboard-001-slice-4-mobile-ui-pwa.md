@@ -342,6 +342,14 @@ git commit -m "feat(dashboard): a closed asset manifest, read all at once or not
 
 **Why this task exists:** `write()` currently calls `response.end(decided.body, 'utf8')`. Two of the seven assets are PNGs. A UTF-8 round trip replaces every byte outside the ASCII range with U+FFFD and reports a `Content-Length` that does not match what is sent. This must land **before** any icon is served, and it is separable, so it gets its own reviewable commit.
 
+> **Pre-flight ruling (F-4).** Skip Step 1's provisional test form below and
+> write **Step 3d's final test directly**, together with its `rawBytes` helper.
+> Step 1's version fails because a helper is undefined, which is the wrong
+> reason — it proves nothing about the defect under test. Keep the fail-first
+> discipline by writing the final test and its helper, running it against the
+> **unchanged** `write()`, and watching it fail on the byte comparison. There is
+> no `/__bytes-probe` route, in the test or anywhere else.
+
 - [ ] **Step 1: Write the failing test**
 
 Append to `tests/dashboard-06-http-server.test.ts`, inside the
@@ -796,6 +804,25 @@ git commit -m "feat(dashboard): an asset route that is a map lookup, never a pat
 **Interfaces:**
 - Consumes: `loadUiAssets`, `uiAssetRoot` (Task 1); the four-argument contract (Task 3).
 - Produces: `DashboardServerConfig.assets: DashboardAssetMap`; the outcome `UI_ASSETS_UNUSABLE`.
+
+> **Pre-flight ruling (F-1).** `assets` is a **required** member, not an optional
+> one with an empty default. An optional member would let a production path start
+> a server that silently serves no UI — the same partial-serve failure §4.5
+> refuses — whereas a required one turns every construction site into a compile
+> error, which is the cheaper teacher.
+>
+> That means this task must **also update every existing construction of
+> `DashboardServerConfig`**, which the plan's file list did not name. Find them
+> before you start:
+>
+> ```bash
+> grep -rn "bindHost:" tests/ src/ --include=*.ts --include=*.mjs | grep -v node_modules
+> ```
+>
+> At minimum this includes `serving()` in `tests/dashboard-06-http-server.test.ts`.
+> Each such site that has no UI to serve passes `new Map()` explicitly. Do not
+> give them a shared helper that hides the argument — the explicit empty map at
+> each site is the readable statement that this server serves no assets.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2333,16 +2360,18 @@ in the promises list with `'nothing authenticates'`, and add a second case:
   });
 ```
 
-`tests/dashboard-05-http-contract.test.ts:295` — remove `'/'` from the
-404 list and add:
+`tests/dashboard-05-http-contract.test.ts:295` — remove `'/'` from the 404 list,
+and add **no** positive assertion in its place.
 
-```ts
-  it('no longer treats / as absent, because it is now the document', () => {
-    // Pinned as a change rather than deleted: the old sentence was true of
-    // slice 3 and is false now, and an unpinned change is one nothing defends.
-    expect(answer({ target: '/' }).status).not.toBe(404);
-  });
-```
+> **Pre-flight ruling (F-3).** An earlier draft of this step told you to assert
+> `/` is no longer `404` here. That assertion would fail, and correctly so:
+> `dashboard-05`'s `answer()` helper configures the contract with **no asset
+> map**, and a contract with no assets answering `404` for `/` is right rather
+> than stale. Giving that suite a fake asset map would put asset concerns in the
+> pure-contract file. The positive pin — every manifest route answers `200` —
+> already lives in `dashboard-08` (Task 3), which has a real asset map, and end
+> to end in the dist gate (Task 11). Here, `/` is simply no longer a member of
+> the list of targets this suite claims are absent.
 
 `tests/dashboard-06-http-server.test.ts:566` — change the `/` assertion to
 `/nope` and keep `/api/snapshot/` as-is.
