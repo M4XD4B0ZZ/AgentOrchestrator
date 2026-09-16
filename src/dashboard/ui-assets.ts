@@ -96,6 +96,21 @@ export function uiAssetRoot(moduleUrl: string): string {
 }
 
 /**
+ * Where the assets actually are, with no argument to get wrong.
+ *
+ * `uiAssetRoot` answers "where are the assets, relative to *this* module" —
+ * and the only module that may answer that is the one the assets ship
+ * beside. Every OTHER caller (`dashboard-command.ts` included) has its own
+ * `import.meta.url`, naming its own directory, not this one; passing that
+ * along was exactly how the shipped build once looked for `cli/ui` instead
+ * of `dashboard/ui` and refused to serve anything. This function closes over
+ * its own module URL so no caller can supply a wrong one.
+ */
+export function defaultUiAssetRoot(): string {
+  return uiAssetRoot(import.meta.url);
+}
+
+/**
  * Reads every manifest asset, or none of them.
  *
  * All-or-nothing on purpose. A build that shipped six of seven assets would

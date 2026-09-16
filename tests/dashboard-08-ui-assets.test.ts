@@ -8,6 +8,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import {
   UI_ASSET_MANIFEST,
   SHELL_ROUTES,
+  defaultUiAssetRoot,
   loadUiAssets,
   type DashboardAssetMap,
 } from '../src/dashboard/ui-assets.js';
@@ -117,6 +118,21 @@ describe('loading is all or nothing', () => {
   });
 });
 
+describe('the default root is anchored to the module that owns the assets', () => {
+  it('ends with dashboard/ui, never a caller\'s own directory', () => {
+    // Separator-agnostic: this repository is Windows-first, but the property
+    // holds on either separator, and pinning one would make the test a
+    // statement about this machine rather than about the function.
+    const segments = defaultUiAssetRoot().split(/[/\\]/).filter((part) => part.length > 0);
+    expect(segments.slice(-2)).toEqual(['dashboard', 'ui']);
+    // The regression this exists to catch: a caller supplying ITS OWN
+    // `import.meta.url` resolves beside itself instead of beside the assets —
+    // `cli/dashboard-command.ts` once did exactly this and asked for
+    // `cli/ui`, which the build never writes.
+    expect(segments).not.toContain('cli');
+  });
+});
+
 const ALLOWED = ['127.0.0.1:47113'];
 
 function fakeAssets(): DashboardAssetMap {
@@ -169,13 +185,39 @@ describe('the asset routes answer, and only the ones in the manifest', () => {
   });
 
   it('answers the API route before the asset map is consulted', () => {
-    const answer = ask({ target: '/api/snapshot' });
+    // `fakeAssets()` alone cannot build this case: it is keyed from
+    // `UI_ASSET_MANIFEST`, which never contains `/api/snapshot`, so a naive
+    // assets-first implementation would find nothing there either and this
+    // test would pass without ever exercising the ordering it names. The map
+    // here deliberately ALSO carries `/api/snapshot`, poisoned — wrong bytes,
+    // wrong content type — so this test FAILS under an assets-first
+    // implementation: it would see the poison instead of the real snapshot.
+    const poison = Uint8Array.from(Buffer.from('POISON', 'utf8'));
+    const poisoned: DashboardAssetMap = new Map([
+      ...fakeAssets(),
+      ['/api/snapshot', { bytes: poison, contentType: 'text/plain' }],
+    ]);
+    const answer = respondToDashboardRequest(
+      {
+        method: 'GET',
+        target: '/api/snapshot',
+        hostHeaders: ['127.0.0.1:47113'],
+        ifNoneMatch: null,
+      },
+      ALLOWED,
+      snapshotStub,
+      poisoned,
+    );
     expect(answer.status).toBe(200);
     expect(header(answer, 'Content-Type')).toBe('application/json; charset=utf-8');
     // The API keeps the slice-3 policy. It is not a document and grants nothing.
     expect(header(answer, 'Content-Security-Policy')).toBe(
       "default-src 'none'; frame-ancestors 'none'",
     );
+    // The real snapshot answer is a JSON STRING; the poisoned asset entry
+    // would have answered with its Uint8Array bytes instead.
+    expect(typeof answer.body).toBe('string');
+    expect(answer.body).not.toContain('POISON');
   });
 
   it('gives a successful asset the UI policy, with no unsafe-inline anywhere', () => {

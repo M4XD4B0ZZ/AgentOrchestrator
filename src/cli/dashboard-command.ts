@@ -46,7 +46,7 @@ import {
   normaliseHost,
 } from '../dashboard/http-contract.js';
 import { startDashboardServer } from '../dashboard/http-server.js';
-import { loadUiAssets, uiAssetRoot, type UiAssetLoad } from '../dashboard/ui-assets.js';
+import { defaultUiAssetRoot, loadUiAssets, type UiAssetLoad } from '../dashboard/ui-assets.js';
 import { formatSafeError } from '../core/safe-error.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
@@ -348,7 +348,7 @@ export function registerDashboardCommand(
         // nothing, and before `start` so a partial UI is never the thing that
         // ends up listening.
         const loadAssets =
-          seams.loadAssets ?? ((): UiAssetLoad => loadUiAssets(uiAssetRoot(import.meta.url)));
+          seams.loadAssets ?? ((): UiAssetLoad => loadUiAssets(defaultUiAssetRoot()));
         const loaded = loadAssets();
         if (loaded.outcome === 'MISSING') {
           // The route, never the path. This sentence reaches an operator.
