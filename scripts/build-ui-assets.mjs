@@ -14,10 +14,18 @@
  * `tsconfig.build.json` includes the TypeScript sources under `src/` and
  * nothing else, the UI's `.html`, `.css`, `.png` and `.webmanifest` are not
  * TypeScript, its `app.js` and `sw.js` are hand-written rather than compiled,
- * and there is no copy step anywhere in `scripts/`. A deployed runtime with no
- * assets fails `loadUiAssets`'s all-or-nothing rule and refuses to start the
- * Manager — while every gate stays green, because every dist-artefact harness
- * runs against `build/`.
+ * and the only copy step anywhere in `scripts/` is the `copyFileSync` in the
+ * emit below — which is this one, and is why it needs the second caller rather
+ * than being reachable by accident. A deployed runtime with no assets fails
+ * `loadUiAssets`'s all-or-nothing rule and refuses to start the Manager.
+ *
+ * Until DASHBOARD-001 slice 4 nothing would have caught that, because every
+ * dist-artefact harness then ran against `build/`. Now the net has a name:
+ * `test:dist-dashboard-ui` deploys a runtime and STARTS it, and
+ * `test:dist-runtime-deployment` reads a deployed `dashboard/ui/` off the
+ * disk. Remove the `deployRuntime` call site and the first of those fails,
+ * reporting a deployed runtime carrying none of the manifest's files and a
+ * deployed CLI that refused to serve instead of listening.
  *
  * `native/ao-launch.exe` is the precedent: it is the other non-`tsc` artefact,
  * and it already has exactly these two call sites.

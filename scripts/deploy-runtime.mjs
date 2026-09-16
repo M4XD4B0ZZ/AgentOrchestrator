@@ -348,8 +348,11 @@ export function deployRuntime({
     // of it: `tsconfig.build.json` names TypeScript sources only. Without this
     // line a deployed runtime has no `dashboard/ui/` at all, `loadUiAssets`
     // refuses the whole set, and the Manager will not start on the one machine
-    // where nobody is watching — while every gate stays green, because they all
-    // run against `build/`.
+    // where nobody is watching. Until DASHBOARD-001 slice 4 nothing would have
+    // caught that, because every dist-artefact harness then ran against
+    // `build/`; `test:dist-dashboard-ui` now deploys a runtime and STARTS it,
+    // so removing this line fails that gate — naming every manifest file the
+    // deployment did not carry — instead of shipping silently.
     emitUiAssets({ outDir: join(staging, 'dashboard', 'ui') });
 
     const provenance = writeRuntimeProvenance({

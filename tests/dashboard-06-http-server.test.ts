@@ -945,7 +945,8 @@ describe('the no-cache claim is scoped to the thing that is actually re-read', (
       .replace(/\s+/g, ' ')
       .toLowerCase();
 
-  // Retracted: true of slice 3, false of six of this build's eight routes.
+  // Retracted: true of slice 3, false of seven of this build's eight routes —
+  // the seven assets read nothing at all, and only /api/snapshot re-reads.
   const RETRACTED = [
     'every request reads afresh',
     'each request reads afresh',

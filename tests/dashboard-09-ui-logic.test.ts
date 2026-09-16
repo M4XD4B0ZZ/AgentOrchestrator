@@ -1214,6 +1214,50 @@ describe('what the poller holds, the screen labels', () => {
     expect(h.stateAttribute()).toBe('REFUSED');
     expect(h.age(), 'a refusal that does not name its code is not actionable').toContain('421');
   });
+
+  it('says how old the reading still on screen is while it shows a refusal', async () => {
+    // The operator's binding constraint for this slice: the screen must always
+    // say when it last successfully loaded data. A refusal does not clear the
+    // held snapshot, so the previous reading stays rendered — and a line that
+    // named only the refusal left an operator glancing at three-minute-old
+    // task state with nothing anywhere saying so.
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 421 },
+    ]);
+    await h.settle();
+    h.advance(180_000);
+    await h.poll();
+
+    expect(h.word()).toBe('REFUSED');
+    // The premise, measured rather than assumed: the held reading really is
+    // still on screen. Without this the assertion below could pass over a
+    // blank page, where an age would mean nothing.
+    expect(h.content(), 'a refusal dropped the held reading').toContain('ZERA');
+    expect(h.age()).toContain('421');
+    expect(
+      h.age(),
+      'the refusal line does not say how old the reading it is sitting above is',
+    ).toContain('Last answer 3 min ago');
+  });
+
+  it('shows no age behind an unreadable answer, because nothing is held to age', async () => {
+    // The asymmetry, measured here rather than asserted in a comment:
+    // `unreadable()` drops `heldSnapshot` and `lastGoodAtMs` together, so
+    // there is no held reading whose age could be shown — and appending one
+    // here would be dating a screen that shows no reading at all.
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, etag: 'W/"bad"', body: NOT_SHAPED },
+    ]);
+    await h.settle();
+    h.advance(180_000);
+    await h.poll();
+
+    expect(h.word()).toBe('UNREADABLE');
+    expect(h.content(), 'the unreadable state left the old reading up').not.toContain('ZERA');
+    expect(h.age()).toBe('The last answer could not be read.');
+  });
 });
 
 describe('the polling loop follows the page, not the tab it was opened in', () => {

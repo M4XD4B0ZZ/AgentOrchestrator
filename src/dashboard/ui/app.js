@@ -1102,8 +1102,23 @@
   /** The line under the bar: what this page last heard, and when. */
   function contactLine(state, freshness) {
     if (freshness === 'REFUSED') {
-      return 'The Manager refused this request — HTTP ' + state.refusal +
+      var refusal = 'The Manager refused this request — HTTP ' + state.refusal +
         '. No reading was taken.';
+      // And the age of what is still on screen. A refusal does NOT clear the
+      // held snapshot — the non-200/304 arm of `receive` sets `refusedWith`
+      // and leaves `heldSnapshot` and `lastGoodAtMs` where they were — so the
+      // page goes on rendering the previous reading. A line that named only
+      // the refusal let an operator glance at minutes-old task state and read
+      // it as current, which is the one failure this whole freshness
+      // apparatus exists to prevent. The same wording as the ordinary line
+      // below, on purpose: one vocabulary for age, not two.
+      //
+      // `UNREADABLE` needs no equivalent and must not have one: `unreadable()`
+      // drops `heldSnapshot` and `lastGoodAtMs` together, so there is no held
+      // reading whose age could be shown and nothing on screen to age.
+      if (state.lastGoodAtMs === null || state.lastGoodAtMs === undefined) return refusal;
+      return refusal + ' Last answer ' +
+        sinceWording(state.nowMs - state.lastGoodAtMs) + '.';
     }
     if (freshness === 'UNREADABLE') return 'The last answer could not be read.';
     if (state.lastGoodAtMs === null || state.lastGoodAtMs === undefined) {

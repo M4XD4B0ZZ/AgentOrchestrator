@@ -36,23 +36,35 @@
  *     identical across them — `sw.js` included, which is the interesting one,
  *     because it is the only file the emit transforms and therefore the only
  *     one a divergence could hide in;
- *  2. the DEPLOYED CLI, unseamed, reaches "listening" — it does not refuse with
+ *  2. the REVERSE direction of that same manifest gate, over both of those
+ *     artefacts: nothing sits in either `ui/` that the manifest does not name.
+ *     Section A iterates the manifest and asks "is this file there?", and so
+ *     does every other gate on this chain — which is green over a directory
+ *     holding anything else as well, and `npm run build` never deletes, so a
+ *     renamed or retired asset stays in `build/dashboard/ui` forever. Two
+ *     near-misses are worth naming. `runtime-deployment` does compare a
+ *     deployed `ui/` against `build/`, which catches a deployed-only extra but
+ *     says nothing about a file BOTH artefacts carry and the manifest names
+ *     neither of. And `dashboard-08` runs exactly this comparison — against a
+ *     `mkdtemp` it filled one line earlier, a directory that by construction
+ *     holds precisely the manifest and so cannot hold an orphan at all;
+ *  3. the DEPLOYED CLI, unseamed, reaches "listening" — it does not refuse with
  *     `UI_ASSETS_UNUSABLE`, which is what a runtime deployed without its UI
  *     does, silently, on the one machine where nobody is watching;
- *  3. **every** manifest route answers 200 with the manifest's own content
+ *  4. **every** manifest route answers 200 with the manifest's own content
  *     type, its declared `Content-Length`, and bytes equal to the file that was
  *     deployed. Both PNGs are included and they are the point: an icon is the
  *     one asset that is not text, so it is the one a stray encoding step
  *     corrupts without anything else noticing;
- *  4. a served asset carries the UI policy and the snapshot carries the empty
+ *  5. a served asset carries the UI policy and the snapshot carries the empty
  *     one, in the same run. Slice 4 split those two policies apart; a gate that
  *     can only see one of them cannot see that the split happened;
- *  5. the served worker's digest is RECOMPUTED here, over the six shell files
+ *  6. the served worker's digest is RECOMPUTED here, over the six shell files
  *     as they sit in the deployed artefact, and must equal the one the worker
  *     names. Every other check on that digest asks only whether it looks like
  *     64 hex characters, which a stale worker shipped beside a changed shell
  *     passes;
- *  6. the negative control, in section C — and without it the five above are a
+ *  7. the negative control, in section C — and without it the six above are a
  *     green light on a build that serves whatever it happens to find.
  *
  * ── How "no socket was opened" is measured without a seam ──────────────────
@@ -95,6 +107,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -358,6 +371,26 @@ const { UI_ASSET_MANIFEST, SHELL_ROUTES } = await import(
   pathToFileURL(deployedManifestModule).href
 );
 
+/**
+ * The REAL artefact `ui/` directories this harness holds, labelled for a reader.
+ *
+ * Named once, here, because two things are derived from it: what section A2
+ * sweeps, and how many checks that sweep is worth in the floor at the bottom.
+ * A third artefact added to this list therefore raises the floor by itself.
+ *
+ * Both are genuine artefacts — one is what `npm run build` emitted into this
+ * checkout, the other is what `deployRuntime` just wrote into the throwaway
+ * runtime. Neither was assembled by this file, which is the whole reason the
+ * sweep below means anything.
+ */
+const ARTEFACT_UI_DIRS = Object.freeze([
+  Object.freeze({ label: 'build/dashboard/ui', dir: buildUiDir }),
+  Object.freeze({ label: "the deployed runtime's dashboard/ui", dir: deployedUiDir }),
+]);
+
+/** How many checks section A2 runs per artefact. See `nothingUnnamedShips`. */
+const REVERSE_CHECKS_PER_ARTEFACT = 2;
+
 /* ── A. the two emit call sites agree ────────────────────────────────────── */
 
 function theBuildAndTheDeploymentEmitTheSameBytes() {
@@ -375,6 +408,69 @@ function theBuildAndTheDeploymentEmitTheSameBytes() {
     check(
       readFileSync(built).equals(readFileSync(deployed)),
       `dashboard/ui/${entry.file} differs between the build output and the deployed runtime`,
+    );
+  }
+}
+
+/* ── A2. nothing unnamed ships inside either artefact ────────────────────── */
+
+/**
+ * Every entry in each artefact's `ui/` is named by the manifest.
+ *
+ * `ui-assets.ts` states this as a guarantee — *"every file in the artefact must
+ * be named by the manifest — so a drifted mirror cannot ship"* — and until this
+ * section existed the only place it was checked was a directory the checking
+ * test had filled itself one line earlier. Over a real artefact the property
+ * has teeth: `npm run build` never deletes, so renaming an asset leaves its
+ * predecessor in `build/dashboard/ui` with nothing naming it. Measured, with
+ * one stray `app-old.js` in that directory: `test:dist-dashboard-assets` exits
+ * 0 and `dashboard-08` passes 29/29 — and before this section existed so did
+ * this gate, reporting its full 79 checks, because nothing counted the
+ * directory.
+ *
+ * Runs BEFORE section C on purpose. C moves an asset aside to `<file>.parked`
+ * and puts it back; sweeping the deployed directory afterwards would either
+ * read a `.parked` file as an orphan or depend on C's restore having worked,
+ * and this section is not the place to measure that.
+ *
+ * Reads only. It creates nothing, renames nothing and deletes nothing, in
+ * either directory — one of the two is this checkout's own `build/`.
+ */
+function nothingUnnamedShips() {
+  const named = new Set(UI_ASSET_MANIFEST.map((entry) => entry.file));
+
+  for (const artefact of ARTEFACT_UI_DIRS) {
+    /** @type {import('node:fs').Dirent[]} */
+    let entries;
+    try {
+      entries = readdirSync(artefact.dir, { withFileTypes: true });
+    } catch (error) {
+      // Two failures, not one, so the count below stays `REVERSE_CHECKS_PER_ARTEFACT`
+      // on every path through this loop — a floor derived from a per-artefact
+      // constant is only a floor if the constant is true of the error path too.
+      check(false, `${artefact.label} could not be read: ${String(error)}`);
+      check(false, `${artefact.label} was therefore never compared against the manifest`);
+      continue;
+    }
+
+    // Asserted first, because "no entry is unnamed" is trivially true of an
+    // empty directory — and a deployed artefact with an empty `ui/` is a worse
+    // outcome than one with a stray file in it.
+    check(
+      entries.length > 0,
+      `${artefact.label} holds no entries at all, so the comparison below passed over nothing`,
+    );
+
+    const unnamed = entries
+      .filter((entry) => !named.has(entry.name))
+      .map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name))
+      .sort();
+    check(
+      unnamed.length === 0,
+      `${artefact.label} holds ${String(unnamed.length)} entr${
+        unnamed.length === 1 ? 'y' : 'ies'
+      } the manifest does not name: ${unnamed.join(', ')}. The build never deletes, so a renamed ` +
+        'or retired asset stays behind and ships beside the real ones.',
     );
   }
 }
@@ -653,18 +749,26 @@ async function section(name, run) {
 }
 
 await section('the emit call sites', theBuildAndTheDeploymentEmitTheSameBytes);
+await section('the reverse manifest gate', nothingUnnamedShips);
 await section('the deployed CLI serving its assets', theDeployedCliServesItsOwnAssets);
 await section('the negative control', anIncompleteRuntimeRefusesBeforeItBinds);
 
 /**
  * The count below which this run cannot have measured what it says it did.
  *
- * Derived from the manifest rather than written as a number, because five of
+ * Derived from the manifest rather than written as a number, because seven of
  * the checks are per asset and the manifest is the thing that decides how many
  * assets there are — a hard-coded floor would have to be edited by whoever adds
  * an eighth one, and would silently stop being a floor if they forgot.
+ *
+ * The second term is derived one step further up for the same reason: section
+ * A2's sweep is per ARTEFACT rather than per asset, and it runs the same
+ * `REVERSE_CHECKS_PER_ARTEFACT` on every path including the unreadable one, so
+ * a third artefact added to `ARTEFACT_UI_DIRS` raises this floor without
+ * anyone editing it.
  */
-const MINIMUM_CHECKS = UI_ASSET_MANIFEST.length * 7 + 30;
+const MINIMUM_CHECKS =
+  UI_ASSET_MANIFEST.length * 7 + ARTEFACT_UI_DIRS.length * REVERSE_CHECKS_PER_ARTEFACT + 30;
 
 if (checksRun < MINIMUM_CHECKS) {
   failures.push(
@@ -681,6 +785,7 @@ if (failures.length > 0) {
 
 console.log(
   `dashboard UI dist gate: a deployed runtime serves all ${String(UI_ASSET_MANIFEST.length)} ` +
-    'assets byte for byte over a real socket, and refuses before it binds when one is missing. ' +
-    `${String(checksRun)} checks ran.`,
+    'assets byte for byte over a real socket, refuses before it binds when one is missing, and ' +
+    `neither of the ${String(ARTEFACT_UI_DIRS.length)} real artefacts holds a file the manifest ` +
+    `does not name. ${String(checksRun)} checks ran.`,
 );

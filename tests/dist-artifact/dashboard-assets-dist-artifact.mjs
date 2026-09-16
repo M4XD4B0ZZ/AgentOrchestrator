@@ -13,12 +13,17 @@
  * `tests/dashboard-08-ui-assets.test.ts` already pins that
  * `defaultUiAssetRoot()` itself returns a path ending in `dashboard/ui`. That
  * is necessary but not sufficient: it stays green even if the CLI's action
- * handler is rewired back to `uiAssetRoot(import.meta.url)` — its OWN
- * `import.meta.url`, which is `build/cli/dashboard-command.js` once compiled,
- * naming `build/cli/ui` instead. Nothing in-process can see that regression,
- * because every in-process test supplies a `loadAssets` seam or an explicit
- * directory. Only running the BUILT artefact, unseamed, proves the wiring
- * that actually ships.
+ * handler is rewired back to resolving its OWN `import.meta.url`, which is
+ * `build/cli/dashboard-command.js` once compiled, naming `build/cli/ui`
+ * instead. Nothing in-process can see that regression, because every
+ * in-process test supplies a `loadAssets` seam or an explicit directory. Only
+ * running the BUILT artefact, unseamed, proves the wiring that actually ships.
+ *
+ * Slice 4's whole-branch review narrowed that vector without closing it:
+ * `uiAssetRoot` is now module-private, so the regression can no longer be
+ * spelled as a call to it — but `join(dirname(fileURLToPath(import.meta.url)),
+ * 'ui')` written out in the handler resolves the same wrong directory, and
+ * nothing but this gate would see it.
  *
  * ── Two modes, and why the choice is made before anything is written ────────
  *

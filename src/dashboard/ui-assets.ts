@@ -90,21 +90,27 @@ export type UiAssetLoad =
  * Resolved from the module's own location rather than from `process.cwd()` or
  * from the repository root, so the same code finds them under `build/` and
  * under a deployed `dist/` without being told which it is running from.
+ *
+ * Module-private, and that is the point rather than tidiness: the argument is
+ * the defect vector `defaultUiAssetRoot` below exists to close, so there is
+ * exactly one call site and it is in this file.
  */
-export function uiAssetRoot(moduleUrl: string): string {
+function uiAssetRoot(moduleUrl: string): string {
   return join(dirname(fileURLToPath(moduleUrl)), 'ui');
 }
 
 /**
  * Where the assets actually are, with no argument to get wrong.
  *
- * `uiAssetRoot` answers "where are the assets, relative to *this* module" —
- * and the only module that may answer that is the one the assets ship
- * beside. Every OTHER caller (`dashboard-command.ts` included) has its own
- * `import.meta.url`, naming its own directory, not this one; passing that
- * along was exactly how the shipped build once looked for `cli/ui` instead
- * of `dashboard/ui` and refused to serve anything. This function closes over
- * its own module URL so no caller can supply a wrong one.
+ * `uiAssetRoot` above answers "where are the assets, relative to *this*
+ * module" — and the only module that may answer that is the one the assets
+ * ship beside. Any other module has its own `import.meta.url`, naming its own
+ * directory, not this one; passing that along was exactly how the shipped
+ * build once looked for `cli/ui` instead of `dashboard/ui` and refused to
+ * serve anything. So this function closes over its own module URL, and the
+ * one above is not exported — the wrong argument is not merely discouraged,
+ * it cannot be supplied from outside this file. This is the whole public way
+ * to ask the question.
  */
 export function defaultUiAssetRoot(): string {
   return uiAssetRoot(import.meta.url);
