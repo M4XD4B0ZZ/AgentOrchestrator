@@ -40,6 +40,7 @@ import {
   SNAPSHOT_METHOD,
   SNAPSHOT_PATH,
   allowedHostsFor,
+  bodyByteLength,
   entityTagFor,
   ifNoneMatchSelects,
   normaliseHost,
@@ -431,7 +432,35 @@ describe('the body is the public snapshot, serialised once', () => {
   });
 });
 
-/* ── 7. what a refusal costs, and what never travels ──────────────────────── */
+/* ── 7. bodyByteLength, the shared measure ────────────────────────────────── */
+
+describe('bodyByteLength counts what goes on the wire, for either arm', () => {
+  it('reports a multi-byte string by its byte length, not its .length', () => {
+    // 'café😀': three ASCII bytes, one precomposed é (two bytes in UTF-8, one
+    // UTF-16 code unit), one emoji outside the Basic Multilingual Plane (four
+    // bytes in UTF-8, a surrogate PAIR — two UTF-16 code units). `.length`
+    // counts UTF-16 code units and lands on 6; the wire gets 9 bytes. A
+    // `bodyByteLength` that returned `.length` would pass every case in this
+    // file whose fixtures are ASCII, which is exactly why this one is not.
+    const text = 'café😀';
+    expect(text.length).toBe(6);
+    expect(bodyByteLength(text)).toBe(9);
+    expect(bodyByteLength(text)).not.toBe(text.length);
+  });
+
+  it('reports a Uint8Array by its own byteLength', () => {
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00]);
+    expect(bodyByteLength(bytes)).toBe(6);
+    expect(bodyByteLength(bytes)).toBe(bytes.byteLength);
+  });
+
+  it('reports zero for an empty body on either arm', () => {
+    expect(bodyByteLength('')).toBe(0);
+    expect(bodyByteLength(Uint8Array.from([]))).toBe(0);
+  });
+});
+
+/* ── 8. what a refusal costs, and what never travels ──────────────────────── */
 
 describe('a refusal takes no observation', () => {
   it.each([
