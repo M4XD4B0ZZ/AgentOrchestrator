@@ -972,7 +972,12 @@ git commit -m "feat(dashboard): every asset loads before the socket, or none doe
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `#app` as the render root; the element ids `#status-word`, `#status-age`, `#content`.
+- Produces: the element ids `#content` (the render root), `#status-word` and `#status-age`.
+
+> **Correction.** An earlier draft of this line also named `#app` as the render
+> root. There is no such element in this task's own HTML and no later task reads
+> one — the root Task 7's glue assigns into is `#content`. Naming two roots in an
+> Interfaces block is how a later task ends up writing to the wrong one.
 
 - [ ] **Step 1: Write the failing test**
 
