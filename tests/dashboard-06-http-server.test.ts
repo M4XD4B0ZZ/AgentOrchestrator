@@ -332,6 +332,7 @@ async function serving(
       bindHost: DASHBOARD_BIND_HOST,
       port,
       allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, extraHosts),
+      assets: new Map(),
     },
     { snapshot },
   );
@@ -398,7 +399,7 @@ describe('the bind is the loopback literal, and it is measured', () => {
     // the string that was asked for, and the guard fires. This is the case that
     // proves the readback is capable of failing at all.
     const refused = await startDashboardServer(
-      { bindHost: 'localhost', port, allowedHosts: [] },
+      { bindHost: 'localhost', port, allowedHosts: [], assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(refused.outcome).toBe('BOUND_ELSEWHERE');
@@ -413,7 +414,7 @@ describe('the bind is the loopback literal, and it is measured', () => {
     // the guard had closed anything. Re-binding whatever the guard *reported*
     // is the only form of this proof that cannot pass vacuously.
     const after = await startDashboardServer(
-      { bindHost: refused.boundHost ?? DASHBOARD_BIND_HOST, port, allowedHosts: [] },
+      { bindHost: refused.boundHost ?? DASHBOARD_BIND_HOST, port, allowedHosts: [], assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(after.outcome).toBe('LISTENING');
@@ -428,7 +429,7 @@ describe('the bind is the loopback literal, and it is measured', () => {
     const release = await occupy(port);
     try {
       const outcome = await startDashboardServer(
-        { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: [] },
+        { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: [], assets: new Map() },
         { snapshot: realSnapshotOver(gitFreeRepository()) },
       );
       expect(outcome.outcome).toBe('BIND_FAILED');
@@ -563,7 +564,11 @@ describe('the one route, over a real socket', () => {
 
   it('answers 404 and 405 deterministically, and offers no write route', async () => {
     await serving(realSnapshotOver(gitFreeRepository()), async (port) => {
-      expect((await raw(port, getRequest(port, '/'))).status).toBe(404);
+      // `/nope` and not `/`: `serving()` starts this listener with an empty
+      // asset map, so `/` would answer 404 here for a reason that has nothing
+      // to do with routing, while since slice 4 the shipped build answers the
+      // document there. dashboard-08 pins that half against the real manifest.
+      expect((await raw(port, getRequest(port, '/nope'))).status).toBe(404);
       expect((await raw(port, getRequest(port, '/api/snapshot/'))).status).toBe(404);
 
       for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
@@ -657,7 +662,7 @@ describe('a failure is contained to the request that caused it', () => {
     // silently take over both the status choice and the socket's fate, and
     // nothing about the happy path would change.
     const server = createDashboardServer(
-      { bindHost: DASHBOARD_BIND_HOST, port: 1, allowedHosts: [] },
+      { bindHost: DASHBOARD_BIND_HOST, port: 1, allowedHosts: [], assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(server.listenerCount('clientError')).toBe(0);
@@ -669,7 +674,7 @@ describe('a failure is contained to the request that caused it', () => {
     // hang for as long as a browser kept its socket.
     const port = await freePort();
     const outcome = await startDashboardServer(
-      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, []) },
+      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, []), assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(outcome.outcome).toBe('LISTENING');
@@ -706,7 +711,7 @@ describe('a failure is contained to the request that caused it', () => {
 
     // Proof the listener is really gone rather than merely reported gone.
     const reused = await startDashboardServer(
-      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: [] },
+      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: [], assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(reused.outcome).toBe('LISTENING');
@@ -717,7 +722,7 @@ describe('a failure is contained to the request that caused it', () => {
     // `createDashboardServer` opens nothing. The split exists so a caller can
     // bind and fail; a constructor that listened would make that impossible.
     const server = createDashboardServer(
-      { bindHost: DASHBOARD_BIND_HOST, port: 1, allowedHosts: [] },
+      { bindHost: DASHBOARD_BIND_HOST, port: 1, allowedHosts: [], assets: new Map() },
       { snapshot: realSnapshotOver(gitFreeRepository()) },
     );
     expect(server.listening).toBe(false);
@@ -751,7 +756,7 @@ describe('serving changes nothing on disk', () => {
     const home = scratch('ao-dash-home-empty-');
     const port = await freePort();
     const outcome = await startDashboardServer(
-      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, []) },
+      { bindHost: DASHBOARD_BIND_HOST, port, allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, []), assets: new Map() },
       {
         snapshot: (): PublicSnapshot =>
           toPublicSnapshot(
@@ -911,5 +916,60 @@ describe('the server writes what the contract decided, and nothing more', () => 
         Number(answer.headers.get('content-length')),
       );
     });
+  });
+});
+
+/* ── 7. the claim about caching, in every copy of it ──────────────────────── */
+
+describe('the no-cache claim is scoped to the thing that is actually re-read', () => {
+  /**
+   * The cases above measure the property: no handle is held across
+   * AgentOrchestrator's atomic rename, and nothing on disk moves. This one
+   * pins the SENTENCE, because the sentence went out of date on its own.
+   *
+   * Until slice 4 this server answered one route by reading the disk, so "every
+   * request reads afresh" described every request there was. Since slice 4 it
+   * also answers the UI from a map loaded before the socket existed, and those
+   * requests read nothing — so the old sentence claims disk I/O that does not
+   * happen, in a paragraph whose whole point is which I/O happens.
+   *
+   * Both copies are checked in one case because they are one claim.
+   * `http-server.ts` states it for a reader of the module and `README.md`
+   * states it for an operator, and fixing a sentence in one copy while its twin
+   * stands is the defect this branch has hit more often than any other.
+   */
+  const flatten = (at: string): string =>
+    readFileSync(new URL(at, import.meta.url), 'utf8')
+      // Strip a JSDoc line's leading `*`, but never Markdown's `**bold**`.
+      .replace(/^[ \t]*\*(?!\*)[ \t]?/gm, '')
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+
+  // Retracted: true of slice 3, false of seven of this build's eight routes —
+  // the seven assets read nothing at all, and only /api/snapshot re-reads.
+  const RETRACTED = [
+    'every request reads afresh',
+    'each request reads afresh',
+    'there is no cache.',
+  ];
+
+  // The argument that survives, and the half slice 4 added to it. The second is
+  // what makes the first stronger rather than narrower: an asset cannot hold a
+  // handle across a rename either, because it never opens one.
+  const REQUIRED = ['the snapshot is never cached', 'reads nothing at all'];
+
+  it('never says, in either copy, that every request reads afresh', () => {
+    // Asserted as booleans rather than through `toContain`, because a failing
+    // `toContain` prints its subject — and one of these subjects is the whole
+    // of README.md. A message naming the phrase and the file is the useful one.
+    for (const copy of ['../src/dashboard/http-server.ts', '../README.md']) {
+      const text = flatten(copy);
+      for (const phrase of RETRACTED) {
+        expect(text.includes(phrase), `${copy} still says "${phrase}"`).toBe(false);
+      }
+      for (const phrase of REQUIRED) {
+        expect(text.includes(phrase), `${copy} does not say "${phrase}"`).toBe(true);
+      }
+    }
   });
 });

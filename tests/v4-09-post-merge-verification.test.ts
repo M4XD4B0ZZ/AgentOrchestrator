@@ -3120,7 +3120,11 @@ describe('post-merge verification changes no execution state and no ledger', () 
     // `L-V4-09-3` and the `--verify-merge` help text both say this build will
     // not fetch a merge commit it does not have, and both are claims about the
     // whole of `src/` rather than about this slice's modules. So they are
-    // measured over the whole of `src/`.
+    // measured over every TypeScript module in `src/` — which is the whole of
+    // the product's module graph, because the only non-`.ts` files this build
+    // ships from `src/` are the browser assets of DASHBOARD-001 slice 4, and
+    // those import nothing. A `git(cwd, ['fetch', …])` call can exist only
+    // where a module can reach `git`, and that is `.ts`.
     //
     // Matched on the argument literal a Git invocation would have to carry.
     // Prose about a remote's "fetch URL" is not a fetch, and several modules

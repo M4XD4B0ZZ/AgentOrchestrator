@@ -25,14 +25,20 @@
  *
  * ── Handles ────────────────────────────────────────────────────────────────
  *
- * There is no watcher, no `fs.watch`, no open descriptor kept between requests
- * and no cached snapshot. Every request reads afresh through readers that open,
- * read and close within one synchronous call. That matters on NTFS in
- * particular: AgentOrchestrator publishes durable state by writing a temporary
- * file and renaming it over the old one, and a reader holding a handle across
- * that rename is a reader that can make the *writer* fail. A poll that costs a
- * few milliseconds and holds nothing is worth more than a cache that holds a
- * file open.
+ * There is no watcher, no `fs.watch`, no open descriptor kept between requests,
+ * and the snapshot is never cached: every request for `/api/snapshot` reads
+ * afresh through readers that open, read and close within one synchronous call.
+ * A request for a UI asset reads nothing at all — every asset was read into
+ * memory before this module was handed a port, and is answered from there
+ * afterwards.
+ *
+ * That matters on NTFS in particular: AgentOrchestrator publishes durable state
+ * by writing a temporary file and renaming it over the old one, and a reader
+ * holding a handle across that rename is a reader that can make the *writer*
+ * fail. Neither kind of request can be holding one. A poll that costs a few
+ * milliseconds and holds nothing is worth more than a cache that holds a file
+ * open; an asset holds nothing because its bytes are already here, and its one
+ * visit to the disk happened before the socket existed.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -41,16 +47,19 @@ import type { Socket } from 'node:net';
 import { readDashboardSnapshot } from './read-model.js';
 import { toPublicSnapshot, type PublicSnapshot } from './public-view.js';
 import { respondToDashboardRequest, type DashboardHttpResponse } from './http-contract.js';
+import type { DashboardAssetMap } from './ui-assets.js';
 
 /**
  * Neutral server configuration, and the complete list of it.
  *
- * Three values, and every one of them is a property of an HTTP server rather
- * than of any particular way of reaching one. There is no public URL here, no
- * base path, no origin, no scheme, no tunnel, no proxy and no vendor. Nothing
- * in this build reads `process.env` to find any of it either: the values come
- * from the command line, which is the one place an operator can see what they
- * asked for.
+ * Four values now, and every one of them is a property of an HTTP server
+ * rather than of any particular way of reaching one. There is no public URL
+ * here, no base path, no origin, no scheme, no tunnel, no proxy and no vendor.
+ * Nothing in this build reads `process.env` to find any of it either: the
+ * first three come from the command line, which is the one place an operator
+ * can see what they asked for; the fourth comes from the shipped build
+ * itself, which is the one place this build's own UI can be asked what it
+ * contains.
  *
  * `allowedHosts` is the third, and it is the one worth being explicit about
  * because it looks like it could be transport configuration and is not. The
@@ -58,11 +67,21 @@ import { respondToDashboardRequest, type DashboardHttpResponse } from './http-co
  * `Host` against a set of opaque strings; whether one of them happens to name
  * a tunnel, a proxy, a VPN or the machine next door is invisible here and stays
  * invisible.
+ *
+ * `assets` is the fourth, and it is data rather than a seam on purpose: it is
+ * what this server serves, decided by the manifest and read before the socket
+ * opened, not a dependency a caller may substitute for one with more
+ * authority. `DashboardServerSeams` below exists precisely for the value a
+ * test needs to control — the read model — and `assets` is not that; every
+ * caller of this function, test or production, hands it the same map it
+ * loaded, because there is no second, more authoritative source of the UI
+ * this build ships.
  */
 export interface DashboardServerConfig {
   readonly bindHost: string;
   readonly port: number;
   readonly allowedHosts: readonly string[];
+  readonly assets: DashboardAssetMap;
 }
 
 /**
@@ -140,7 +159,16 @@ function write(response: ServerResponse, decided: DashboardHttpResponse): void {
     response.end();
     return;
   }
-  response.end(decided.body, 'utf8');
+  if (typeof decided.body === 'string') {
+    response.end(decided.body, 'utf8');
+    return;
+  }
+  // No encoding argument. Node's own stream contract applies `encoding` only
+  // to a string chunk, and this one is already a `Uint8Array` — there is
+  // nothing here for an encoding to do. The omission states plainly what is
+  // being sent (bytes, not text) rather than passing an argument that would
+  // be inert.
+  response.end(decided.body);
 }
 
 /**
@@ -165,6 +193,7 @@ export function createDashboardServer(
           },
           config.allowedHosts,
           snapshot,
+          config.assets,
         ),
       );
     } catch {

@@ -86,6 +86,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { compileNativeBoundary } from './build-native-boundary.mjs';
+import { emitUiAssets } from './build-ui-assets.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const defaultRepoRoot = resolve(scriptDir, '..');
@@ -343,6 +344,16 @@ export function deployRuntime({
       { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     );
     compileNativeBoundary({ outFile: join(staging, 'native', 'ao-launch.exe') });
+    // The UI is the second non-`tsc` artefact, and the compile above emits none
+    // of it: `tsconfig.build.json` names TypeScript sources only. Without this
+    // line a deployed runtime has no `dashboard/ui/` at all, `loadUiAssets`
+    // refuses the whole set, and the Manager will not start on the one machine
+    // where nobody is watching. Until DASHBOARD-001 slice 4 nothing would have
+    // caught that, because every dist-artefact harness then ran against
+    // `build/`; `test:dist-dashboard-ui` now deploys a runtime and STARTS it,
+    // so removing this line fails that gate — naming every manifest file the
+    // deployment did not carry — instead of shipping silently.
+    emitUiAssets({ outDir: join(staging, 'dashboard', 'ui') });
 
     const provenance = writeRuntimeProvenance({
       writeInto: staging,

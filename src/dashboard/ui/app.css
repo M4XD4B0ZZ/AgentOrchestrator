@@ -1,0 +1,175 @@
+/* AO Manager — dashboard shell styles.
+ *
+ * Mobile-first, designed at ~390px. Dark-first: the tokens below are the
+ * dark palette, and the `prefers-color-scheme: light` block at the bottom
+ * only ever redefines those same tokens — never a selector.
+ *
+ * Colour is never the only status signal: every #status-word state and the
+ * .needs-you card carry a word in the markup (LIVE, STALE, OFFLINE, REFUSED,
+ * UNREADABLE, NEEDS YOU). The rules here decorate that text; they do not
+ * replace it. UNREADABLE deliberately has no rule of its own — it takes the
+ * neutral default, and the error card app.js writes into #content is what
+ * carries the alarm.
+ */
+
+:root {
+  --bg: #101214;
+  --bg-elevated: #17191c;
+  --fg: #e6e8eb;
+  --fg-dim: #9aa0a6;
+  --border: #2a2d31;
+  --accent: #4da3ff;
+  --live: #35c470;
+  --stale: #e0a030;
+  --offline: #e05a4f;
+  --needs-you: #e05a4f;
+  --radius: 10px;
+  --gap: 12px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+#bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  padding: 14px var(--gap);
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+
+#title {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.08em;
+}
+
+#status-word {
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+
+#status-word[data-state="LIVE"] {
+  color: var(--live);
+  border-color: var(--live);
+}
+
+#status-word[data-state="STALE"] {
+  color: var(--stale);
+  border-color: var(--stale);
+}
+
+#status-word[data-state="OFFLINE"] {
+  color: var(--offline);
+  border-color: var(--offline);
+}
+
+#status-word[data-state="REFUSED"] {
+  color: var(--offline);
+  border-color: var(--offline);
+}
+
+/* Anchors. The drill-down rows and the detail view's back control are links,
+ * and this sheet carried no rule for them at all — an unstyled link is
+ * browser-blue and underlined, and its visited colour on this ground is close
+ * to unreadable. */
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A whole row is the link, and its text is body text — only the affordance at
+ * the end says "open". Link colour across the row would make it harder to
+ * read, not easier to use. */
+a.project {
+  color: inherit;
+}
+
+/* The back control is a tap target before it is a label: an installed PWA runs
+ * standalone and has no browser Back button to fall back on. */
+a.badge {
+  color: var(--accent);
+  border-color: var(--accent);
+  padding: 8px 14px;
+}
+
+.card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap);
+  margin: var(--gap);
+}
+
+.needs-you {
+  border-color: var(--needs-you);
+}
+
+.project {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.project:last-child {
+  border-bottom: none;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+
+.note {
+  margin: var(--gap);
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f6f7;
+    --bg-elevated: #ffffff;
+    --fg: #101214;
+    --fg-dim: #5b6168;
+    --border: #d8dadd;
+    --accent: #1868c9;
+    --live: #1f9d57;
+    --stale: #a86a10;
+    --offline: #c23a2f;
+    --needs-you: #c23a2f;
+  }
+}

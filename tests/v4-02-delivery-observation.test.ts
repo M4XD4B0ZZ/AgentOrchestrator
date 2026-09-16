@@ -2199,8 +2199,8 @@ describe('the CLI surface', () => {
     // is a depth-one check and not a transitive graph proof. An earlier version
     // of this comment called it "the module graph it reaches", which it never
     // was. The transitive question is answered elsewhere and differently: the
-    // execution-lease suite pins, across the whole of `src/`, which modules may
-    // reach a runner and which may start a process at all.
+    // execution-lease suite pins, across every TypeScript module in `src/`,
+    // which modules may reach a runner and which may start a process at all.
     const { readFileSync } = await import('node:fs');
     const specifier = /(?:^|\n)\s*(?:import|export)[\s\S]*?from\s+'([^']+)'/g;
     const seen = new Set<string>();

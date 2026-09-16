@@ -53,6 +53,7 @@ import {
   EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_OK,
   EXIT_RUN_REFUSED,
+  EXIT_RUN_UNEXPECTED,
 } from '../src/cli/run-exit-codes.js';
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
@@ -93,6 +94,10 @@ async function serve(
       });
       return Promise.resolve(outcome);
     },
+    // A default that never touches the real filesystem. This suite is about
+    // the verb, not the shipped UI; the asset-refusal case below overrides
+    // this seam itself to exercise the one path that must not reach `start`.
+    loadAssets: () => ({ outcome: 'LOADED', assets: new Map() }),
     ...extra,
   });
 
@@ -189,12 +194,12 @@ describe('the verb an operator actually types', () => {
     expect(serveCommand?.description()).toContain('loopback');
   });
 
-  it('says in its own help what it does not do', () => {
+  it('says in its own help what it offers and what it still does not do', () => {
     for (const promise of [
       'read-only',
       DASHBOARD_BIND_HOST,
       SNAPSHOT_PATH,
-      'no user interface',
+      'a mobile-first page at /',
       'nothing authenticates',
       'takes no lease',
       'nothing about whether AgentOrchestrator itself is running',
@@ -202,6 +207,26 @@ describe('the verb an operator actually types', () => {
       expect(DASHBOARD_SERVE_DESCRIPTION, promise).toContain(promise);
     }
     expect(DASHBOARD_SERVE_DESCRIPTION).not.toContain('localhost');
+  });
+
+  it('retracts the sentence slice 4 made false, in the help an operator prints', () => {
+    // Read off the REGISTERED command rather than the exported constant. The
+    // loop above would stay green if the description Commander prints stopped
+    // being that constant, and a retraction that can be satisfied by an
+    // unprinted string is not a retraction.
+    //
+    // `nothing authenticates` is asserted here as well as above, and the
+    // duplication is the point: this is the pair that must not come apart. The
+    // interface arriving is exactly the moment an operator might read "there is
+    // a UI now" and infer "so something checks who I am", and the sentence that
+    // stops that inference is the one kept beside the one being removed.
+    const description = dashboard()
+      ?.commands.find((command) => command.name() === 'serve')
+      ?.description();
+    expect(typeof description).toBe('string');
+    expect(description).not.toContain('no user interface');
+    expect(description).not.toContain('one route');
+    expect(description).toContain('nothing authenticates');
   });
 });
 
@@ -322,6 +347,7 @@ describe('every ending is graded, and the grades are total', () => {
       SERVED: EXIT_RUN_OK,
       PORT_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
       ALLOW_HOST_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
+      UI_ASSETS_UNUSABLE: EXIT_RUN_UNEXPECTED,
       BIND_REFUSED: EXIT_RUN_REFUSED,
       BIND_NOT_LOOPBACK: EXIT_RUN_REFUSED,
     });
@@ -369,6 +395,30 @@ describe('every ending is graded, and the grades are total', () => {
     for (const guess of ['https://', 'ts.net', 'tailscale', '100.', '0.0.0.0', 'localhost']) {
       expect(run.out.toLowerCase(), guess).not.toContain(guess);
     }
+  });
+});
+
+/* ── 4b. every asset loads before any socket opens ───────────────────────── */
+
+describe('the shipped user interface must be complete before any socket opens', () => {
+  it('refuses to serve when a UI asset is missing, and binds nothing', async () => {
+    // The positive control is the `start` seam: if it is ever called, the
+    // refusal did not happen before the socket, which is the whole claim.
+    let started = 0;
+    const run = await serve([], listening().outcome, {
+      start: async () => {
+        started += 1;
+        return { outcome: 'BIND_FAILED', errnoCode: 'NOTREACHED' };
+      },
+      loadAssets: () => ({ outcome: 'MISSING', route: '/icon-512.png' }),
+    });
+
+    expect(started).toBe(0);
+    expect(run.exitCode).toBe(DASHBOARD_SERVE_EXIT.UI_ASSETS_UNUSABLE);
+    expect(run.err).toContain('/icon-512.png');
+    // A refusal reaches an operator, so it names the route and not this machine.
+    expect(run.err).not.toMatch(/[A-Za-z]:\\/);
+    expect(run.out).toBe('');
   });
 });
 
@@ -477,13 +527,42 @@ describe('the process stops when it is asked, and stops harder when asked twice'
 
 /* ── 6. the boundary, swept over src/ ─────────────────────────────────────── */
 
+/**
+ * Every text file this build ships from `src/`, not only its TypeScript.
+ *
+ * The cases below say "the only place in src", "no module", "every listen call
+ * in this build" — sentences about the whole tree. They only hold if the walk
+ * reads the whole tree. Until DASHBOARD-001 slice 4 that was `.ts` and nothing
+ * else, so the filter and the sentence agreed by accident; slice 4 put shipped
+ * JavaScript under `src/` for the first time, alongside `.html`, `.css` and a
+ * `.webmanifest`, and the `.ts` filter quietly narrowed every one of them.
+ *
+ * No current UI asset matches `createServer(` or `.listen(`, so nothing here
+ * was *false*. What was wrong is that nothing had read the files — and this is
+ * the sweep slice 3's "only one verb listens" claim rests on.
+ *
+ * `.png` is left out deliberately and by name: the two icons are binary, and
+ * `codeOf` would hand these patterns mojibake rather than source.
+ */
+const SWEPT_EXTENSIONS = ['.ts', '.js', '.html', '.css', '.webmanifest'];
+
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) return sourceFiles(path);
-    return entry.isFile() && entry.name.endsWith('.ts') ? [path] : [];
+    if (!entry.isFile()) return [];
+    return SWEPT_EXTENSIONS.some((extension) => entry.name.endsWith(extension)) ? [path] : [];
   });
 }
+
+/** The shipped browser assets, by name, so the widening is asserted and not assumed. */
+const SHIPPED_UI_ASSETS = [
+  'dashboard/ui/app.css',
+  'dashboard/ui/app.js',
+  'dashboard/ui/index.html',
+  'dashboard/ui/manifest.webmanifest',
+  'dashboard/ui/sw.js',
+];
 
 /** Source with comments removed, so a module's prose is not an exception. */
 function codeOf(path: string): string {
@@ -497,6 +576,26 @@ function named(path: string): string {
 }
 
 describe('one module listens, and it is named', () => {
+  it('reads the files this build ships that are not TypeScript', () => {
+    // The *filter's* false-negative guard, a different instrument from the
+    // pattern guards beside it. Every sweep in this section is an absence
+    // assertion over a file list, so a narrowed or mistyped extension list
+    // restores the blind spot with all of them still green — which is exactly
+    // the state slice 4 left this file in. This case is the one that fails
+    // when the walk stops reading a shipped asset.
+    //
+    // Bidirectional on purpose. One direction fails when the walk stops reading
+    // an asset; the other fails when a sixth one is added, so a new shipped
+    // file has to be put on this list by somebody who has decided that these
+    // sweeps should read it. The two `.png` icons are absent from both sides,
+    // which is what "`.png` is excluded by name" looks like when it is measured
+    // rather than merely written down.
+    const swept = sourceFiles(SRC)
+      .map(named)
+      .filter((file) => file.startsWith('dashboard/ui/'));
+    expect(swept.sort()).toEqual(SHIPPED_UI_ASSETS);
+  });
+
   it('is the only place in src that builds or binds a server', () => {
     const creates = /createServer\s*\(|\.listen\s*\(/;
     const offenders = sourceFiles(SRC).filter((path) => creates.test(codeOf(path)));
@@ -608,11 +707,34 @@ describe('what may not appear in production source', () => {
     // A watcher or a held stream is the one way a reader can make the writer
     // fail: AO publishes durable state by renaming over the old file, and on
     // NTFS an open handle refuses that rename.
+    //
+    // Widening the walk to `.js` brought one construct with it, and it is named
+    // here rather than filtered away with the file that carries it. A service
+    // worker spells the browser Cache API `caches.open(NAME)`, which
+    // `\bopen\s*\(` matches; that is a handle on a browser's cache store, held
+    // in the browser's process, and it cannot refuse a rename AO makes. The
+    // *file* stays in the sweep — `sw.js` is still read for `watch(`,
+    // `createReadStream(`, `openSync(` and every other `open(` — because
+    // excluding the file would put back the blind spot this change removes.
+    const BROWSER_CACHE_HANDLE = /\bcaches\.open\s*\(/g;
     const watchers = /\bwatch(File)?\s*\(|createReadStream\s*\(|\bopenSync\s*\(|\bopen\s*\(/;
     const offenders = files
       .filter((path) => named(path).startsWith('dashboard/'))
-      .filter((path) => watchers.test(codeOf(path)));
+      .filter((path) => watchers.test(codeOf(path).replace(BROWSER_CACHE_HANDLE, '')));
     expect(offenders.map(named)).toEqual([]);
+  });
+
+  it('strips the browser cache handle and nothing else', () => {
+    // The carve-out's own control, so it cannot quietly grow into an exclusion
+    // of the file. `caches.open(` is removed; any other `open(` in the same
+    // file is not, and this fails if that stops being true.
+    const worker = codeOf(join(SRC, 'dashboard', 'ui', 'sw.js'));
+    expect(/\bcaches\.open\s*\(/.test(worker), 'sw.js no longer uses the Cache API').toBe(true);
+    const stripped = worker.replace(/\bcaches\.open\s*\(/g, '');
+    expect(/\bopen\s*\(/.test(stripped), 'the carve-out hid more than it names').toBe(false);
+    expect(/\bopen\s*\(/.test(`${stripped}\nfs.open(statePath);\n`), 'a real open() survives').toBe(
+      true,
+    );
   });
 
   it('adds no runtime dependency for one route', () => {

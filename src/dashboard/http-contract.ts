@@ -2,11 +2,11 @@
  * DASHBOARD-001 slice 3 — the HTTP contract, decided without a socket.
  *
  * Every question this service answers about a request — is this Host allowed,
- * is this the one route, is this the one method, is the caller's copy still
- * good, which headers go out — is decided here, in a pure function over a
- * description of the request. `http-server.ts` is the only module that owns a
- * socket, and all it does is read those facts off a Node request, call this,
- * and write the answer back.
+ * is this a route this build answers, is this the one method, is the caller's
+ * copy still good, which headers go out — is decided here, in a pure function
+ * over a description of the request. `http-server.ts` is the only module that
+ * owns a socket, and all it does is read those facts off a Node request, call
+ * this, and write the answer back.
  *
  * The split is not tidiness. The properties worth pinning are refusals — a
  * duplicated `Host`, a request target that is not origin-form, a method nobody
@@ -25,6 +25,7 @@
  */
 
 import { canonicalJson, type PublicSnapshot } from './public-view.js';
+import type { DashboardAssetMap } from './ui-assets.js';
 
 /* ── the fixed surface ─────────────────────────────────────────────────────── */
 
@@ -50,7 +51,7 @@ export const DASHBOARD_DEFAULT_PORT = 47113;
 /** The one data route. Compared literally — never decoded, never normalised. */
 export const SNAPSHOT_PATH = '/api/snapshot';
 
-/** The one method that route offers. */
+/** The one method this service offers, on that route and on every asset. */
 export const SNAPSHOT_METHOD = 'GET';
 
 /**
@@ -59,9 +60,13 @@ export const SNAPSHOT_METHOD = 'GET';
  * `no-store` because a snapshot is a momentary observation and a shared cache
  * holding one is worse than no answer at all. `nosniff` because the body is
  * JSON and a browser guessing otherwise is the whole content-type-confusion
- * class. The policy is the empty one: this service serves no HTML, no script
- * and no image, so a document that somehow renders one of its responses may
- * load nothing and may not be framed.
+ * class. The policy is the empty one, and it governs exactly the responses
+ * this constant is the whole of: every refusal, and the snapshot. None of them
+ * is a document, so one that somehow rendered may load nothing and may not be
+ * framed. A served asset replaces this single line with
+ * `UI_CONTENT_SECURITY_POLICY` below and keeps every other header — which is
+ * the right way round, because it leaves the empty policy as the default a new
+ * kind of response inherits by forgetting rather than by choosing.
  *
  * Four things are deliberately absent, and each is a decision rather than an
  * omission:
@@ -74,7 +79,9 @@ export const SNAPSHOT_METHOD = 'GET';
  *  - **cookies** — nothing here has a session, and a `Set-Cookie` on a
  *    read-only observation is a credential looking for somewhere to be sent.
  *  - **`Referrer-Policy`** — it governs what a *document* sends when it
- *    navigates, and this service returns no document.
+ *    navigates somewhere else. No response these headers are the whole of is a
+ *    document, and the page slice 4 added links nowhere but its own fragments,
+ *    so there is still no navigation for a policy to govern.
  */
 export const CONSTANT_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   'Cache-Control': 'no-store',
@@ -82,8 +89,28 @@ export const CONSTANT_HEADERS: Readonly<Record<string, string>> = Object.freeze(
   'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
 });
 
-/** The media type of every body this service produces. */
+/** The media type of the snapshot body. Each asset carries its own instead. */
 export const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
+
+/**
+ * The policy a SERVED asset carries. Refusals keep `CONSTANT_HEADERS`.
+ *
+ * Still `default-src 'none'`: six `'self'` grants for the six things a
+ * same-origin application actually loads, and three further lock-downs. There
+ * is deliberately no `'unsafe-inline'`, which is not a detail — it is what
+ * makes `index.html` carry no inline script, no `<style>` and no `style=`
+ * attribute, and it is the difference between a policy and a decoration.
+ *
+ * `worker-src` is what governs registering the service worker; `manifest-src`
+ * governs `<link rel="manifest">`; `connect-src` governs the `fetch` to
+ * `/api/snapshot`. Each is present because something in this build needs it,
+ * and nothing else is.
+ */
+export const UI_CONTENT_SECURITY_POLICY =
+  "default-src 'none'; " +
+  "script-src 'self'; style-src 'self'; img-src 'self'; " +
+  "connect-src 'self'; manifest-src 'self'; worker-src 'self'; " +
+  "base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /* ── refusals ──────────────────────────────────────────────────────────────── */
 
@@ -129,8 +156,31 @@ export interface DashboardRequestFacts {
 export interface DashboardHttpResponse {
   readonly status: number;
   readonly headers: Readonly<Record<string, string>>;
-  /** `null` means no body at all — not an empty one. */
-  readonly body: string | null;
+  /**
+   * `null` means no body at all — not an empty one.
+   *
+   * `Uint8Array` is not a convenience. Two of this build's assets are PNG, and
+   * a PNG is full of bytes that are not valid UTF-8. `write` (in
+   * `http-server.ts`) sends the string arm with an explicit `'utf8'`
+   * encoding, which re-interprets every UTF-16 code unit as a Unicode code
+   * point and re-encodes it — the identity mapping only below U+0080. A byte
+   * held in a string this way is therefore not the byte that reaches the
+   * wire, and the declared `Content-Length` ends up describing bytes that
+   * never left. The two arms are measured separately, by `bodyByteLength`
+   * below, for that same reason.
+   */
+  readonly body: string | Uint8Array | null;
+}
+
+/**
+ * The length of a body in bytes, for either arm.
+ *
+ * `String.prototype.length` counts UTF-16 code units and is the wrong number
+ * for any non-ASCII character; `Buffer.byteLength` counts what goes on the
+ * wire. A `Uint8Array` is already bytes.
+ */
+export function bodyByteLength(body: string | Uint8Array): number {
+  return typeof body === 'string' ? Buffer.byteLength(body, 'utf8') : body.byteLength;
 }
 
 /* ── hosts ─────────────────────────────────────────────────────────────────── */
@@ -285,7 +335,7 @@ function refuse(
       ...CONSTANT_HEADERS,
       ...extra,
       'Content-Type': JSON_CONTENT_TYPE,
-      'Content-Length': String(Buffer.byteLength(body, 'utf8')),
+      'Content-Length': String(bodyByteLength(body)),
     }),
     body,
   });
@@ -350,6 +400,7 @@ export function respondToDashboardRequest(
   request: DashboardRequestFacts,
   allowedHosts: readonly string[],
   snapshot: () => PublicSnapshot,
+  assets: DashboardAssetMap = new Map(),
 ): DashboardHttpResponse {
   // ── 1. the Host ──────────────────────────────────────────────────────────
   //
@@ -366,7 +417,27 @@ export function respondToDashboardRequest(
   // ── 2. the route ─────────────────────────────────────────────────────────
   const path = pathOf(request.target);
   if (path === null) return refuse(400, 'BAD_REQUEST');
-  if (path !== SNAPSHOT_PATH) return refuse(404, 'NOT_FOUND');
+
+  // The API is decided BEFORE the asset map is consulted and never passes
+  // through it. That ordering is what stops an asset table ever shadowing
+  // the one route this service existed for before it had a UI.
+  if (path !== SNAPSHOT_PATH) {
+    const asset = assets.get(path);
+    if (asset === undefined) return refuse(404, 'NOT_FOUND');
+    if (request.method !== SNAPSHOT_METHOD) {
+      return refuse(405, 'METHOD_NOT_ALLOWED', { Allow: SNAPSHOT_METHOD });
+    }
+    return Object.freeze({
+      status: 200,
+      headers: Object.freeze({
+        ...CONSTANT_HEADERS,
+        'Content-Security-Policy': UI_CONTENT_SECURITY_POLICY,
+        'Content-Type': asset.contentType,
+        'Content-Length': String(bodyByteLength(asset.bytes)),
+      }),
+      body: asset.bytes,
+    });
+  }
 
   // ── 3. the method ────────────────────────────────────────────────────────
   //
@@ -414,7 +485,7 @@ export function respondToDashboardRequest(
       ...CONSTANT_HEADERS,
       ETag: tag,
       'Content-Type': JSON_CONTENT_TYPE,
-      'Content-Length': String(Buffer.byteLength(body, 'utf8')),
+      'Content-Length': String(bodyByteLength(body)),
     }),
     body,
   });

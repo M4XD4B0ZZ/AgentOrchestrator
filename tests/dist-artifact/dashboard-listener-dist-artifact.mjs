@@ -21,7 +21,7 @@
  *  3. `dashboard serve` under the bounded mode comes up on `127.0.0.1` and on
  *     nothing else — the address is read back off the listener rather than from
  *     the argument that asked for it — announces itself on stdout, answers the
- *     one route with the caching semantics the slice specified, refuses a Host
+ *     API route with the caching semantics the slice specified, refuses a Host
  *     nobody allowed, and opens exactly ONE listener for the whole run;
  *  4. a port already held produces a refusal carrying `EADDRINUSE`, exit 4, and
  *     **zero** listeners. No fallback port, no fallback address.
@@ -318,7 +318,7 @@ async function theManagerServesOnLoopbackOnly() {
       );
     }
 
-    /* the one route */
+    /* the API route */
     const ok = await ask(port);
     check(ok.status === 200, `GET /api/snapshot answered ${String(ok.status)}`);
     check(
@@ -399,10 +399,29 @@ async function theManagerServesOnLoopbackOnly() {
     check(allowed.status === 200, `an allowed opaque Host answered ${String(allowed.status)}`);
 
     /* the routes that are not there */
-    for (const path of ['/', '/pause', '/tasks/X', '/api/snapshot/', '/health']) {
+    //
+    // `/` used to be on this list and is not any more, because slice 4 gave it
+    // a meaning: it is the shell, and it answers 200. This harness was written
+    // before that and kept asserting 404 for it, so `test:dist-dashboard-listen`
+    // — which `verify` runs — was failing on this branch from the commit that
+    // added the asset routes until Task 11 found it. The line is not simply
+    // deleted: a list that shrinks quietly is a list that stops measuring, so
+    // `/` is replaced by `/index.html` and its 200 is asserted below.
+    //
+    // `/index.html` is the stronger subject anyway. It is the FILE the shell
+    // ships as, and it is deliberately not a route — the manifest keys on `/`.
+    // A build that had reverted to joining a request target onto a directory
+    // would answer it 200, and that is the whole class of defect the map-lookup
+    // design exists to make unreachable.
+    for (const path of ['/index.html', '/pause', '/tasks/X', '/api/snapshot/', '/health']) {
       const missing = await ask(port, { path });
       check(missing.status === 404, `${path} answered ${String(missing.status)}, expected 404`);
     }
+    // The positive control for the line above: `/` IS a route now. Without it,
+    // removing `/` from that list would be indistinguishable from removing a
+    // check that had become inconvenient.
+    const shell = await ask(port, { path: '/' });
+    check(shell.status === 200, `GET / answered ${String(shell.status)}, expected 200`);
     // `Allow` is asserted for every one of them, `HEAD` included. It used to be
     // skipped there, with no comment saying why, and the only premise that
     // would have justified the exception is false: Node discards a `HEAD`

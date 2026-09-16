@@ -2,10 +2,12 @@
  * `agent-loop dashboard serve` — the AO Manager's read-only HTTP surface
  * (DASHBOARD-001 slice 3).
  *
- * One long-lived process that binds `127.0.0.1` and answers exactly one
- * question: `GET /api/snapshot`, returning the public dashboard snapshot slice 2
- * settled. It is the first **inbound** socket this build has ever had, and it
- * is opened only when this command is typed.
+ * One long-lived process that binds `127.0.0.1` and answers two kinds of
+ * question. `GET /api/snapshot` returns the public dashboard snapshot slice 2
+ * settled; `GET /` and one route per file it loads return the mobile-first page
+ * slice 4 added, which is a client of that snapshot and nothing more. It is the
+ * first **inbound** socket this build has ever had, and it is opened only when
+ * this command is typed.
  *
  * ── Why this is a command and not a mode of something else ─────────────────
  *
@@ -46,6 +48,7 @@ import {
   normaliseHost,
 } from '../dashboard/http-contract.js';
 import { startDashboardServer } from '../dashboard/http-server.js';
+import { defaultUiAssetRoot, loadUiAssets, type UiAssetLoad } from '../dashboard/ui-assets.js';
 import { formatSafeError } from '../core/safe-error.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
@@ -58,18 +61,21 @@ import {
 /* ── outcomes ──────────────────────────────────────────────────────────────── */
 
 /**
- * Every way this command can end. A closed set of five.
+ * Every way this command can end. A closed set of six.
  *
  * Two of them are refusals of the command line, decided before a socket is
- * touched; two are a bind that did not produce the listener that was asked for;
- * one is the service having run and stopped. An exception is not a member —
- * reaching the `catch` below means a defect in this build rather than a state
- * of the machine, and grading it beside these would blur that line.
+ * touched; one is the shipped UI failing to load, also decided before a
+ * socket is touched; two are a bind that did not produce the listener that
+ * was asked for; one is the service having run and stopped. An exception is
+ * not a member — reaching the `catch` below means a defect in this build
+ * rather than a state of the machine, and grading it beside these would blur
+ * that line.
  */
 export const DASHBOARD_SERVE_OUTCOMES = [
   'SERVED',
   'PORT_UNUSABLE',
   'ALLOW_HOST_UNUSABLE',
+  'UI_ASSETS_UNUSABLE',
   'BIND_REFUSED',
   'BIND_NOT_LOOPBACK',
 ] as const;
@@ -96,12 +102,19 @@ export type DashboardServeOutcome = (typeof DASHBOARD_SERVE_OUTCOMES)[number];
  * a refusal rather than as a defect because the operator-visible fact is the
  * same one — no service is listening — and because the alternative is a build
  * that serves AgentOrchestrator's state to an address it did not choose.
+ *
+ * `UI_ASSETS_UNUSABLE` is `EXIT_RUN_UNEXPECTED` and deliberately not `4`. A
+ * refused invocation is one the operator could have typed differently; this one
+ * cannot be. Every asset is fixed by the manifest and shipped by the build, so
+ * a missing one means the artefact is defective — a different port, a different
+ * moment and a different machine all give the same answer.
  */
 export const DASHBOARD_SERVE_EXIT: Readonly<Record<DashboardServeOutcome, CliExitCode>> =
   Object.freeze({
     SERVED: EXIT_RUN_OK,
     PORT_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
     ALLOW_HOST_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
+    UI_ASSETS_UNUSABLE: EXIT_RUN_UNEXPECTED,
     BIND_REFUSED: EXIT_RUN_REFUSED,
     BIND_NOT_LOOPBACK: EXIT_RUN_REFUSED,
   });
@@ -117,27 +130,41 @@ export const DASHBOARD_GROUP_DESCRIPTION =
 /**
  * What `serve` is for, printed in `--help`.
  *
- * Says what is *not* offered as plainly as what is, because both surprises an
- * operator can get here are absences: there is no user interface at this
- * address yet, and there is nothing authenticating in front of it.
+ * Says what is *not* offered as plainly as what is, because the surprise an
+ * operator can get here is an absence: there is a page to look at now, and
+ * there is still nothing authenticating in front of it. That pairing is the
+ * whole reason this sentence is written rather than generated — the moment an
+ * interface appears is the moment "there is a UI now" starts to sound like
+ * "so something checks who I am", and only the help text can say otherwise
+ * before the operator opens the port.
  */
 export const DASHBOARD_SERVE_DESCRIPTION =
   `Start the read-only HTTP server. It binds ${DASHBOARD_BIND_HOST} — loopback, never a LAN or ` +
   `public address — on port ${DASHBOARD_DEFAULT_PORT} unless --port says otherwise, and answers ` +
-  `one route: ${SNAPSHOT_METHOD} ${SNAPSHOT_PATH}, the public dashboard snapshot as JSON with a ` +
-  'weak ETag so a poll that changed nothing costs a 304. There is no user interface and nothing ' +
-  'authenticates: whatever can reach this port can read the snapshot, which is why it is bound ' +
-  'to loopback and why reaching it from elsewhere is an access layer an operator puts in front ' +
-  'of it rather than anything this build does. The port is fixed — a collision is reported and ' +
-  'no other port is tried. It writes nothing, takes no lease and starts no program, and it says ' +
-  'nothing about whether AgentOrchestrator itself is running, because this build records ' +
-  'nothing that would answer that.';
+  'the dashboard: a mobile-first page at / — with the stylesheet, script, service worker, web ' +
+  `manifest and icons it loads, each on a route of its own — and ${SNAPSHOT_METHOD} ` +
+  `${SNAPSHOT_PATH}, the public snapshot that page polls, as JSON with a weak ETag so a poll ` +
+  'that changed nothing costs a 304. There is something to look at and nothing authenticates: ' +
+  'whatever can reach this port can read the snapshot, which is why it is bound to loopback and ' +
+  'why reaching it from elsewhere is an access layer an operator puts in front of it rather ' +
+  'than anything this build does. The port is fixed — a collision is reported and no other ' +
+  'port is tried. It writes nothing, takes no lease and starts no program, and it says nothing ' +
+  'about whether AgentOrchestrator itself is running, because this build records nothing that ' +
+  'would answer that.';
 
 /* ── seams ─────────────────────────────────────────────────────────────────── */
 
 /** Injectable dependencies. Production supplies none of them. */
 export interface DashboardCommandSeams {
   readonly start?: typeof startDashboardServer | undefined;
+  /**
+   * Loads the shipped UI. Production reads the real manifest off disk,
+   * beside this module; a test substitutes an outcome to drive the refusal
+   * path without a filesystem fixture. This is a seam and `assets` on
+   * `DashboardServerConfig` is not: this decides WHETHER the build is
+   * usable, before there is a config to build at all.
+   */
+  readonly loadAssets?: (() => UiAssetLoad) | undefined;
   readonly write?: ((text: string) => void) | undefined;
   readonly writeError?: ((text: string) => void) | undefined;
   /**
@@ -325,11 +352,29 @@ export function registerDashboardCommand(
           return;
         }
 
+        // Loaded, and refused if incomplete, BEFORE the socket. All-or-
+        // nothing, and before `start` so a partial UI is never the thing that
+        // ends up listening.
+        const loadAssets =
+          seams.loadAssets ?? ((): UiAssetLoad => loadUiAssets(defaultUiAssetRoot()));
+        const loaded = loadAssets();
+        if (loaded.outcome === 'MISSING') {
+          // The route, never the path. This sentence reaches an operator.
+          writeError(
+            `agent-loop: refused to serve. The shipped user interface is incomplete — ` +
+              `${loaded.route} is missing or unreadable. This build's assets are fixed, so ` +
+              `nothing was served and no socket was opened.\n`,
+          );
+          process.exitCode = DASHBOARD_SERVE_EXIT.UI_ASSETS_UNUSABLE;
+          return;
+        }
+
         const outcome = await start(
           {
             bindHost: DASHBOARD_BIND_HOST,
             port,
             allowedHosts: allowedHostsFor(DASHBOARD_BIND_HOST, port, options.allowHost),
+            assets: loaded.assets,
           },
           {},
         );
