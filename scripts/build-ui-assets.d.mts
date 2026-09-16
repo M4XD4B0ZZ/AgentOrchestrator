@@ -38,7 +38,15 @@ export declare const UI_SOURCE_DIR: string;
 /** Where `npm run build` puts them: `<repo>/build/dashboard/ui`. */
 export declare const UI_BUILD_DIR: string;
 
-/** A refusal from the emit step. Never a partial artefact. */
+/**
+ * A refusal from the emit step. Never a partial artefact.
+ *
+ * True by construction rather than by care: every way the emit can refuse —
+ * a missing destination, a renamed token, a placeholder that survived, a
+ * worker that ended up without its cache name — is raised before the first
+ * byte is written. `sw.js` is fourth in manifest order, so this guarantee is
+ * the reason the substitution happens above the write loop and not inside it.
+ */
 export declare class UiAssetBuildError extends Error {}
 
 /** Emits the seven UI assets into `outDir`, substituting the worker's constants. */

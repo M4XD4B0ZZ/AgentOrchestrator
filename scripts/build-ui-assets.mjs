@@ -28,7 +28,9 @@
  * ever activate — permanently, silently, on every installed client. So every
  * step of the substitution is checked in both directions: the source must
  * CONTAIN each token before, and must NOT contain it after. A build that
- * cannot prove both ends without an artefact.
+ * cannot prove both refuses, and writes nothing — the substitution runs above
+ * the write loop precisely so that "refuses" and "writes nothing" are the same
+ * event rather than two hopes.
  */
 
 import { createHash } from 'node:crypto';
@@ -106,11 +108,19 @@ export function emitUiAssets({ outDir }) {
   }
   const digest = hash.digest('hex');
 
+  // Substituted BEFORE anything is written, and deliberately not inside the
+  // loop. Every way this emit can refuse now happens before the first byte
+  // lands, so `UiAssetBuildError` means an untouched destination rather than a
+  // partial one — `sw.js` is fourth in manifest order, so a refusal from inside
+  // the loop left three copied files behind, which is a thing this file's own
+  // declaration claimed could not happen.
+  const workerBytes = substituteWorker(digest);
+
   /** @type {string[]} */
   const written = [];
   for (const asset of ASSETS) {
     const target = join(outDir, asset.file);
-    if (asset.file === WORKER) writeFileSync(target, substituteWorker(digest), 'utf8');
+    if (asset.file === WORKER) writeFileSync(target, workerBytes, 'utf8');
     else copyFileSync(join(UI_SOURCE_DIR, asset.file), target);
     written.push(asset.file);
   }

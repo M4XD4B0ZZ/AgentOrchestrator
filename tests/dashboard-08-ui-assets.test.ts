@@ -493,34 +493,20 @@ describe('the emit step produces a complete, substituted artefact', () => {
     // The pin: the emitted digest IS the digest of the shell, recomputed from
     // the manifest. Comparing two emits of the same source tree to each other
     // would be vacuous — both would agree whatever set they hashed.
+    //
+    // This is also where "changing any shell asset changes the worker's bytes,
+    // which is what makes a browser notice an update" is pinned, and it is
+    // pinned by a chain rather than by a test that varies a byte: the digest is
+    // the digest OF THE SHELL'S ACTUAL BYTES (here), and the worker's text
+    // carries `ao-shell-<that digest>` (the test above). A different shell is
+    // therefore a different worker — with no step in between that a test could
+    // demonstrate without re-emitting from a scratch source tree, which
+    // `emitUiAssets` deliberately cannot be pointed at.
     expect(digest, 'the digest is not the digest of the shell').toBe(digestOver(shellFiles));
     // And the set including the worker is demonstrably a different value, so
     // the exclusion is measured rather than merely stated.
     const withWorker = UI_ASSET_MANIFEST.map((e) => e.file);
     expect(digestOver(withWorker), 'hashing sw.js too would be indistinguishable').not.toBe(digest);
-  });
-
-  it('changes the worker whenever the shell changes, which is what a browser notices', () => {
-    // Proved by use rather than by reading the hash function: the digest is
-    // recomputed here over a shell with one byte different, and the name that
-    // ends up inside the emitted worker must not be that one.
-    const out = emitInto();
-    const { digest } = emitUiAssets({ outDir: out });
-    const sw = readSource(joinPath(out, 'sw.js'), 'utf8');
-    const hash = createHash('sha256');
-    for (const entry of UI_ASSET_MANIFEST) {
-      if (entry.file === 'sw.js') continue;
-      hash.update(entry.file, 'utf8');
-      const bytes = Buffer.from(readSource(joinPath(UI_DIR, entry.file)));
-      if (entry.file === 'app.css') bytes[0] = (bytes[0]! + 1) & 0xff;
-      hash.update(bytes);
-    }
-    const altered = hash.digest('hex');
-    expect(altered).not.toBe(digest);
-    expect(sw, 'the worker carries a name the shell did not produce').not.toContain(
-      `ao-shell-${altered}`,
-    );
-    expect(sw).toContain(`ao-shell-${digest}`);
   });
 
   it('copies the shell verbatim — only sw.js differs from its source', () => {
