@@ -13,9 +13,9 @@
  * The alternative is a static-file server: take the request target, decode it,
  * normalise it, join it onto a root and open whatever comes out. Every path
  * traversal defect in the history of the web lives in that sentence. Here a
- * request is a lookup in a frozen `Map` keyed by the path exactly as it
- * arrived, so `..`, `%2e%2e` and a backslash are strings that are not keys.
- * Traversal is not mitigated; it has nowhere to go.
+ * request is a lookup in a `Map` keyed by the path exactly as it arrived, so
+ * `..`, `%2e%2e` and a backslash are strings that are not keys. Traversal is
+ * not mitigated; it has nowhere to go.
  */
 
 import { readFileSync } from 'node:fs';
@@ -72,11 +72,10 @@ export interface LoadedUiAsset {
  *
  * Protection is type-level and conventional: the map is built once by this
  * loader and nothing in this build writes to it afterwards. There is
- * deliberately no runtime `Object.freeze` — the two ways to get one are worse:
- * a defensive copy per access would copy the whole UI on every request for a
- * property no caller needs, and a frozen null-prototype object keyed by the
- * request path itself would trade runtime immutability for the exact
- * prototype-key lookup hazard the literal-map lookup exists to avoid.
+ * deliberately no runtime `Object.freeze` — a frozen object would refuse key
+ * mutation but the bytes it points at stay writable either way, so the
+ * guarantee would be partial rather than real. A partial guarantee is not
+ * worth changing the container type for.
  */
 export type DashboardAssetMap = ReadonlyMap<string, LoadedUiAsset>;
 

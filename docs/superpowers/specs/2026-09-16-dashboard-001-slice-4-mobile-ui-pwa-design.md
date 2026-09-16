@@ -314,9 +314,9 @@ through it.
 
 **This is not a static-file server and must never become one.** The decision
 order inside the contract is unchanged — Host, then route, then method — and the
-asset step is a lookup in a frozen `Map`, on the request path exactly as it
-arrived: no percent-decoding, no normalisation, no `path.join`, no filesystem
-access during a request, no open handle.
+asset step is a lookup in a `Map`, on the request path exactly as it arrived:
+no percent-decoding, no normalisation, no `path.join`, no filesystem access
+during a request, no open handle.
 
 Traversal is therefore not *mitigated*; it has nowhere to go. Note the two
 refusal codes, because they differ and a test must assert the specific one:
@@ -355,7 +355,7 @@ So:
 - `Content-Length` is computed with `Buffer.byteLength(body, 'utf8')` for the
   string arm and `body.byteLength` for the bytes arm;
 - `write()` passes **no encoding** for the bytes arm;
-- the frozen asset map reaches the contract as a **fourth argument** to
+- the asset map reaches the contract as a **fourth argument** to
   `respondToDashboardRequest`, alongside the snapshot thunk. Per-response header
   variation needs no server change — `writeHead(status, {...headers})` already
   passes any header record verbatim.
