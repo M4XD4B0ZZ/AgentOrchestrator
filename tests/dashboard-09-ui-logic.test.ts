@@ -65,8 +65,23 @@ beforeAll(() => {
     location: { hash: '' },
     fetch: () => Promise.reject(new Error('not used by the pure half')),
     setInterval: () => 0,
+    // Stubs that never fire. The poller's abort budget reaches these through
+    // its own defaults here, and this half measures the request/answer
+    // semantics — a timer that went off inside them would be a second,
+    // unasked-for variable in every case below. `clearTimeout` has to exist
+    // all the same: it is called on the way out of every settled request, and
+    // a sandbox missing it is a ReferenceError on the happy path.
     setTimeout: () => 0,
+    clearTimeout: () => undefined,
     clearInterval: () => undefined,
+    // The REAL host constructor, not a stand-in. `node:vm` supplies the
+    // ECMAScript built-ins and nothing else — `AbortController` is a host
+    // global and is simply absent, measured, the same way `URL` was. A
+    // hand-written stub would let the production code pass against abort
+    // semantics this repository invented; the host one is the semantics a
+    // browser has. It is supplied unguarded on purpose: if it ever went
+    // missing, every case here must fail loudly rather than skip a line.
+    AbortController,
     console,
   };
   (sandbox as { globalThis?: unknown }).globalThis = sandbox;
@@ -594,7 +609,17 @@ interface Answer {
   readonly body?: unknown;
   /** `json()` rejects — a truncated body, or one that is not JSON at all. */
   readonly unparseable?: true;
-  /** the request never settles, as on a connection that hangs open */
+  /**
+   * The request never settles on its own, as on a connection that hangs open.
+   *
+   * It DOES honour the abort signal, because a real `fetch` does and this is
+   * the one place where a convenient fake would quietly void the case that
+   * matters most. `controller.abort()` cannot reach into a hand-written promise
+   * and reject it; if this fixture ignored the signal, a poller that wired the
+   * abort perfectly and a poller that wired nothing at all would be
+   * indistinguishable here — nothing would reject, the latch would stay shut,
+   * and a test asserting the wrong thing would pass over the unfixed defect.
+   */
   readonly hangs?: true;
   /** the request rejects, as it does with no network at all */
   readonly fails?: true;
@@ -640,11 +665,22 @@ function mountPage(
   const listeners: Record<string, ((...a: unknown[]) => void)[]> = {};
   const sent: (string | undefined)[] = [];
   const cacheModes: (string | undefined)[] = [];
+  const signals: (AbortSignal | undefined)[] = [];
   const registered: string[] = [];
   let clock = 1_700_000_000_000;
   let call = 0;
   let ticker: (() => void) | null = null;
   let tickerMs: number | null = null;
+  let nextTimerId = 1;
+  /**
+   * One-shot timers, due on the SAME clock `Date.now` reads.
+   *
+   * Two clocks would be a world that cannot exist: a case that aged freshness
+   * by two minutes while the abort budget sat frozen would be measuring a tab
+   * whose wall clock ran and whose timers did not. `advance` moves this one and
+   * fires whatever has come due, each at its own due time.
+   */
+  const timers = new Map<number, { readonly due: number; readonly fn: () => void }>();
 
   const sandbox = {
     window: {
@@ -671,14 +707,32 @@ function mountPage(
           }
         : {},
     location: { hash: options.hash ?? '' },
-    fetch: (_url: string, init: { headers?: Record<string, string>; cache?: string }) => {
+    fetch: (
+      _url: string,
+      init: { headers?: Record<string, string>; cache?: string; signal?: AbortSignal },
+    ) => {
       sent.push(init?.headers?.['If-None-Match']);
       cacheModes.push(init?.cache);
+      signals.push(init?.signal);
       const answer = answers[call++];
       if (answer === undefined) {
         return Promise.reject(new Error('no answer was queued for this request'));
       }
-      if (answer.hangs === true) return new Promise(() => undefined);
+      if (answer.hangs === true) {
+        return new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          // No signal means no way out, which is the pre-task behaviour and
+          // exactly what a case measuring the wedge should see.
+          if (signal === undefined) return;
+          // `signal.reason` verbatim: the host `AbortController` builds a
+          // `DOMException` named `AbortError`, which is what a browser's
+          // `fetch` rejects with. Rejecting with an invented error would make
+          // this fixture's abort semantics this repository's own.
+          const abandon = (): void => reject(signal.reason);
+          if (signal.aborted) abandon();
+          else signal.addEventListener('abort', abandon, { once: true });
+        });
+      }
       if (answer.fails === true) return Promise.reject(new Error('offline'));
       if (answer.throws === true) throw new TypeError('Failed to construct the request');
       return Promise.resolve({
@@ -700,6 +754,20 @@ function mountPage(
       ticker = null;
       tickerMs = null;
     },
+    setTimeout: (f: () => void, ms: number) => {
+      const id = nextTimerId++;
+      timers.set(id, { due: clock + ms, fn: f });
+      return id;
+    },
+    clearTimeout: (id: number) => {
+      timers.delete(id);
+    },
+    // The real host constructor. `node:vm` has no `AbortController` — measured,
+    // not assumed — and a hand-written one would let this harness agree with a
+    // production change about semantics neither of them got from a browser.
+    // Unguarded: if it disappears, `install()` throws and every case here says
+    // so, which is the outcome a `try/catch` around it would hide.
+    AbortController,
     Date: { now: () => clock, parse: Date.parse },
     console,
   };
@@ -717,13 +785,38 @@ function mountPage(
     age: (): string => age.textContent,
     sent,
     cacheModes,
+    signals,
     registered,
     requests: (): number => call,
     pollMs: (): number | null => tickerMs,
     polling: (): boolean => ticker !== null,
+    /** Timers still owed. A budget timer that outlives its request is a leak. */
+    pendingTimers: (): number => timers.size,
     settle: flush,
+    /**
+     * Move the clock, firing whatever falls due on the way.
+     *
+     * Each timer fires AT its due time rather than at the destination, so a
+     * budget that expires part-way through a long advance sees the clock it
+     * would really have seen. Rescanning after each one means a timer that
+     * schedules another is picked up by the same pass.
+     *
+     * Synchronous, so the promise work an abort sets off runs afterwards:
+     * follow an advance that is meant to abort something with `settle()`.
+     */
     advance: (ms: number): void => {
-      clock += ms;
+      const target = clock + ms;
+      const dueNow = (): [number, { readonly due: number; readonly fn: () => void }][] =>
+        [...timers].filter(([, timer]) => timer.due <= target).sort((a, b) => a[1].due - b[1].due);
+      let due = dueNow();
+      while (due.length > 0) {
+        const [id, timer] = due[0]!;
+        timers.delete(id);
+        clock = timer.due;
+        timer.fn();
+        due = dueNow();
+      }
+      clock = target;
     },
     poll: (): Promise<void> => {
       if (ticker === null) throw new Error('the page is not polling, so nothing can be driven');
@@ -785,6 +878,31 @@ const LIVE_SNAPSHOT: PublicSnapshot = {
           delivery: { reading: 'NONE' },
         },
       ],
+    },
+  ],
+};
+
+/**
+ * A later reading, told apart from `LIVE_SNAPSHOT` by what it puts on screen.
+ *
+ * A recovery case that answered the second time with the SAME body could not
+ * tell "the page contacted the Manager again" from "the page never cleared its
+ * first render", which is the only question such a case exists to settle. The
+ * repository name is the cheapest thing on the landing screen that differs.
+ */
+const NEXT_SNAPSHOT: PublicSnapshot = {
+  ...LIVE_SNAPSHOT,
+  observedAt: '2026-09-16T10:12:00.000Z',
+  revision: 'r2',
+  repositories: [
+    {
+      ...LIVE_SNAPSHOT.repositories[0]!,
+      profile: {
+        reading: 'DECLARED',
+        repositoryId: 'KESTREL',
+        defaultBranch: 'main',
+        maxReviewRounds: 2,
+      },
     },
   ],
 };
@@ -987,18 +1105,33 @@ describe('the polling loop follows the page, not the tab it was opened in', () =
     expect(h.requests(), 'a request was started while one was still in flight').toBe(1);
   });
 
-  it('keeps telling the truth while a request hangs, rather than freezing on the last word', async () => {
+  it('keeps telling the truth while a Manager stays silent, rather than freezing on the last word', async () => {
     // The trap the single-flight guard opened, and the reason it is worth
     // writing down: the stacking version this replaced SELF-HEALED — a later
     // request landed on a fresh socket and published whatever it got. A guard
-    // that early-returns without publishing does not. `fetch` has no default
-    // timeout and there is no AbortController here, so one socket that never
-    // settles leaves every later tick returning immediately, `publish` never
-    // running, and the badge reading LIVE over data that is minutes old.
+    // that early-returns without publishing does not, so one socket that never
+    // settles would leave every later tick returning immediately, `publish`
+    // never running, and the badge reading LIVE over data that is minutes old.
     // Nothing else in the file can move the word: `classifyFreshness` is
     // called at exactly one site, inside `publish`.
+    //
+    // The abort budget recovers the REQUEST; it does not make this case
+    // redundant, because a Manager that stays silent answers the replacement
+    // no better than the original. So the silence is kept going here with a
+    // second hanging answer, and the two properties this case has always
+    // pinned are re-measured against it: the word keeps marching, and the held
+    // reading is labelled rather than resurrected.
+    //
+    // One assertion did change, deliberately. `requests() === 2` was never a
+    // statement about single-flight on its own — it was single-flight plus the
+    // premise that a hung request can never end, and that premise is now
+    // false: abandoning one and starting its replacement on the next tick is
+    // exactly what recovery means, so the old number pinned a defect. What
+    // survives the premise is the property itself, and it is pinned below by
+    // the second poll adding nothing while the third request is still out.
     const h = mountPage([
       { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, hangs: true },
       { status: 200, hangs: true },
     ]);
     await h.settle();
@@ -1008,14 +1141,87 @@ describe('the polling loop follows the page, not the tab it was opened in', () =
     expect(h.requests()).toBe(2);
 
     h.advance(120_000);
+    await h.settle();
     await h.poll();
     await h.poll();
     expect(h.word(), 'the status word froze while a request hung').toBe('OFFLINE');
-    // Still single-flight: the guard is kept, it just stops lying.
-    expect(h.requests(), 'the guard was dropped rather than fixed').toBe(2);
+    // Still single-flight: the guard is kept, it just stops lying — and it is
+    // measured where it still bites, on the tick that follows a request that
+    // is genuinely outstanding.
+    expect(h.requests(), 'a request was started while one was still in flight').toBe(3);
     // And the held reading is untouched — labelled stale, not resurrected.
     expect(h.content()).toContain('ZERA');
     expect(h.content()).toContain('OFFLINE · showing data from the last successful fetch');
+  });
+
+  it('abandons a request that outlives its budget and gets through on the next poll', async () => {
+    // The defect, end to end. `fetch` has no default timeout, so one socket
+    // that never settles used to hold the single-flight latch shut for the
+    // life of the page: the tab reported the failure honestly and never
+    // contacted the Manager again until an operator reloaded it by hand. The
+    // screen's promise is unattended observation, so costing one poll is
+    // acceptable and costing the session is not.
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, hangs: true },
+      { status: 200, etag: 'W/"r2"', body: NEXT_SNAPSHOT },
+    ]);
+    await h.settle();
+    expect(h.content()).toContain('ZERA');
+    expect(h.requests()).toBe(1);
+    // Without this the budget has nothing to act on, whatever it times.
+    expect(h.signals[0], 'the request carries no signal, so nothing can abandon it').toBeDefined();
+    expect(h.pendingTimers(), 'a budget outlived the request it was budgeting').toBe(0);
+
+    await h.poll();
+    expect(h.requests()).toBe(2);
+    expect(h.pendingTimers(), 'a request is outstanding and nothing is timing it').toBe(1);
+
+    // Eight seconds, under the ten-second poll interval, so the abandoned
+    // request can never still be running when its replacement is due.
+    h.advance(8_000);
+    await h.settle();
+    expect(h.requests(), 'the abort handler started a retry of its own').toBe(2);
+    expect(h.pendingTimers(), 'the budget outlived the request it abandoned').toBe(0);
+    // No new vocabulary: an abort is a transport failure like any other, and
+    // eight seconds is well inside the LIVE window, so nothing on screen moves.
+    expect(h.word()).toBe('LIVE');
+
+    // The point of the whole task: the ordinary tick gets through.
+    await h.poll();
+    expect(h.requests(), 'the latch stayed shut after the request was abandoned').toBe(3);
+    expect(h.content(), 'the page recovered but rendered nothing new').toContain('KESTREL');
+    expect(h.content(), 'the render before the hung request was never replaced').not.toContain('ZERA');
+    expect(h.word()).toBe('LIVE');
+  });
+
+  it('does not let an abandoned request pass for contact with the Manager', async () => {
+    // The freshness clock records when this page last OBTAINED A READING. A
+    // request that was given up on obtained nothing, and moving the clock on
+    // it would make the held snapshot look freshly confirmed by the very event
+    // that proves it is not — the badge would sit on LIVE for as long as the
+    // Manager kept hanging, one abort at a time, which is a worse lie than the
+    // frozen word this task set out to fix.
+    const h = mountPage([
+      { status: 200, etag: 'W/"r1"', body: LIVE_SNAPSHOT },
+      { status: 200, hangs: true },
+    ]);
+    await h.settle();
+    expect(h.word()).toBe('LIVE');
+    expect(h.age()).toBe('Last answer just now.');
+
+    await h.poll();
+    // Thirty seconds from the only answer this page has ever had; the hung
+    // request was abandoned eight seconds into that.
+    h.advance(30_000);
+    await h.settle();
+
+    // Ageing from the first answer, not from the abort — which would read LIVE
+    // and "just now", because `publish` takes the clock as it finds it.
+    expect(h.word(), 'an abandoned request was counted as contact').toBe('STALE');
+    expect(h.age(), 'the contact line was measured from the abort').toBe('Last answer 30 s ago.');
+    // And it is still the first answer's data underneath the older word.
+    expect(h.content()).toContain('ZERA');
   });
 
   it('does not latch shut when the transport throws instead of rejecting', async () => {
@@ -1038,6 +1244,11 @@ describe('the polling loop follows the page, not the tab it was opened in', () =
       /* the transport threw, which is the case under test */
     }
     expect(h.requests()).toBe(2);
+    // The abort budget is started before the transport is called, so this path
+    // now has a second thing to undo and not just the latch. A timer left
+    // behind by a request that was never made fires against a controller
+    // nobody is waiting on — harmless once, and one more every ten seconds.
+    expect(h.pendingTimers(), 'a transport that threw left its budget running').toBe(0);
 
     await h.poll();
     expect(h.requests(), 'a transport that threw held the single-flight latch shut').toBe(3);

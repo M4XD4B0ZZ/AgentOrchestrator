@@ -725,6 +725,25 @@
   var POLL_MS = 10000;
 
   /**
+   * How long one request may hold the single-flight latch before it is aborted.
+   *
+   * `fetch` has no default timeout, so without this a socket that never settles
+   * keeps `inFlight` latched for the life of the page: every later tick
+   * early-returns and the tab never contacts the Manager again until somebody
+   * reloads it by hand. The page would go on telling the truth — the word keeps
+   * marching LIVE → STALE → OFFLINE — but the promise of this screen is
+   * unattended observation, not a correct report that observation has stopped.
+   *
+   * Under POLL_MS, and deliberately: a request that outlives its budget is
+   * abandoned BEFORE the next scheduled poll, so the recovery is the ordinary
+   * tick rather than a retry of its own, and two requests are never out at
+   * once. Comfortably under LIVE_MS too, so an abort costs no visible word
+   * change — the screen flaps only if the Manager is genuinely unreachable for
+   * longer than freshness allows, which is the thing it is supposed to say.
+   */
+  var ABORT_MS = 8000;
+
+  /**
    * Whether an answer is shaped like the public snapshot at all.
    *
    * Structure, and deliberately nothing else. Every question about what a
@@ -768,6 +787,14 @@
     var fetchImpl = options.fetch;
     var now = options.now;
     var onState = options.onState;
+    // The abort timer is injected for the same reason the clock and the
+    // transport are: it is a source of nondeterminism, and every property worth
+    // pinning about it is about WHEN it fires relative to the freshness clock.
+    // A test driving a virtual clock while this reached for the real global
+    // would be measuring two clocks that cannot both be true, and the abort
+    // would simply never arrive — a green suite over an unfixed wedge.
+    var setTimer = options.setTimer || function (fn, ms) { return setTimeout(fn, ms); };
+    var clearTimer = options.clearTimer || function (id) { clearTimeout(id); };
 
     var lastGoodAtMs = null;  // when the Manager last answered, by this clock
     var heldTag = null;       // the ETag field value, verbatim, quotes included
@@ -908,25 +935,64 @@
       // including the quotes, so the bare revision matches nothing, forever.
       if (heldTag !== null) headers['If-None-Match'] = heldTag;
 
+      var timer = null;
+
+      /**
+       * The one exit. Stops the budget timer, then drops the latch.
+       *
+       * Idempotent on the timer by nulling the handle before clearing it, so a
+       * double call cannot cancel a handle the host has since handed to
+       * somebody else, and a call before one was ever started does nothing.
+       * Both matter: this runs from the `catch` below as well as from the
+       * settled request, and exactly one of those started a timer.
+       */
+      function settled() {
+        if (timer !== null) {
+          var started = timer;
+          timer = null;
+          clearTimer(started);
+        }
+        release();
+      }
+
       var pending;
       try {
+        // Inside the `try` deliberately. `AbortController` and the timer are
+        // the two new ways to throw on the way out of here, and a throw between
+        // `inFlight = true` and the handlers below is the original defect
+        // again: the latch stays shut and this page never polls again. A
+        // constructor this UI cannot do without is not worth a silent
+        // fallback — but it is worth being unable to wedge anything.
+        var controller = new AbortController();
+        timer = setTimer(function () { controller.abort(); }, ABORT_MS);
         // `no-store` because the conditional request is ours to make. A 200 the
         // browser answered out of its own store would reset the freshness clock
         // without the Manager having said anything at all.
-        pending = fetchImpl(SNAPSHOT_PATH, { headers: headers, cache: 'no-store' });
+        pending = fetchImpl(SNAPSHOT_PATH, {
+          headers: headers,
+          cache: 'no-store',
+          signal: controller.signal
+        });
       } catch (error) {
         // A transport that THROWS rather than returning a rejected promise is
         // the same permanent wedge through another door: the release below
         // never runs and the poller is shut for the life of the page.
         // Observably this is a request that never reached the Manager.
-        release();
+        settled();
         return Promise.resolve(unreached());
       }
 
       // Released on BOTH outcomes, including one thrown by a caller's own
       // `onState`. A release that only ran on success would wedge the poller
       // shut the first time anything threw.
-      return pending.then(receive, unreached).then(release, release);
+      //
+      // An abort lands here as a rejection, so it needs no branch of its own
+      // and gets none: `unreached` is already the right answer to it. The held
+      // snapshot stays on screen, `lastGoodAtMs` is NOT moved — an abandoned
+      // request is not contact and must never make held data look fresh — and
+      // nothing is retried from in here. The next ordinary tick is the retry,
+      // which is why the budget sits under the poll interval.
+      return pending.then(receive, unreached).then(settled, settled);
     }
 
     return { tick: tick, republish: publish };
@@ -1047,6 +1113,8 @@
     var poller = createPoller({
       fetch: function (url, init) { return fetch(url, init); },
       now: function () { return Date.now(); },
+      setTimer: function (fn, ms) { return setTimeout(fn, ms); },
+      clearTimer: function (id) { clearTimeout(id); },
       onState: paint
     });
 
