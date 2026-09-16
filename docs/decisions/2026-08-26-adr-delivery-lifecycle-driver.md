@@ -262,7 +262,7 @@ should be, and the nominal member is about a delivery that is already finished.
 | an act that mutates | that act's own readings, one request, one reading |
 
 No path here runs `git fetch`, and the driver adds none — `L-V4-09-3` is the
-standing statement, and it is measured over the whole of `src/` by
+standing statement, and it is measured over every TypeScript module in `src/` by
 `tests/v4-09-post-merge-verification.test.ts`. (Not a claim that nothing in this
 build opens a socket: `notify/ntfy-transport.ts` does, on a path no delivery
 flag reaches.)

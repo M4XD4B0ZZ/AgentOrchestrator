@@ -645,7 +645,7 @@ describe('the transport puts a bounded JSON document on the socket', () => {
 
 /* ───────────────── 7. one file may reach the network, and one only ───────── */
 
-describe('the network surface of this build is two modules', () => {
+describe('the network surface of this build is two process modules, and two browser files', () => {
   const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
 
   /**

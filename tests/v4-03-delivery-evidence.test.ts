@@ -406,7 +406,7 @@ describe('a forge-observation claim cannot be manufactured', () => {
    * can reach the mint.
    */
   it('is minted from exactly one module beside its own public wrapper', () => {
-    // Walks the whole of `src/` rather than a list written here.
+    // Walks every TypeScript module in `src/` rather than a list written here.
     //
     // The first version filtered a hand-written array of eight files, which is
     // not a reachability check at all: a ninth module anywhere in `src/`
