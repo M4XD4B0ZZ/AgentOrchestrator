@@ -80,6 +80,29 @@ export const AGENT_FAILURE_CODES = [
    * where nothing produces it, and that is the price of one shared closed set.
    */
   'AGENT_REVIEW_INSTRUMENT_FAILED',
+  /**
+   * The writer wrote, or tried to write, outside its worktree, or the shared
+   * Claude memory folder changed while it ran (AO-MEMGUARD-001; see
+   * `writer-write-guard.ts`). Checked before every other outcome of the run,
+   * because a run that also hit its quota or exited non-zero may still have
+   * written. An evidence record is written and nothing is restored.
+   */
+  'AGENT_FORBIDDEN_WRITE',
+  /**
+   * No writer was started: an unacknowledged forbidden-write record exists for
+   * this worktree. Without it, a restart — by an operator's routine re-run or
+   * the supervisor's writer-restart lane, which cannot tell this park from a
+   * dead writer — would start the next writer in a folder a person has not yet
+   * looked at.
+   */
+  'AGENT_WRITE_QUARANTINED',
+  /**
+   * No writer was started: the write guard could not be established — the
+   * guard settings could not be written and read back, or a protected folder
+   * could not be read for its baseline. A writer without the guard is the
+   * defect this code exists to prevent.
+   */
+  'AGENT_WRITE_GUARD_UNAVAILABLE',
   /** Quota exhaustion, positively recognised. See `internal/claude-result-stream.ts`. */
   'AGENT_USAGE_LIMIT',
   /** An authentication or session rejection, positively recognised. */
@@ -127,6 +150,12 @@ export const AGENT_FAILURE_TEXT: Readonly<Record<AgentFailureCode, string>> = Ob
     'The agent ran but did not produce the structured result this boundary requires.',
   AGENT_REVIEW_INSTRUMENT_FAILED:
     'The reviewer reported that the code intelligence this review requires could not be bound to the worktree under review, so no review was performed.',
+  AGENT_FORBIDDEN_WRITE:
+    'The writer wrote or tried to write outside its worktree, or the shared Claude memory folder changed while it ran. Evidence was recorded under the orchestrator home (writer-violations); nothing was restored, and no writer starts in this worktree until a person acknowledges the record.',
+  AGENT_WRITE_QUARANTINED:
+    'No writer was started: an unacknowledged forbidden-write record exists for this worktree (writer-violations under the orchestrator home). A person must review it and move it into acknowledged/.',
+  AGENT_WRITE_GUARD_UNAVAILABLE:
+    'No writer was started: the write guard (its settings file or the baseline of the shared Claude memory folder) could not be established.',
   AGENT_USAGE_LIMIT: 'The agent reported that its usage allowance is exhausted.',
   AGENT_SESSION_REJECTED: 'The agent reported that it is not authenticated for this run.',
 });
@@ -142,7 +171,7 @@ export const AGENT_FAILURE_DISPOSITION: Readonly<Record<AgentFailureCode, AgentD
   Object.freeze({
     AGENT_USAGE_LIMIT: 'AGENT_BLOCKED_USAGE_LIMIT',
     AGENT_SESSION_REJECTED: 'AGENT_BLOCKED_AUTH',
-    // The remaining five are genuinely different diagnoses that the state
+    // The remaining eight are genuinely different diagnoses that the state
     // machine cannot tell apart: there is no state for "the agent misbehaved".
     // `AGENT_REVIEW_INSTRUMENT_FAILED` shares the edge deliberately — a review
     // that could not run does still need a human, and inventing a state for it
@@ -152,6 +181,10 @@ export const AGENT_FAILURE_DISPOSITION: Readonly<Record<AgentFailureCode, AgentD
     AGENT_NONZERO_EXIT: 'AGENT_NEEDS_ATTENTION',
     AGENT_RESULT_MALFORMED: 'AGENT_NEEDS_ATTENTION',
     AGENT_REVIEW_INSTRUMENT_FAILED: 'AGENT_NEEDS_ATTENTION',
+    // AO-MEMGUARD-001: a forbidden write, a quarantine and a missing guard all need a person.
+    AGENT_FORBIDDEN_WRITE: 'AGENT_NEEDS_ATTENTION',
+    AGENT_WRITE_QUARANTINED: 'AGENT_NEEDS_ATTENTION',
+    AGENT_WRITE_GUARD_UNAVAILABLE: 'AGENT_NEEDS_ATTENTION',
   });
 
 /**

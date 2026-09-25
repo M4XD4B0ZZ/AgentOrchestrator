@@ -107,8 +107,10 @@
 import {
   runClaudeWriter,
   type ClaudeWriterFailed,
+  type ClaudeWriterOptions,
   type WriterMcpGrant,
 } from '../agent/claude-writer.js';
+import type { WriterWriteGuard } from '../agent/writer-write-guard.js';
 import {
   codexReviewResumePoint,
   runCodexReviewer,
@@ -365,6 +367,13 @@ export interface LoopDependencies extends AdvanceOptions {
    * the right place to catch that.
    */
   readonly writerMcp: WriterMcpGrant | null;
+  /**
+   * The writer's write guard (AO-MEMGUARD-001), for both the implement and the
+   * fix-round launch. Optional, and absent means the production guard — the
+   * protected default, the other way round from `writerMcp`: forgetting it
+   * costs nothing. Tests pass one bound to a temporary home.
+   */
+  readonly writerGuard?: WriterWriteGuard;
   /**
    * The repository's own account of the task, read by `task-brief.ts`.
    *
@@ -961,14 +970,26 @@ async function recordInterruption(
   return result({ outcome: 'BLOCKED', state: record.state, save: record.save, ...measured });
 }
 
+/**
+ * The options both writer launches share: the leased runner, and the write guard when the caller
+ * supplied one (AO-MEMGUARD-001; absent means the production guard inside `runClaudeWriter`).
+ * One function for both launches, so the implement step and the fix round cannot drift apart.
+ */
+function writerLaunchOptions(deps: LoopDependencies): ClaudeWriterOptions {
+  return deps.writerGuard === undefined
+    ? { agent: leasedAgent(deps) }
+    : { agent: leasedAgent(deps), guard: deps.writerGuard };
+}
+
 /** The advance options, separated from the execution seams they travel with. */
 function leaseAdvanceOptions(deps: LoopDependencies): AdvanceOptions {
   const {
     now, authorisedWorktreePath, agent, verify, observe, git, brief, verification,
-    remediationPayload, reviewerProviderGate, ...advance
+    remediationPayload, reviewerProviderGate, writerGuard, ...advance
   } = deps;
   void now; void authorisedWorktreePath; void agent; void verify; void observe; void git;
   void brief; void verification; void remediationPayload; void reviewerProviderGate;
+  void writerGuard;
   return advance;
 }
 
@@ -2071,7 +2092,7 @@ export async function runRemediateStep(
       payload: cause.payload,
       mcp: deps.writerMcp,
     },
-    { agent: leasedAgent(deps) },
+    writerLaunchOptions(deps),
   );
 
   if (!writer.ok) {
@@ -2352,7 +2373,7 @@ export async function runImplementStep(
       payload: buildImplementPayload(brief.brief, round, briefing),
       mcp: deps.writerMcp,
     },
-    { agent: leasedAgent(deps) },
+    writerLaunchOptions(deps),
   );
 
   if (!writer.ok) {

@@ -28,6 +28,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   createProbeEnv,
+  policyConstants,
   probeEnvAllowlist,
   FORBIDDEN_CHILD_ENV_VARS,
   LOADER_INJECTION_ENV_VARS,
@@ -187,7 +188,11 @@ const EXPECTED_KEYS: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = {
   // V1-05. The agent runs read the same login the auth probes proved, so they
   // get the profile root and nothing beyond it. In particular they get no
   // credential variable: CLI-login operation is the expected mode.
-  'agent:claude': ['PATH', 'PATHEXT', 'HOME', 'USERPROFILE'],
+  // AO-MEMGUARD-001 adds one fixed value to the writer's block, supplied by the
+  // policy and never copied from the parent: auto-memory off. Measured: without
+  // it every writer session is told to keep notes in the operator's shared memory
+  // folder, and three fix-round writers did.
+  'agent:claude': ['PATH', 'PATHEXT', 'HOME', 'USERPROFILE', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY'],
   'agent:codex': ['PATH', 'PATHEXT', 'HOME', 'USERPROFILE'],
   // V4 slice 2. The one policy with a *measured* need for an app-data root:
   // `gh help environment` names `$AppData/GitHub CLI` as the Windows config
@@ -215,7 +220,47 @@ describe('the policy matrix is exact', () => {
   it.each(PROBE_ENV_POLICIES)('produces exactly the expected keys for %s', (policy) => {
     const env = createProbeEnv(policy, sourceEnv());
     expect(Object.keys(env).sort()).toEqual([...EXPECTED_KEYS[policy]].sort());
-    expect(Object.keys(env)).toEqual([...probeEnvAllowlist(policy)]);
+    // The forwarded names in allow-list order, then the policy's own constants.
+    expect(Object.keys(env)).toEqual([
+      ...probeEnvAllowlist(policy),
+      ...Object.keys(policyConstants(policy)),
+    ]);
+  });
+
+  describe('AO-MEMGUARD-001: the writer never gets auto-memory', () => {
+    it('supplies CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 to agent:claude', () => {
+      expect(createProbeEnv('agent:claude', sourceEnv())['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBe('1');
+    });
+
+    // Why an inherited value cannot win, pinned rather than assumed: the name is a constant, never
+    // an allow-listed variable, so nothing from the parent is copied under it before the constant
+    // is set. (A mutant that let an existing value win survives for exactly this reason.)
+    it('never forwards the name from the parent, so only the constant can supply it', () => {
+      for (const policy of PROBE_ENV_POLICIES) {
+        expect(probeEnvAllowlist(policy)).not.toContain('CLAUDE_CODE_DISABLE_AUTO_MEMORY');
+      }
+    });
+
+    it('is not overridden by an inherited value of the same name', () => {
+      const env = createProbeEnv('agent:claude', {
+        ...sourceEnv(),
+        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+      });
+      expect(env['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBe('1');
+    });
+
+    it('is supplied even when the parent has no such variable at all', () => {
+      const env = createProbeEnv('agent:claude', { PATH: 'p', HOME: 'h' });
+      expect(env['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBe('1');
+    });
+
+    it.each(PROBE_ENV_POLICIES.filter((p) => p !== 'agent:claude'))(
+      'is not handed to %s',
+      (policy) => {
+        expect(createProbeEnv(policy, sourceEnv())['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBeUndefined();
+        expect(policyConstants(policy)).toEqual({});
+      },
+    );
   });
 
   it.each(PROBE_ENV_POLICIES)('carries no credential and no unknown variable for %s', (policy) => {

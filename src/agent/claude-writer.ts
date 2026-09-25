@@ -19,6 +19,13 @@
  * Each step below can only ever reach a *worse* answer than the one after it,
  * and the order is what stops a later step from rescuing an earlier failure:
  *
+ *  0. before the launch, the write guard (AO-MEMGUARD-001, `writer-write-guard.ts`):
+ *     an open forbidden-write record → `AGENT_WRITE_QUARANTINED`, and a guard
+ *     that cannot be established → `AGENT_WRITE_GUARD_UNAVAILABLE`, both with
+ *     nothing spawned; after the launch, a write outside the worktree or a
+ *     changed memory folder → `AGENT_FORBIDDEN_WRITE`, **above every step
+ *     below**, because a run that hit its quota, exited non-zero or was cut off
+ *     may still have written
  *  1. nothing was spawned                  → `AGENT_ARGUMENT_REFUSED`
  *  2. the process never reached its own end → `AGENT_PROCESS_UNAVAILABLE`
  *  3. the stream says quota exhausted      → `AGENT_USAGE_LIMIT`
@@ -75,6 +82,11 @@ import {
   diagnosticResultLine,
   readClaudeResultStream,
 } from './internal/claude-result-stream.js';
+import {
+  createWriterWriteGuard,
+  type WriterViolation,
+  type WriterWriteGuard,
+} from './writer-write-guard.js';
 
 /**
  * The argument vector for a writing run. A frozen compile-time constant, in
@@ -282,6 +294,27 @@ export interface WriterMcpGrant {
  *
  * The argument order below is the measured one, not a tidied one.
  */
+/**
+ * The vector actually launched: `argv` with the write guard's settings
+ * (`--settings <path>`, AO-MEMGUARD-001) spliced in immediately before
+ * `--tools`, which is variadic and must stay last. The path is a file the
+ * guard wrote and read back for this launch; see `writer-write-guard.ts` for
+ * the measurement behind every setting in it.
+ */
+export function withWriteGuardSettings(
+  argv: readonly string[],
+  settingsPath: string,
+): readonly string[] {
+  const toolsAt = argv.indexOf('--tools');
+  if (toolsAt < 0) throw new Error('writer argv has no --tools');
+  return Object.freeze([
+    ...argv.slice(0, toolsAt),
+    '--settings',
+    settingsPath,
+    ...argv.slice(toolsAt),
+  ]);
+}
+
 export function claudeWriterArgs(grant: WriterMcpGrant | null): readonly string[] {
   if (grant === null) return CLAUDE_WRITER_ARGS;
   return Object.freeze([
@@ -342,6 +375,20 @@ export interface ClaudeWriterOptions {
    * mistake into a compile error instead of a silent one.
    */
   readonly agent: AgentRunner;
+  /**
+   * The write guard (AO-MEMGUARD-001). Optional, and the default is the
+   * production guard, deliberately the other way round from {@link agent}: a
+   * call site that forgets it gets the protection, not less of it. Tests pass
+   * one bound to a temporary home.
+   */
+  readonly guard?: WriterWriteGuard;
+}
+
+/** What a forbidden write left behind, for the caller and the operator. */
+export interface ForbiddenWriteEvidence {
+  /** The evidence record, or `null` when it could not be written (the run still fails closed). */
+  readonly recordPath: string | null;
+  readonly violation: WriterViolation;
 }
 
 interface ClaudeWriterOutcomeBase {
@@ -381,6 +428,8 @@ export interface ClaudeWriterFailed extends ClaudeWriterOutcomeBase {
    * evidence off a run that was not blocked: the narrowing is the guard.
    */
   readonly block: AgentBlockEvidence | null;
+  /** Present only for `AGENT_FORBIDDEN_WRITE` and `AGENT_WRITE_QUARANTINED`. */
+  readonly forbiddenWrite?: ForbiddenWriteEvidence | { readonly recordPath: string | null };
 }
 
 export type ClaudeWriterResult = ClaudeWriterCompleted | ClaudeWriterFailed;
@@ -437,8 +486,8 @@ export async function runClaudeWriter(
   // through this boundary as argv. Re-establishing the property at the spawn
   // is the same rule the worktree path above is held to: a producer's promise
   // is not evidence at the point of use.
-  const args = claudeWriterArgs(request.mcp);
-  if (!args.every(isShellInertArgument)) {
+  const baseArgs = claudeWriterArgs(request.mcp);
+  if (!baseArgs.every(isShellInertArgument)) {
     return failed(base, 'AGENT_ARGUMENT_REFUSED', {
       outcome: 'REFUSED_UNSAFE_ARGUMENT',
       exitCode: null,
@@ -450,7 +499,35 @@ export async function runClaudeWriter(
     });
   }
 
+  // AO-MEMGUARD-001. No writer starts without the guard: an open forbidden-write record for this
+  // worktree quarantines it, and a guard that cannot write its settings or read its baseline is a
+  // guard that is not there. Both refuse before anything is spawned.
+  const guard = options.guard ?? createWriterWriteGuard();
+  const guarded = guard.start({ worktreePath: request.worktreePath });
+  const notStarted: AgentProcessEvidence = {
+    outcome: 'UNAVAILABLE',
+    exitCode: null,
+    signal: null,
+    outputTruncated: false,
+    failureCode: null,
+    errnoCode: null,
+    durationMs: 0,
+  };
+  if (!guarded.ok) {
+    const refusal = failed(base, guarded.code, notStarted);
+    return guarded.code === 'AGENT_WRITE_QUARANTINED'
+      ? Object.freeze({ ...refusal, forbiddenWrite: Object.freeze({ recordPath: guarded.evidence }) })
+      : refusal;
+  }
+  const args = withWriteGuardSettings(baseArgs, guarded.session.settingsPath);
+  if (!args.every(isShellInertArgument)) {
+    return failed(base, 'AGENT_WRITE_GUARD_UNAVAILABLE', notStarted);
+  }
+
   const result = await run('claude', args, request.worktreePath, request.payload);
+  // Read before anything else about the run, and whatever its outcome: a run that hit its quota,
+  // exited non-zero or was cut off may still have written.
+  const violation = guarded.session.inspect(result.stdout);
   const process = agentProcessEvidence(result);
   // The excerpt is a redacted *prefix*, and since V3-11 the first four thousand
   // characters of stdout are the `init` message rather than anything about how
@@ -475,6 +552,20 @@ export async function runClaudeWriter(
     stderr: result.stderr,
   });
   const evidence = { ...base, process, diagnostics };
+
+  // AO-MEMGUARD-001: dominates every other diagnosis. Recorded, never restored.
+  if (violation !== null) {
+    const recordPath = guard.record(violation, {
+      worktreePath: request.worktreePath,
+      phase: request.phase,
+      round: request.round,
+      detectedAt: new Date().toISOString(),
+    });
+    return Object.freeze({
+      ...frozenFailure(evidence, 'AGENT_FORBIDDEN_WRITE'),
+      forbiddenWrite: Object.freeze({ recordPath, violation }),
+    });
+  }
 
   if (result.outcome === 'REFUSED_UNSAFE_ARGUMENT') {
     return frozenFailure(evidence, 'AGENT_ARGUMENT_REFUSED');

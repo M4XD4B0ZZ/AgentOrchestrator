@@ -427,6 +427,42 @@ const POLICY_ALLOWLIST: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = Ob
   'forge:github': Object.freeze([...EXEC_CONTRACT_VARS, 'APPDATA']),
 });
 
+/**
+ * Fixed values a policy supplies itself, never copied from any environment.
+ *
+ * `agent:claude` carries `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (AO-MEMGUARD-001).
+ * Measured on 2026-09-25 with CLI 2.1.282 and AO's exact writer argv: without
+ * it, every writer session's prompt tells it to keep notes in the operator's
+ * shared auto-memory folder and loads that folder's `MEMORY.md`, and three
+ * fix-round writers did write there. With it, both are gone. It does not close
+ * the path on its own — an agent handed the folder's absolute path can still
+ * write there — which is why the writer also carries a deny rule
+ * (`agent/writer-write-guard.ts`) and is checked after it ran. This is the
+ * layer that removes the reason to try.
+ *
+ * The MCP capability probe shares the policy and so receives the same value;
+ * it starts the same program for the same account, and a probe that is not
+ * told to keep notes is only more hermetic.
+ */
+const NO_CONSTANTS: Readonly<Record<string, string>> = Object.freeze({});
+const POLICY_CONSTANTS: Readonly<Record<ProbeEnvPolicy, Readonly<Record<string, string>>>> =
+  Object.freeze({
+    'auth:claude': NO_CONSTANTS,
+    'auth:codex': NO_CONSTANTS,
+    'agent:claude': Object.freeze({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }),
+    'agent:codex': NO_CONSTANTS,
+    'capability:claude': NO_CONSTANTS,
+    'capability:codex': NO_CONSTANTS,
+    'capability:generic': NO_CONSTANTS,
+    'forge:github': NO_CONSTANTS,
+  });
+
+/** The constants a policy supplies (see {@link POLICY_CONSTANTS}). */
+export function policyConstants(policy: ProbeEnvPolicy): Readonly<Record<string, string>> {
+  if (!isProbeEnvPolicy(policy)) rejectUnknownPolicy();
+  return POLICY_CONSTANTS[policy];
+}
+
 /** Thrown when a caller asks for a policy that does not exist. */
 export class UnknownProbeEnvPolicyError extends Error {}
 
@@ -787,6 +823,9 @@ export function createProbeEnv(
     const value = property.value;
     if (typeof value === 'string' && value !== '') env[name] = value;
   }
+  // Phase 3. The policy's own fixed values, last, so no inherited variable of the same name can
+  // stand in for them. None of them is ever read from `source`.
+  for (const [name, value] of Object.entries(POLICY_CONSTANTS[policy])) env[name] = value;
   return Object.freeze(env);
 }
 

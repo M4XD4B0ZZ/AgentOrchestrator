@@ -55,6 +55,11 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { agentDiagnostics, DIAGNOSTIC_EXCERPT_LIMIT } from '../src/agent/agent-outcome.js';
+import {
+  createWriterWriteGuard,
+  openViolationRecords,
+  protectedMemoryDirectories,
+} from '../src/agent/writer-write-guard.js';
 import { isLineSafe, lineSafe } from '../src/core/line-safe-text.js';
 import type { TaskStateInput } from '../src/core/task-state.js';
 import { TRANSITION_TABLE, isOperatorOnlyEdge } from '../src/core/transitions.js';
@@ -1029,6 +1034,41 @@ describe('a remediating writer is briefed from the record, or not at all', () =>
     expect(payload).toContain(HEAD_COMMIT);
     expect(payload).toContain('stopped at  : VERIFY');
     expect(payload).toContain('UNTRUSTED');
+  });
+
+  // AO-MEMGUARD-001, the fix-round launch: the shape of all three historical incidents. The writer
+  // "records a lesson" in the shared memory folder; the step must park for a person, write a
+  // record naming REMEDIATE, and leave the note exactly as the writer left it.
+  it('parks a fix round that wrote into the shared memory folder, and undoes nothing', async () => {
+    const root = repoRoot();
+    await seedAttempt(root);
+    const aoHome = mkdtempSync(join(tmpdir(), 'ao-m1-guard-home-'));
+    const profile = mkdtempSync(join(tmpdir(), 'ao-m1-guard-profile-'));
+    const guard = createWriterWriteGuard({ orchestratorHome: aoHome, homeDirectory: profile });
+    const worktree = join(root, 'worktree');
+    const memory = protectedMemoryDirectories(worktree, profile)[0] as string;
+    mkdirSync(memory, { recursive: true });
+    writeFileSync(join(memory, 'MEMORY.md'), '- seed\n');
+
+    const step = await runRemediateStep(
+      remediating(root),
+      deps(root, {
+        writerGuard: guard,
+        agent: async () => {
+          writeFileSync(join(memory, 'MEMORY.md'), '- seed\n- the rotation cannot be closed\n');
+          return writerRan;
+        },
+      }),
+    );
+
+    expect(step.outcome).toBe('BLOCKED');
+    expect(step.state).toBe('HUMAN_DECISION_REQUIRED');
+    const records = openViolationRecords(aoHome, worktree);
+    expect(records).toHaveLength(1);
+    expect(JSON.parse(readFileSync(records[0] as string, 'utf8')).phase).toBe('REMEDIATE');
+    expect(readFileSync(join(memory, 'MEMORY.md'), 'utf8')).toContain('the rotation cannot be closed');
+    rmSync(aoHome, { recursive: true, force: true });
+    rmSync(profile, { recursive: true, force: true });
   });
 
   it('refuses to brief from a record about a different tree', async () => {
