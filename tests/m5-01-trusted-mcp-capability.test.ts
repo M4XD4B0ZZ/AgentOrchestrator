@@ -45,6 +45,7 @@ import {
   runClaudeWriter,
   type WriterMcpGrant,
 } from '../src/agent/claude-writer.js';
+import { createWriterWriteGuard } from '../src/agent/writer-write-guard.js';
 import {
   MCP_CAPABILITY_REFUSALS,
   proveMcpCapabilities,
@@ -971,6 +972,10 @@ describe('the granted writer vector', () => {
 
   it('hands the assembled vector to the runner verbatim', async () => {
     const seen: string[][] = [];
+    // AO-MEMGUARD-001: a guard bound to a temporary home, so this test touches no operator folder.
+    const guardHome = makeCanonicalTempDir('ao-m5-guard-home-');
+    const guardProfile = makeCanonicalTempDir('ao-m5-guard-profile-');
+    const guard = createWriterWriteGuard({ orchestratorHome: guardHome, homeDirectory: guardProfile });
     await runClaudeWriter(
       {
         worktreePath: 'C:/tmp/worktree',
@@ -996,10 +1001,18 @@ describe('the granted writer vector', () => {
             stdinDelivery: 'WRITTEN',
           } as never;
         },
+        guard,
       },
     );
     expect(seen).toHaveLength(1);
-    expect(seen[0]).toEqual([...claudeWriterArgs(grant)]);
+    // The granted vector, plus the guard's `--settings <path>` immediately before `--tools`.
+    const launched = seen[0] ?? [];
+    const at = launched.indexOf('--settings');
+    expect(at).toBe(launched.indexOf('--tools') - 2);
+    expect([...launched.slice(0, at), ...launched.slice(at + 2)]).toEqual([...claudeWriterArgs(grant)]);
+    expect(launched[at + 1]?.startsWith(guardHome)).toBe(true);
+    rmSync(guardHome, { recursive: true, force: true });
+    rmSync(guardProfile, { recursive: true, force: true });
   });
 });
 

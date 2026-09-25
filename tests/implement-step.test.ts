@@ -11,7 +11,8 @@
  * stays injected: it is a subscription CLI and no test may start one.
  */
 
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
@@ -24,8 +25,14 @@ import {
   isLoopDrivenState,
   type LoopDependencies,
 } from '../src/loop/loop-step.js';
+import {
+  createWriterWriteGuard,
+  openViolationRecords,
+  protectedMemoryDirectories,
+} from '../src/agent/writer-write-guard.js';
 import { buildImplementPayload } from '../src/loop/implement-payload.js';
 import { briefingFixture } from './helpers/briefing.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 import { MAX_AGENT_PAYLOAD_CHARS } from '../src/loop/payload-budget.js';
 import { readExecutionBrief } from '../src/plan/task-brief.js';
 import { startTask } from '../src/run/start-task.js';
@@ -316,6 +323,46 @@ describe('IMPLEMENTING → VERIFYING', () => {
     // A writer that finished is not a task that finished, and not a review.
     expect(after.state.reviewRound).toBe(0);
     expect(step.remediationPayload).toBeNull();
+  });
+
+  // AO-MEMGUARD-001, the implement launch (V1GAP-004's round was an implement-side pass). The writer
+  // does its real work AND writes into the shared memory folder: the step parks for a person,
+  // commits nothing, records the violation, and leaves the note in place.
+  it('parks an implement pass that wrote into the shared memory folder, committing nothing', async () => {
+    const { repository, root, current } = await atImplementing();
+    const aoHome = makeCanonicalTempDir('ao-impl-guard-home-');
+    const profile = makeCanonicalTempDir('ao-impl-guard-profile-');
+    const guard = createWriterWriteGuard({ orchestratorHome: aoHome, homeDirectory: profile });
+    const worktree = current.state.worktreePath;
+    const memory = protectedMemoryDirectories(worktree, profile)[0] as string;
+    mkdirSync(memory, { recursive: true });
+    writeFileSync(join(memory, 'feedback_scope_rule.md'), 'A reviewer finding never widens scope.\n');
+    const headBefore = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).trim();
+    const agent = recordedAgent({
+      claude: (call) => {
+        writeRepoFile(call.cwd, 'src/work.ts', '// work\n');
+        writeFileSync(join(memory, 'feedback_scope_rule.md'), 'A reviewer finding may widen scope.\n');
+        return writerSuccess();
+      },
+    });
+
+    const step = await runImplementStep(
+      current,
+      stepDeps(current, repository, { agent: agent.runner, writerGuard: guard }),
+    );
+
+    expect(step.outcome).toBe('BLOCKED');
+    expect(step.state).toBe('HUMAN_DECISION_REQUIRED');
+    // Nothing committed: HEAD is where it was, and the task did not reach VERIFYING.
+    expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).trim()).toBe(headBefore);
+    const after = loadTaskState(root, 'V2-04');
+    expect(after.ok && after.state.state).toBe('HUMAN_DECISION_REQUIRED');
+    const records = openViolationRecords(aoHome, worktree);
+    expect(records).toHaveLength(1);
+    expect(JSON.parse(readFileSync(records[0] as string, 'utf8')).phase).toBe('IMPLEMENT');
+    expect(readFileSync(join(memory, 'feedback_scope_rule.md'), 'utf8')).toContain('may widen scope');
+    rmSync(aoHome, { recursive: true, force: true });
+    rmSync(profile, { recursive: true, force: true });
   });
 
   it('records a quota interruption as a resumable block, naming IMPLEMENT', async () => {

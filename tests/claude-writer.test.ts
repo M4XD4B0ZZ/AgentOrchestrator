@@ -18,7 +18,9 @@
  * mid-sentence reproducible on demand instead of hoped for.
  */
 
-import { describe, expect, it } from 'vitest';
+import { rmSync } from 'node:fs';
+
+import { afterAll, describe, expect, it } from 'vitest';
 
 import type { AgentCommandResult, AgentRunner } from '../src/agent/agent-command.js';
 import {
@@ -31,8 +33,10 @@ import {
   runClaudeWriter,
   type ClaudeWriterRequest,
 } from '../src/agent/claude-writer.js';
+import { createWriterWriteGuard } from '../src/agent/writer-write-guard.js';
 import { isShellInertArgument } from '../src/doctor/exec.js';
 import { agentCommandResult, claudeResultStream, SENSITIVE_MARKER } from './fixtures.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 
 const WORKTREE = '/srv/worktrees/alpha/task-0001';
 
@@ -67,13 +71,32 @@ function request(overrides: Partial<ClaudeWriterRequest> = {}): ClaudeWriterRequ
   };
 }
 
+// AO-MEMGUARD-001: every run here carries a write guard bound to a temporary home, so no test in
+// this file touches the operator's orchestrator home or Claude profile.
+// Canonical: on a runner whose temp path is an 8.3 short name (`RUNNER~1`) a raw `tmpdir()` path
+// carries `~`, which is not shell-inert, and the guard would rightly refuse to launch.
+const GUARD_HOME = makeCanonicalTempDir('ao-writer-guard-home-');
+const GUARD_PROFILE = makeCanonicalTempDir('ao-writer-guard-profile-');
+const guard = createWriterWriteGuard({ orchestratorHome: GUARD_HOME, homeDirectory: GUARD_PROFILE });
+afterAll(() => {
+  rmSync(GUARD_HOME, { recursive: true, force: true });
+  rmSync(GUARD_PROFILE, { recursive: true, force: true });
+});
+
 async function writerWith(
   result: AgentCommandResult,
   overrides: Partial<ClaudeWriterRequest> = {},
 ) {
   const agent = scriptedAgent(result);
-  const outcome = await runClaudeWriter(request(overrides), { agent: agent.runner });
+  const outcome = await runClaudeWriter(request(overrides), { agent: agent.runner, guard });
   return { outcome, agent };
+}
+
+/** The launched vector with the guard's `--settings <path>` pair taken out, and that path. */
+function splitGuardSettings(args: readonly string[]): { base: string[]; settingsPath: string | undefined } {
+  const at = args.indexOf('--settings');
+  if (at < 0) return { base: [...args], settingsPath: undefined };
+  return { base: [...args.slice(0, at), ...args.slice(at + 2)], settingsPath: args[at + 1] };
 }
 
 // ── The positive control ───────────────────────────────────────────────────
@@ -113,7 +136,13 @@ describe('how the writer is invoked', () => {
 
     const call = agent.calls[0];
     expect(call?.payload).toBe('a prompt with spaces, "quotes" & a pipe |');
-    expect(call?.args).toEqual([...CLAUDE_WRITER_ARGS]);
+    // AO-MEMGUARD-001: the launched vector is the base vector plus exactly one `--settings <path>`
+    // pair, placed immediately before the variadic `--tools`, naming the guard's own file.
+    const { base, settingsPath } = splitGuardSettings(call?.args ?? []);
+    expect(base).toEqual([...CLAUDE_WRITER_ARGS]);
+    expect(call?.args.indexOf('--settings')).toBe((call?.args.indexOf('--tools') ?? 0) - 2);
+    expect(settingsPath).toMatch(/[\\/]writer-guard[\\/]writer-settings-[0-9a-f]{24}\.json$/);
+    expect(settingsPath?.startsWith(GUARD_HOME)).toBe(true);
     for (const arg of call?.args ?? []) expect(isShellInertArgument(arg)).toBe(true);
   });
 

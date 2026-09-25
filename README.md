@@ -2635,7 +2635,10 @@ Each agent runs under its own environment policy, `agent:claude` and
 `agent:codex`: `PATH`, `PATHEXT`, `HOME`, `USERPROFILE`, and no credential.
 CLI-login operation is the expected mode, so an agent uses the stored login the
 auth preflight verified; an API key arriving out of the environment would mean
-the run was authenticated by a path nothing checked.
+the run was authenticated by a path nothing checked. `agent:claude` also
+carries one value AO supplies itself and never copies from the parent,
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` — see
+[the writer and the shared Claude memory folder](#the-writer-cannot-change-the-shared-claude-memory-folder-ao-memguard-001).
 
 ### The prompt travels on stdin, never in argv
 
@@ -2896,6 +2899,91 @@ Both measurements, the bundle reading and the live capture, are in
 
 Nothing here retries, sleeps, polls or backs off. One call, one process, one
 result.
+
+### The writer cannot change the shared Claude memory folder (AO-MEMGUARD-001)
+
+Source of truth: `src/agent/writer-write-guard.ts`.
+
+**The defect.** Claude Code gives every session a per-project auto-memory
+folder, `~/.claude/projects/<project>/memory/`, which it loads as instructions
+into every later session of that project. All linked worktrees of a repository
+share the **main** checkout's folder, so every task writer and the operator's own
+interactive sessions read one folder. Three fix-round writers wrote "lessons"
+into it: V1GAP-004 round 2, V1GAP-005R round 1 and the V1GAP-023 fix round. The
+scope guard could not see any of them: it is a Git diff inside the worktree.
+
+**Measured on 2026-09-25** against the CLI AO actually launches (npm's
+`claude.cmd` → CLI 2.1.282), with AO's exact argv and environment, in a scratch
+repository with a worktree:
+
+| Variant | "save it to your memory" (the three incidents) | the absolute memory path |
+| --- | --- | --- |
+| the shipped writer | written | written |
+| `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` | not attempted | **written** |
+| `--settings` with `autoMemoryEnabled: false` | not attempted | **written** |
+| both | not attempted | **written** |
+| both, plus `deny: Edit/Write(~/.claude/**)` | not attempted | refused |
+
+Both switches remove the prompt section and the `MEMORY.md` load, which is the
+trigger. Neither closes the path, because `acceptEdits` keeps an exemption for
+the project's own memory folder while it refuses every other path outside the
+working directory, including the rest of `~/.claude`. Only a deny rule closes
+it. A deny rule needs a settings file, because `(` is not shell-inert on the
+`.cmd` path.
+
+**Three layers, each for a reason the others cannot cover:**
+
+1. **Prevention.** The writer's environment carries
+   `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. Every launch passes `--settings <file>`
+   with `autoMemoryEnabled: false` and the four deny rules. AO writes that file
+   into `<orchestrator home>/writer-guard/` for the launch, reads it back byte
+   for byte, and removes it after the run.
+2. **The stream.** Every `Edit`, `Write`, `MultiEdit` or `NotebookEdit` whose
+   target resolves outside the worktree is a violation, whether it was
+   completed or refused. Junctions and symlinks are resolved first.
+3. **The bytes.** The memory folders the CLI could use for the worktree are
+   snapshotted before the launch and compared after it, whatever the run's
+   outcome. This is the layer that still holds if a future CLI drops the
+   switch, the rule or the stream event.
+
+**On a violation**, the run ends as `AGENT_FORBIDDEN_WRITE`. This is checked
+before every other diagnosis, because a run that hit its quota may still have
+written. The task parks at `HUMAN_DECISION_REQUIRED`, and nothing is committed.
+AO writes an evidence record to
+`<orchestrator home>/writer-violations/<worktree>/<time>-<phase>-r<round>.json`.
+It holds every outside write, and every changed memory file with its content
+before and after. **Nothing is restored.** Undoing the write would itself be a
+write to the operator's folder, and whether the note stays is a person's call.
+
+**Quarantine.** A writer failure parks a task in a state that looks exactly
+like a dead writer, and the Zera supervisor's writer-restart lane restarts that
+shape. So while an open record exists for a worktree, no writer starts there at
+all (`AGENT_WRITE_QUARANTINED`). To lift it, review the record and move it into
+the `acknowledged/` folder beside it. A guard that cannot write its settings or
+read its baseline also starts nothing (`AGENT_WRITE_GUARD_UNAVAILABLE`).
+
+**Coverage.** Both writer launches — the implement pass and the fix round —
+go through `runClaudeWriter`, and so does every retry and resume. The guard
+lives there, and its default is the production guard, so a call site that
+forgets to pass one is still protected.
+
+**Gates:**
+- `tests/memguard-001-writer-write-guard.test.ts` replays the three incidents
+  and tests each layer, the quarantine and the refusals.
+- Two cases at step level, in `implement-step.test.ts` and
+  `m1-verify-recovery-evidence.test.ts`, show that the task parks and commits
+  nothing.
+- `npm run verify:writer-memory-guard` measures the real CLI. Its control run
+  on the unguarded vector must still write, or the gate fails as blind. Then
+  the three incidents and the absolute path go through the guard, and the
+  memory folder must stay byte-identical.
+
+**Not covered:**
+- Reads of the memory folder: the writer can still read it, but no longer loads
+  it.
+- The Codex reviewer: it runs under its own login and never uses Claude memory.
+- Another tool that could write through the file system: the writer has only
+  `Read Edit Write Glob Grep`.
 
 ### What V1-05 is not
 
