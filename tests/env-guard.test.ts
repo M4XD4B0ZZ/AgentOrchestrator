@@ -9,6 +9,7 @@ import {
   LOADER_INJECTION_ENV_VARS,
   OBSERVED_PROVIDER_ENV_VARS,
   presenceOf,
+  policyConstants,
   probeEnvAllowlist,
   PROBE_ENV_COLLISION_CODE,
   PROBE_ENV_COLLISION_MESSAGE,
@@ -67,9 +68,12 @@ describe('createProbeEnv builds, rather than cleans, an environment', () => {
     const env = createProbeEnv(policy, { ...pollutedEnv(), LANG: 'en_US.UTF-8', AO_UNKNOWN_ENV: 'x' });
     expect(env['LANG']).toBeUndefined();
     expect(env['AO_UNKNOWN_ENV']).toBeUndefined();
-    // Only names the policy itself allows survive.
+    // Only names the policy itself allows, or supplies as a fixed value (AO-MEMGUARD-001), survive —
+    // and a supplied name carries exactly the policy's value, never the parent's.
+    const constants = policyConstants(policy);
     for (const name of Object.keys(env)) {
-      expect(probeEnvAllowlist(policy)).toContain(name);
+      expect([...probeEnvAllowlist(policy), ...Object.keys(constants)]).toContain(name);
+      if (name in constants) expect(env[name]).toBe(constants[name]);
     }
   });
 
@@ -1178,8 +1182,9 @@ describe('the real process environment is read as itself, not through a wrapper'
   it.each(PROBE_ENV_POLICIES)('still builds a usable environment for %s', (policy) => {
     const env = createProbeEnv(policy, process.env);
     expect(Object.isFrozen(env)).toBe(true);
+    const constants = policyConstants(policy);
     for (const name of Object.keys(env)) {
-      expect(probeEnvAllowlist(policy)).toContain(name);
+      expect([...probeEnvAllowlist(policy), ...Object.keys(constants)]).toContain(name);
       // Only plain data values are ever carried out of the real environment.
       expect(typeof env[name]).toBe('string');
       const descriptor = Object.getOwnPropertyDescriptor(env, name);
