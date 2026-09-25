@@ -20,7 +20,6 @@ import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -28,7 +27,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
@@ -51,6 +49,7 @@ import {
   WRITER_GUARD_SETTINGS_TEXT,
 } from '../src/agent/writer-write-guard.js';
 import { agentCommandResult, claudeResultStream } from './fixtures.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 import { usageLimitResult } from './helpers/e2e-fixtures.js';
 
 /* ═══════════════════════════════ fixtures ═══════════════════════════════ */
@@ -61,7 +60,9 @@ afterAll(() => {
 });
 
 function tempDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  // Canonical, so an 8.3 short temp path (`RUNNER~1`) cannot put a non-inert `~` into a path the
+  // guard hands the CLI.
+  const dir = makeCanonicalTempDir(prefix);
   created.push(dir);
   return dir;
 }

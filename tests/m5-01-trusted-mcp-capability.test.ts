@@ -34,8 +34,7 @@
  * (`agent/claude-writer.ts`, `agent/mcp-capability-preflight.ts`), which is
  * where a reader deciding whether to change the argv will be standing.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
@@ -974,8 +973,8 @@ describe('the granted writer vector', () => {
   it('hands the assembled vector to the runner verbatim', async () => {
     const seen: string[][] = [];
     // AO-MEMGUARD-001: a guard bound to a temporary home, so this test touches no operator folder.
-    const guardHome = mkdtempSync(join(tmpdir(), 'ao-m5-guard-home-'));
-    const guardProfile = mkdtempSync(join(tmpdir(), 'ao-m5-guard-profile-'));
+    const guardHome = makeCanonicalTempDir('ao-m5-guard-home-');
+    const guardProfile = makeCanonicalTempDir('ao-m5-guard-profile-');
     const guard = createWriterWriteGuard({ orchestratorHome: guardHome, homeDirectory: guardProfile });
     await runClaudeWriter(
       {

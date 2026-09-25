@@ -105,6 +105,7 @@ import { agentCommandResult, claudeResultStream, SHA_A, SHA_B, validCreatedState
 import { writingPassAnswer } from './helpers/scope-git.js';
 import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 import { briefCapabilityFields, briefingFixture } from './helpers/briefing.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 
 const NOW = '2026-08-29T09:00:00.000Z';
 const LATER = '2026-08-29T10:00:00.000Z';
@@ -1042,8 +1043,8 @@ describe('a remediating writer is briefed from the record, or not at all', () =>
   it('parks a fix round that wrote into the shared memory folder, and undoes nothing', async () => {
     const root = repoRoot();
     await seedAttempt(root);
-    const aoHome = mkdtempSync(join(tmpdir(), 'ao-m1-guard-home-'));
-    const profile = mkdtempSync(join(tmpdir(), 'ao-m1-guard-profile-'));
+    const aoHome = makeCanonicalTempDir('ao-m1-guard-home-');
+    const profile = makeCanonicalTempDir('ao-m1-guard-profile-');
     const guard = createWriterWriteGuard({ orchestratorHome: aoHome, homeDirectory: profile });
     const worktree = join(root, 'worktree');
     const memory = protectedMemoryDirectories(worktree, profile)[0] as string;

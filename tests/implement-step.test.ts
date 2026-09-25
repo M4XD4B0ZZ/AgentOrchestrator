@@ -12,8 +12,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
@@ -33,6 +32,7 @@ import {
 } from '../src/agent/writer-write-guard.js';
 import { buildImplementPayload } from '../src/loop/implement-payload.js';
 import { briefingFixture } from './helpers/briefing.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 import { MAX_AGENT_PAYLOAD_CHARS } from '../src/loop/payload-budget.js';
 import { readExecutionBrief } from '../src/plan/task-brief.js';
 import { startTask } from '../src/run/start-task.js';
@@ -330,8 +330,8 @@ describe('IMPLEMENTING → VERIFYING', () => {
   // commits nothing, records the violation, and leaves the note in place.
   it('parks an implement pass that wrote into the shared memory folder, committing nothing', async () => {
     const { repository, root, current } = await atImplementing();
-    const aoHome = mkdtempSync(join(tmpdir(), 'ao-impl-guard-home-'));
-    const profile = mkdtempSync(join(tmpdir(), 'ao-impl-guard-profile-'));
+    const aoHome = makeCanonicalTempDir('ao-impl-guard-home-');
+    const profile = makeCanonicalTempDir('ao-impl-guard-profile-');
     const guard = createWriterWriteGuard({ orchestratorHome: aoHome, homeDirectory: profile });
     const worktree = current.state.worktreePath;
     const memory = protectedMemoryDirectories(worktree, profile)[0] as string;

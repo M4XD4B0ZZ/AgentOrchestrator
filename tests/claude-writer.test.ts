@@ -18,9 +18,7 @@
  * mid-sentence reproducible on demand instead of hoped for.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
@@ -38,6 +36,7 @@ import {
 import { createWriterWriteGuard } from '../src/agent/writer-write-guard.js';
 import { isShellInertArgument } from '../src/doctor/exec.js';
 import { agentCommandResult, claudeResultStream, SENSITIVE_MARKER } from './fixtures.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 
 const WORKTREE = '/srv/worktrees/alpha/task-0001';
 
@@ -74,8 +73,10 @@ function request(overrides: Partial<ClaudeWriterRequest> = {}): ClaudeWriterRequ
 
 // AO-MEMGUARD-001: every run here carries a write guard bound to a temporary home, so no test in
 // this file touches the operator's orchestrator home or Claude profile.
-const GUARD_HOME = mkdtempSync(join(tmpdir(), 'ao-writer-guard-home-'));
-const GUARD_PROFILE = mkdtempSync(join(tmpdir(), 'ao-writer-guard-profile-'));
+// Canonical: on a runner whose temp path is an 8.3 short name (`RUNNER~1`) a raw `tmpdir()` path
+// carries `~`, which is not shell-inert, and the guard would rightly refuse to launch.
+const GUARD_HOME = makeCanonicalTempDir('ao-writer-guard-home-');
+const GUARD_PROFILE = makeCanonicalTempDir('ao-writer-guard-profile-');
 const guard = createWriterWriteGuard({ orchestratorHome: GUARD_HOME, homeDirectory: GUARD_PROFILE });
 afterAll(() => {
   rmSync(GUARD_HOME, { recursive: true, force: true });
