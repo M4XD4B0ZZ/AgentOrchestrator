@@ -492,6 +492,12 @@ export interface LifecycleRequest {
    */
   readonly continueUsageLimit?: boolean;
   /**
+   * The operator's `--quota-restored` statement, forwarded verbatim to
+   * `RunRequest.quotaRestored` and interpreted only there, with the same
+   * one-departure bound as `continueUsageLimit`.
+   */
+  readonly quotaRestored?: boolean;
+  /**
    * Whether this run may remove a lease it can prove is dead.
    *
    * Off is the safe answer and there is no default. When off, a stale lease
@@ -999,6 +1005,7 @@ async function driveUnderLease(
           // And the same bound again, on the third.
           continueUsageLimit:
             request.continueUsageLimit === true && !usageLimitContinuationSpent,
+          quotaRestored: request.quotaRestored === true && !usageLimitContinuationSpent,
           authEvidence,
           lease: evidence,
           maxSteps: request.maxSteps,
