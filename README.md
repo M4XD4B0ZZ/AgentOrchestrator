@@ -13997,6 +13997,24 @@ being taken by the *automatic* path with the operator's decision unspent.
 > `docs/decisions/2026-09-02-adr-actionable-notifications-and-recurring-operation.md`
 > and the rewritten **L-M3-01-1** above.
 
+**`--quota-restored` (2026-09-29).** A reported reset is what the agent said at
+the moment of the block, and a provider can give the allowance back before it —
+a reset or a purchase the operator made, which this machine cannot see. Measured
+on Zera V1GAP-033A: a Codex weekly limit reported "try again at Oct 3rd", the
+operator reset it the same night, and the task could only wait out four and a
+half days. The qualifier states exactly that:
+
+```
+agent-loop run --repository <path> --task <id> --attended --continue-usage-limit --quota-restored
+```
+
+It turns one refusal, `RESET_AHEAD`, into the permission
+`QUOTA_RESTORED_BY_OPERATOR`, and only where every other refusal the record
+carries would be continuable on its own; everything else stands. It is refused
+without `--continue-usage-limit`, it is not passed by the scheduler or the
+notification path (so `RESET_AHEAD` still pages nobody), and a still-exhausted
+allowance records a fresh block on the next run.
+
 One asymmetry is worth stating, because it is the one line the two siblings did
 not need. `BLOCKED_VERIFY` and `HUMAN_DECISION_REQUIRED` are both
 `automaticResumeEligible: false`, so they classify `ATTENDED_ONLY` and an

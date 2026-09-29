@@ -133,6 +133,19 @@ das Kontingent noch leer, meldet der nächste Run einen frischen Block. Braucht
 auf `agent-loop repositories` gar nicht, und gilt für **einen** Ausstieg pro
 Invocation.
 
+**Kontingent früher zurück (seit 2026-09-29):** Liegt die gemeldete Reset-Zeit noch
+in der Zukunft, du hast das Kontingent aber beim Anbieter schon zurückgesetzt oder
+nachgekauft, sagst du das ausdrücklich:
+
+```
+agent-loop run --repository <pfad> --task <id> --attended --continue-usage-limit --quota-restored
+```
+
+`--quota-restored` gilt nur zusammen mit `--continue-usage-limit` und macht aus
+genau einer Ablehnung (`RESET_AHEAD`) die Erlaubnis `QUOTA_RESTORED_BY_OPERATOR`;
+alle anderen Ablehnungen bleiben. Ist das Kontingent doch noch leer, meldet der
+nächste Run einen frischen Block.
+
 **Es greift bewusst nicht, wenn eine Reset-Zeit im Record steht** — weder eine
 zukünftige noch eine vergangene. Eine zukünftige gehört der Maschine: sie weiß,
 wann das Fenster zurückkommt, also warte darauf. Eine vergangene gibt

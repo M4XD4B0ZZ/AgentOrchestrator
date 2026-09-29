@@ -289,6 +289,7 @@ describe('M3 slice 2 — the usage-limit continuation reading', () => {
       RESET_UNRECORDED: 'records no reset instant',
       RESET_UNREADABLE: 'not a timestamp, so nothing can wait for it either',
       RESUME_RECORD_WITHDRAWN: 'no settled commit',
+      QUOTA_RESTORED_BY_OPERATOR: '--quota-restored',
     };
 
     for (const reading of USAGE_LIMIT_CONTINUATION_READINGS) {
@@ -350,6 +351,65 @@ describe('M3 slice 2 — the usage-limit continuation reading', () => {
     expect(usageLimitContinuation(paused({ reportedResetAt: NOW }), NOW).reading).toBe(
       'RESET_AHEAD',
     );
+  });
+});
+
+/* ═══════ 2b. --quota-restored: the operator says the allowance is back ══════ */
+
+describe('quota restored before its recorded reset (--quota-restored)', () => {
+  it('permits a future reset over an intact or a withdrawn record', () => {
+    for (const overrides of [
+      {},
+      WITHDRAWN,
+      { basePinnedCommit: null },
+      { currentCommit: null },
+      { worktreeCleanAtCheckpoint: false },
+    ] as const) {
+      const answer = usageLimitContinuation(
+        paused({ ...overrides, reportedResetAt: AHEAD }),
+        NOW,
+        { quotaRestored: true },
+      );
+      expect(answer.permitted).toBe(true);
+      expect(answer.reading).toBe('QUOTA_RESTORED_BY_OPERATOR');
+    }
+  });
+
+  it('still refuses a future reset without the statement', () => {
+    for (const options of [{}, { quotaRestored: false }] as const) {
+      const answer = usageLimitContinuation(paused({ reportedResetAt: AHEAD }), NOW, options);
+      expect(answer.permitted).toBe(false);
+      expect(answer.reading).toBe('RESET_AHEAD');
+    }
+  });
+
+  it('keeps every other refusal: no resume point, an unreadable clock, an unknown fault', () => {
+    expect(
+      usageLimitContinuation(paused({ reportedResetAt: AHEAD, resumeFrom: null }), NOW, {
+        quotaRestored: true,
+      }).reading,
+    ).toBe('RESUME_POINT_MISSING');
+    expect(
+      usageLimitContinuation(paused({ reportedResetAt: AHEAD }), 'not a time', {
+        quotaRestored: true,
+      }).reading,
+    ).toBe('CURRENT_TIME_UNREADABLE');
+    expect(
+      usageLimitContinuation(
+        paused({ reportedResetAt: AHEAD, worktreePath: 'relative/tree' }),
+        NOW,
+        { quotaRestored: true },
+      ).reading,
+    ).toBe('RECORD_REFUSAL_UNRECOGNISED');
+  });
+
+  it('changes nothing where the reset is not ahead', () => {
+    for (const overrides of [{}, WITHDRAWN, { reportedResetAt: null }] as const) {
+      const state = paused(overrides);
+      expect(usageLimitContinuation(state, NOW, { quotaRestored: true })).toEqual(
+        usageLimitContinuation(state, NOW),
+      );
+    }
   });
 });
 

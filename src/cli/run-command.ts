@@ -156,6 +156,7 @@ interface RunOptions {
   readonly verifyOperatorRepair?: boolean;
   readonly continueHumanDecision?: boolean;
   readonly continueUsageLimit?: boolean;
+  readonly quotaRestored?: boolean;
 }
 
 /**
@@ -306,6 +307,15 @@ function refuseArguments(options: RunOptions): ArgumentRefusal | null {
         '--continue-usage-limit requires --task. The decision is about one paused task, ' +
         'and letting the selector choose which one to continue would make the operator ' +
         'spend an agent allowance on a task they never named.',
+    };
+  }
+  if (options.quotaRestored === true && options.continueUsageLimit !== true) {
+    return {
+      code: 'QUOTA_RESTORED_WITHOUT_USAGE_LIMIT_CONTINUATION',
+      sentence:
+        '--quota-restored only qualifies --continue-usage-limit, which was not given. It ' +
+        'states that an allowance came back before its recorded reset; on its own it ' +
+        'continues nothing.',
     };
   }
   if (unattended && options.recoverStaleLease === true) {
@@ -506,6 +516,7 @@ async function executeAttended(
     readonly verifyOperatorRepair: boolean;
     readonly continueHumanDecision: boolean;
     readonly continueUsageLimit: boolean;
+    readonly quotaRestored: boolean;
   },
   seams: RunCommandSeams,
 ): Promise<CliExitCode> {
@@ -545,6 +556,9 @@ async function executeAttended(
       // that the paused task recorded no reset instant — is a property of the
       // record, so it is checked where the record is read.
       continueUsageLimit: lifecycle.continueUsageLimit,
+      // Only ever meaningful beside the field above; `refuseArguments` refuses it
+      // alone, and the driver asks it only together with `continueUsageLimit`.
+      quotaRestored: lifecycle.quotaRestored,
       recoverStaleLease: lifecycle.recoverStaleLease,
       maxSteps: lifecycle.maxSteps,
       maxInvocations: lifecycle.maxInvocations,
@@ -732,6 +746,15 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
         + 'operator-attention item `repositories --wait-for-reset` writes for a block this '
         + 'flag can move.',
     )
+    .option(
+      '--quota-restored',
+      'Qualifies --continue-usage-limit, and nothing else: you state that the allowance ' +
+        'came back BEFORE the reset time the block recorded -- a reset or purchase at the ' +
+        'provider that this machine cannot see. With it, a reset still ahead is continuable; ' +
+        'every other refusal stands. It retries nothing and waits for nothing: if the ' +
+        'allowance is still exhausted, the run records a fresh block. Refused without ' +
+        '--continue-usage-limit.',
+    )
     // ── Why this is not called `--unattended-…` ─────────────────────────────
     //
     // It was, for one round, and `tests/v2-07lr-lease-recovery.test.ts` refused
@@ -895,6 +918,7 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
             verifyOperatorRepair: options.verifyOperatorRepair === true,
             continueHumanDecision: options.continueHumanDecision === true,
             continueUsageLimit: options.continueUsageLimit === true,
+            quotaRestored: options.quotaRestored === true,
           },
           seams,
         );

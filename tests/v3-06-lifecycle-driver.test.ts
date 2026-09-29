@@ -487,6 +487,10 @@ describe('a quota pause stops the run rather than being waited out', () => {
       // driver forwards it and `run-driver.ts` refuses it for any block that
       // records a reset instant, so nothing here schedules or sleeps.
       continueUsageLimit: null,
+      // Added 2026-09-29. A statement qualifying the decision above, not a wait:
+      // it waits for nothing and schedules nothing — it only lets that decision
+      // continue a reset the operator says has already been restored.
+      quotaRestored: null,
     } satisfies Record<keyof LifecycleRequest, null>);
     expect(keys).not.toContain('waitForReset');
     expect(keys).not.toContain('maxWaitMs');

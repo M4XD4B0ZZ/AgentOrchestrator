@@ -3131,6 +3131,42 @@ describe('M2-06 — --continue-usage-limit moves a quota pause that nothing else
     expect(agent.count()).toBe(0);
   });
 
+  it('continues a future reset when the operator states the quota is restored', async () => {
+    const root = repoRoot();
+    // The same shape as the refusal above, differing only in the statement.
+    paused(root, { reportedResetAt: '2099-01-01T00:00:00.000Z' });
+    const agent = scriptedAgent(agentCommandResult({ stdout: findingsReview() }));
+
+    const run = await runTask(
+      request(root, { continueUsageLimit: true, quotaRestored: true, maxSteps: 2 }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    // The record names REVIEW, so a reviewer runs: the statement does not choose
+    // the phase either, and the decision it qualifies is the one spent.
+    expect(run.continuedUsageLimit).toBe(true);
+    expect(agent.calls.length).toBeGreaterThanOrEqual(1);
+    expect(agent.calls[0]?.agent).toBe('codex');
+    expect(reload(root).state.state).not.toBe('BLOCKED_USAGE_LIMIT');
+  });
+
+  it('ignores the quota-restored statement without the decision it qualifies', async () => {
+    const root = repoRoot();
+    paused(root, { reportedResetAt: '2099-01-01T00:00:00.000Z' });
+    const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+
+    const run = await runTask(
+      request(root, { quotaRestored: true }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.outcome).toBe('BLOCKED_USAGE_LIMIT');
+    expect(run.steps).toBe(0);
+    expect(run.continuedUsageLimit).toBe(false);
+    expect(reload(root).state.reportedResetAt).toBe('2099-01-01T00:00:00.000Z');
+    expect(agent.count()).toBe(0);
+  });
+
   it('leaves a block whose reset has passed to the path that already owns it', async () => {
     const root = repoRoot();
     paused(root, { reportedResetAt: '2020-01-01T00:00:00.000Z' });

@@ -159,6 +159,9 @@ describe('agent-loop run — CLI seam', () => {
       '--verify-operator-repair',
       '--continue-human-decision',
       '--continue-usage-limit',
+      // Added 2026-09-29. It grants nothing alone: it qualifies the flag above
+      // and is refused without it (QUOTA_RESTORED_WITHOUT_USAGE_LIMIT_CONTINUATION).
+      '--quota-restored',
       '--automatic-resume-only',
       '--wait-for-reset',
       '--max-wait-ms',
@@ -375,6 +378,12 @@ describe('the unattended automatic-resume mode refuses unusable combinations fir
     {
       args: ['--automatic-resume-only', '--continue-usage-limit'],
       code: 'USAGE_LIMIT_CONTINUATION_WITHOUT_OPERATOR',
+    },
+    // The qualifier alone, attended or not, continues nothing.
+    { args: ['--quota-restored'], code: 'QUOTA_RESTORED_WITHOUT_USAGE_LIMIT_CONTINUATION' },
+    {
+      args: ['--attended', '--quota-restored'],
+      code: 'QUOTA_RESTORED_WITHOUT_USAGE_LIMIT_CONTINUATION',
     },
   ];
 

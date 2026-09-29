@@ -14,6 +14,13 @@
  * whose end cannot be read, and a pause whose resume record was withdrawn — is
  * the operator's, because nothing else in this build can move it.
  *
+ * One addition, and it is an explicit statement rather than a widening: with
+ * `--quota-restored` the operator says the allowance returned **before** the
+ * reported reset (a provider-side reset or purchase this machine cannot see).
+ * Only then does a reset still ahead become continuable, as
+ * `QUOTA_RESTORED_BY_OPERATOR`; without the statement it is refused exactly as
+ * before. See that member for the measured case.
+ *
  * ── Why this replaced `reportedResetAt === null` ───────────────────────────
  *
  * M2 slice 6 built the escape with that single term, and it was right about the
@@ -144,6 +151,21 @@ export const USAGE_LIMIT_CONTINUATION_PERMISSIONS = [
    * shape this slice exists for.
    */
   'RESUME_RECORD_WITHDRAWN',
+  /**
+   * A reset instant is recorded and has not arrived, and the operator stated with
+   * `--quota-restored` that the allowance is back anyway.
+   *
+   * The one reading a future reset can reach, and only through that explicit
+   * statement. The reset time is what the agent reported at the moment of the
+   * block; a provider can restore an allowance before it — a reset or a purchase
+   * the operator made — and nothing on this machine can observe that. Measured
+   * 2026-09-29: a Codex weekly limit reported "try again at Oct 3rd", the
+   * operator reset it the same night, and without this reading the task could
+   * only wait out four and a half days the allowance no longer needed. The
+   * statement buys the same single departure as every other permission, and a
+   * still-exhausted allowance records a fresh block on the next run.
+   */
+  'QUOTA_RESTORED_BY_OPERATOR',
 ] as const;
 
 export const USAGE_LIMIT_CONTINUATION_READINGS = [
@@ -212,10 +234,17 @@ const permit = (reading: UsageLimitContinuationPermission): UsageLimitContinuati
  * two that could otherwise co-occur are the reason the order is written down —
  * a record that is both future-dated *and* withdrawn is `RESET_AHEAD`, because
  * the wait is real whatever else is wrong.
+ *
+ * `quotaRestored` is the operator's `--quota-restored` statement and nothing
+ * else: no caller may derive it. It changes exactly one answer — a future reset
+ * becomes `QUOTA_RESTORED_BY_OPERATOR` instead of `RESET_AHEAD` — and only where
+ * every other refusal the record carries would be continuable on its own. Every
+ * refusal asked before and after the reset question is asked unchanged.
  */
 export function usageLimitContinuation(
   state: TaskState,
   now: string | Date,
+  options: { readonly quotaRestored?: boolean } = {},
 ): UsageLimitContinuation {
   if (state.state !== 'BLOCKED_USAGE_LIMIT') return refuse('STATE_NOT_BLOCKED_ON_USAGE_LIMIT');
 
@@ -223,7 +252,15 @@ export function usageLimitContinuation(
   const denied = (code: AutomaticResumeReasonCode): boolean => refusals.includes(code);
 
   if (denied('CURRENT_TIME_UNPARSEABLE')) return refuse('CURRENT_TIME_UNREADABLE');
-  if (denied('RESET_TIME_NOT_REACHED')) return refuse('RESET_AHEAD');
+  if (denied('RESET_TIME_NOT_REACHED')) {
+    if (options.quotaRestored !== true) return refuse('RESET_AHEAD');
+    if (denied('RESUME_POINT_MISSING')) return refuse('RESUME_POINT_MISSING');
+    const others = refusals.filter((code) => code !== 'RESET_TIME_NOT_REACHED');
+    if (!others.every((code) => CONTINUABLE_RECORD_REFUSALS.has(code))) {
+      return refuse('RECORD_REFUSAL_UNRECOGNISED');
+    }
+    return permit('QUOTA_RESTORED_BY_OPERATOR');
+  }
   if (denied('RESUME_POINT_MISSING')) return refuse('RESUME_POINT_MISSING');
   if (refusals.length === 0) return refuse('MACHINE_MAY_STILL_RESUME');
 
@@ -281,4 +318,8 @@ export const USAGE_LIMIT_CONTINUATION_SENTENCES = Object.freeze({
     'base commit — so no passage of time and no repair to the repository can make the ' +
     'automatic resume possible. Continuing from the recorded phase is an operator decision, ' +
     'and the scope gate meets that worktree again before any writer runs in it.',
+  QUOTA_RESTORED_BY_OPERATOR:
+    'A reset instant is recorded and still ahead, but you stated with --quota-restored that ' +
+    'the allowance is back before it. Continuing is your decision; if the allowance is still ' +
+    'exhausted, the next run records a fresh block.',
 }) satisfies Record<UsageLimitContinuationReading, string>;

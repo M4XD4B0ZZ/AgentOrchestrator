@@ -569,6 +569,13 @@ export interface RunRequest {
    */
   readonly continueUsageLimit?: boolean;
   /**
+   * The operator's `--quota-restored` statement: the allowance returned before
+   * the reset the block recorded. It only ever reaches `usageLimitContinuation`
+   * together with `continueUsageLimit`, so on its own it permits nothing, and it
+   * turns exactly one refusal (`RESET_AHEAD`) into a permission. Absent means no.
+   */
+  readonly quotaRestored?: boolean;
+  /**
    * The artefact a *fresh* auth preflight produced, or `null` when none ran.
    *
    * Evidence, never assumed — and since V2-05 that is enforced rather than
@@ -1199,7 +1206,11 @@ export async function runTask(
     // two so that a clock crossing the reset instant between them cannot make
     // the report disagree with the decision it is reporting.
     const quota =
-      state.state === 'BLOCKED_USAGE_LIMIT' ? usageLimitContinuation(state, deps.now()) : null;
+      state.state === 'BLOCKED_USAGE_LIMIT'
+        ? usageLimitContinuation(state, deps.now(), {
+            quotaRestored: request.continueUsageLimit === true && request.quotaRestored === true,
+          })
+        : null;
 
     const continuingUsageLimit =
       state.state === 'BLOCKED_USAGE_LIMIT' &&
