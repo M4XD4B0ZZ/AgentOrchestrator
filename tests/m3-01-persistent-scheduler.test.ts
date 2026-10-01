@@ -2014,3 +2014,39 @@ describe('M3 slice 1 — the exit code', () => {
     }
   });
 });
+
+describe('the wake horizon never schedules a reviewer relaunch', () => {
+  const REVIEWER = { blockedAgent: 'codex', resumeFrom: { phase: 'REVIEW', round: 1 } };
+
+  it('reports no wake for a reviewer block whose reset is still ahead', () => {
+    const root = makeRepository('wake-reviewer-future', ['T-1']);
+    writeBlockedState(root, 'T-1', new Date(NOW_MS + 3 * 60 * 60 * 1000).toISOString(), REVIEWER);
+
+    const scan = scanDurableWakes([root], { now: NOW, since: NOW });
+
+    expect(scan.earliest).toBeNull();
+    expect(scan.future).toEqual([]);
+    // It was read: the absence is the rule, not a failure to look.
+    expect(scan.statesRead).toBe(1);
+    expect(scan.notes).toEqual([]);
+  });
+
+  it('reports no matured wake for a reviewer block whose reset fell inside the pass', () => {
+    const root = makeRepository('wake-reviewer-matured', ['T-1']);
+    writeBlockedState(root, 'T-1', new Date(NOW_MS - 60 * 1000).toISOString(), REVIEWER);
+
+    const since = new Date(NOW_MS - 10 * 60 * 1000).toISOString();
+    expect(scanDurableWakes([root], { now: NOW, since }).matured).toEqual([]);
+  });
+
+  it('still wakes for the writer block beside it', () => {
+    const root = makeRepository('wake-reviewer-beside-writer', ['T-1', 'T-2']);
+    const resetAt = new Date(NOW_MS + 3 * 60 * 60 * 1000).toISOString();
+    writeBlockedState(root, 'T-1', resetAt, REVIEWER);
+    writeBlockedState(root, 'T-2', resetAt);
+
+    const scan = scanDurableWakes([root], { now: NOW, since: NOW });
+
+    expect(scan.future.map((wake) => wake.taskId)).toEqual(['T-2']);
+  });
+});

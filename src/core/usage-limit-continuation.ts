@@ -21,6 +21,11 @@
  * `QUOTA_RESTORED_BY_OPERATOR`; without the statement it is refused exactly as
  * before. See that member for the measured case.
  *
+ * The reviewer's block is the operator's by design rather than by accident: the
+ * automatic path refuses it on the record (`REVIEWER_BLOCK_REQUIRES_OPERATOR`), so
+ * once its reset has passed this is the only way it moves, as
+ * `REVIEWER_RESUME_BY_OPERATOR`. Nothing relaunches a review on the clock.
+ *
  * ── Why this replaced `reportedResetAt === null` ───────────────────────────
  *
  * M2 slice 6 built the escape with that single term, and it was right about the
@@ -166,6 +171,15 @@ export const USAGE_LIMIT_CONTINUATION_PERMISSIONS = [
    * still-exhausted allowance records a fresh block on the next run.
    */
   'QUOTA_RESTORED_BY_OPERATOR',
+  /**
+   * The reviewer's quota block, its reset passed, the record otherwise intact.
+   *
+   * The automatic path refuses this record on purpose
+   * (`REVIEWER_BLOCK_REQUIRES_OPERATOR`): a review is launched on an operator's
+   * explicit continuation, never because a reset instant went by. This is that
+   * continuation. Before the reset it still needs `--quota-restored` as well.
+   */
+  'REVIEWER_RESUME_BY_OPERATOR',
 ] as const;
 
 export const USAGE_LIMIT_CONTINUATION_READINGS = [
@@ -203,11 +217,13 @@ export type UsageLimitContinuation =
  *  - *may a human override this particular record fault?* — that is this
  *    module's own judgement, and it has to be written down somewhere.
  *
- * Three shapes are here. The two reset refusals are the pause with no end
+ * Four shapes are here. The two reset refusals are the pause with no end
  * anybody can wait for. `CURRENT_COMMIT_MISMATCH`, `WORKTREE_NOT_CLEAN` and
  * `BASE_COMMIT_MISMATCH` are the withdrawn resume record — under favourable
  * evidence each can only mean that the *record's* own field is `null` or
  * `false`, because the observed half was stipulated to agree.
+ * `REVIEWER_BLOCK_REQUIRES_OPERATOR` is the reviewer's block, which only an
+ * operator continues.
  *
  * Everything else refuses. See `RECORD_REFUSAL_UNRECOGNISED`.
  */
@@ -217,6 +233,7 @@ const CONTINUABLE_RECORD_REFUSALS: ReadonlySet<AutomaticResumeReasonCode> = new 
   'CURRENT_COMMIT_MISMATCH',
   'WORKTREE_NOT_CLEAN',
   'BASE_COMMIT_MISMATCH',
+  'REVIEWER_BLOCK_REQUIRES_OPERATOR',
 ]);
 
 const refuse = (reading: UsageLimitContinuationRefusal): UsageLimitContinuation =>
@@ -274,6 +291,9 @@ export function usageLimitContinuation(
 
   if (denied('RESET_TIME_MISSING')) return permit('RESET_UNRECORDED');
   if (denied('RESET_TIME_UNPARSEABLE')) return permit('RESET_UNREADABLE');
+  if (refusals.every((code) => code === 'REVIEWER_BLOCK_REQUIRES_OPERATOR')) {
+    return permit('REVIEWER_RESUME_BY_OPERATOR');
+  }
   return permit('RESUME_RECORD_WITHDRAWN');
 }
 
@@ -292,8 +312,10 @@ export const USAGE_LIMIT_CONTINUATION_SENTENCES = Object.freeze({
     'The clock this was judged against is not a timestamp, so whether the reset has passed ' +
     'could not be decided. Nothing was permitted.',
   RESET_AHEAD:
-    'A reset instant is recorded and has not arrived. This is the machine’s wait, not a ' +
-    'decision: let the scheduler wake for it, or invoke again after that instant.',
+    'A reset instant is recorded and has not arrived. For a writer this is the machine’s ' +
+    'wait, not a decision: let the scheduler wake for it, or invoke again after that instant. ' +
+    'A reviewer’s block is never resumed by the clock: after that instant, continue it with ' +
+    '--continue-usage-limit.',
   RESUME_POINT_MISSING:
     'The record names no phase to continue at, so there is nowhere for a continuation to go.',
   RECORD_REFUSAL_UNRECOGNISED:
@@ -322,4 +344,8 @@ export const USAGE_LIMIT_CONTINUATION_SENTENCES = Object.freeze({
     'A reset instant is recorded and still ahead, but you stated with --quota-restored that ' +
     'the allowance is back before it. Continuing is your decision; if the allowance is still ' +
     'exhausted, the next run records a fresh block.',
+  REVIEWER_RESUME_BY_OPERATOR:
+    'The reviewer’s quota block has passed its reset. A review is never relaunched on the ' +
+    'clock, so this is your explicit continuation: it runs the one review the record names. ' +
+    'If the allowance is still exhausted, the next run records a fresh block and stops.',
 }) satisfies Record<UsageLimitContinuationReading, string>;

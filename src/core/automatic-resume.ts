@@ -125,7 +125,8 @@ export type AutomaticResumeReasonCode =
   | 'BASE_COMMIT_MISMATCH'
   | 'CURRENT_COMMIT_MISMATCH'
   | 'WORKTREE_NOT_CLEAN'
-  | 'DIVERGENCE_DETECTED';
+  | 'DIVERGENCE_DETECTED'
+  | 'REVIEWER_BLOCK_REQUIRES_OPERATOR';
 
 /** Human-readable name of the check behind each reason code. */
 const CHECK_NAMES: Readonly<Record<AutomaticResumeReasonCode, string>> = Object.freeze({
@@ -145,6 +146,7 @@ const CHECK_NAMES: Readonly<Record<AutomaticResumeReasonCode, string>> = Object.
   CURRENT_COMMIT_MISMATCH: 'current commit is unchanged',
   WORKTREE_NOT_CLEAN: 'worktree is clean',
   DIVERGENCE_DETECTED: 'no divergence was reported',
+  REVIEWER_BLOCK_REQUIRES_OPERATOR: 'the blocked agent is not the reviewer',
 });
 
 export interface AutomaticResumeDecision {
@@ -206,6 +208,17 @@ export function evaluateAutomaticResume(
   }
   if (state.resumeFrom === null) {
     deny('RESUME_POINT_MISSING');
+  }
+  // A reviewer's quota block is never resumed on the clock. A review is a
+  // one-shot gate on one verified commit, and a timer that re-launches it at
+  // every reported reset turned it into a polled reviewer that spent the quota
+  // on restarts: measured 2026-09-30/10-01, 7 Codex launches for 3 completed
+  // review rounds. So the reset passing is not permission; an operator's
+  // `--continue-usage-limit` is (`core/usage-limit-continuation.ts`). A record
+  // fact, so `recordOnlyResumeRefusals` keeps it and every wait, wake and grant
+  // that asks the policy refuses with it. The writer's block is unchanged.
+  if (state.state === 'BLOCKED_USAGE_LIMIT' && state.blockedAgent === 'codex') {
+    deny('REVIEWER_BLOCK_REQUIRES_OPERATOR');
   }
 
   // --- 2. Has the block actually cleared? ---------------------------------

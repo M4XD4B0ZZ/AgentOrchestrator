@@ -86,8 +86,8 @@ What *is* implemented:
     allowance is recognised from what the CLI prints, parked at
     `BLOCKED_USAGE_LIMIT` with a derived reset instant and a measured worktree
     checkpoint, and not re-learned by a second repository sharing the same
-    login. It ends no task and wakes nothing up — resuming by itself after a
-    restart is M3's. See
+    login. It ends no task and never relaunches the review by itself: since
+    2026-10-01 only an operator's `--continue-usage-limit` continues it. See
     [A reviewer quota block is a pause](#a-reviewer-quota-block-is-a-pause-m2-slice-6).
 
 ## Status, and where to start
@@ -3575,7 +3575,10 @@ implied by anything here, and no unattended execution happens without it.
 Lock 3 stood here until M2 slice 6, which closed it on the same shape: an
 exhausted Codex allowance is now a pause with a derived reset and a measured
 checkpoint, and the denial list for it is likewise exactly
-`[RESET_TIME_NOT_REACHED]`.
+`[RESET_TIME_NOT_REACHED]`. *(Withdrawn for the reviewer on 2026-10-01: its
+block also carries `REVIEWER_BLOCK_REQUIRES_OPERATOR`, so no wait sleeps for it
+and only an operator continues it. See "A reviewer quota block is relaunched
+only by an operator" below.)*
 
 F-10 was **not remediated in V1-08**, and the reason it was not is worth keeping:
 weakening `evaluateAutomaticResume` to accept freshly observed facts in place of
@@ -14014,6 +14017,31 @@ carries would be continuable on its own; everything else stands. It is refused
 without `--continue-usage-limit`, it is not passed by the scheduler or the
 notification path (so `RESET_AHEAD` still pages nobody), and a still-exhausted
 allowance records a fresh block on the next run.
+
+**A reviewer quota block is relaunched only by an operator (2026-10-01).** A
+review is a one-shot gate on one verified commit. Until this date a Codex quota
+block was resumed exactly like a writer's: once its reported reset passed, any
+invocation — a plain attended `run`, `--automatic-resume-only`, a scheduler
+pass — moved it back into `REVIEWING` and launched Codex, and every
+`--wait-for-reset` path woke for its reset. Measured on Zera, 2026-09-30/10-01:
+7 Codex launches for 3 completed review rounds. The other 4 were cut off by the
+quota with their finished slices thrown away, and 3 of the 7 were relaunched by
+timers an operator session placed at the reported resets. So
+`evaluateAutomaticResume` now denies a reviewer's block with
+`REVIEWER_BLOCK_REQUIRES_OPERATOR`, a record fact:
+
+- no plain or unattended run relaunches it, whatever the clock says;
+- `run --wait-for-reset` never sleeps for it, because its denial list is never
+  exactly `[RESET_TIME_NOT_REACHED]`, and `repositories --wait-for-reset` never
+  wakes for it (`schedule/durable-wake.ts` asks the same policy);
+- after the reset, `--continue-usage-limit` continues it as
+  `REVIEWER_RESUME_BY_OPERATOR`; before it, `--quota-restored` as well.
+
+```
+agent-loop run --repository <path> --task <id> --attended --continue-usage-limit
+```
+
+The writer's quota block is unchanged: it still resumes once its reset passes.
 
 One asymmetry is worth stating, because it is the one line the two siblings did
 not need. `BLOCKED_VERIFY` and `HUMAN_DECISION_REQUIRED` are both
