@@ -48,6 +48,7 @@ import {
 } from '../src/agent/internal/codex-quota-signal.js';
 import { evaluateAutomaticResume } from '../src/core/automatic-resume.js';
 import { parseTaskState, type TaskState } from '../src/core/task-state.js';
+import { usageLimitContinuation } from '../src/core/usage-limit-continuation.js';
 import {
   createReviewerProviderGate,
   REVIEWER_PROVIDER_GATE,
@@ -882,7 +883,15 @@ describe('§4 a reviewer quota block, driven through production', () => {
 
 /* ───────────────────── §5 eligibility, before and after ─────────────────── */
 
-describe('§5 the pause becomes eligible again, and not before', () => {
+/**
+ * Restated 2026-10-01. This section used to pin that the pause becomes an
+ * automatic resume once its reset passes. That was the defect behind a reviewer
+ * relaunched on every reported reset: 7 Codex launches for 3 completed review
+ * rounds. A reviewer's block now keeps its checkpoint exactly as before — no
+ * withdrawn-record refusal, which is still the point of the checkpoint half — and
+ * is moved only by an operator's `--continue-usage-limit`, never by the clock.
+ */
+describe('§5 the pause keeps its checkpoint, and is the operator’s to continue', () => {
   async function blockedState(): Promise<{
     repository: ResolvedRepository;
     state: TaskState;
@@ -893,7 +902,7 @@ describe('§5 the pause becomes eligible again, and not before', () => {
     return { repository, state: reload(root).state };
   }
 
-  it('is denied only for the reset not having passed', async () => {
+  it('is denied for the reset and the reviewer rule, never for its checkpoint', async () => {
     const { repository, state } = await blockedState();
     const reset = state.reportedResetAt ?? '';
     const before = new Date(Date.parse(reset) - 1000).toISOString();
@@ -911,15 +920,18 @@ describe('§5 the pause becomes eligible again, and not before', () => {
       divergenceDetected: false,
     });
 
-    // The whole point of the checkpoint half of this slice: the denial list is
-    // exactly one item, and it is the one that clears itself. Before the slice
-    // it also carried CURRENT_COMMIT_MISMATCH and WORKTREE_NOT_CLEAN, which
-    // never clear.
+    // The checkpoint half of this slice: no CURRENT_COMMIT_MISMATCH and no
+    // WORKTREE_NOT_CLEAN, which before the slice made the record a dead end. What
+    // remains is the reset and the rule that a review is never relaunched on it.
+    // Two denials, so an unattended `--wait-for-reset` has nothing to sleep for.
     expect(decision.allowed).toBe(false);
-    expect(decision.reasonCodes).toEqual(['RESET_TIME_NOT_REACHED']);
+    expect(decision.reasonCodes).toEqual([
+      'REVIEWER_BLOCK_REQUIRES_OPERATOR',
+      'RESET_TIME_NOT_REACHED',
+    ]);
   });
 
-  it('is allowed once the reset has passed, against the real repository', async () => {
+  it('is refused only by the reviewer rule once the reset has passed, against the real repository', async () => {
     const { repository, state } = await blockedState();
     const after = new Date(Date.parse(state.reportedResetAt ?? '') + 1000).toISOString();
 
@@ -927,7 +939,10 @@ describe('§5 the pause becomes eligible again, and not before', () => {
     // than written down here.
     const decision = await decide(state, repository, after);
 
-    expect(decision.classification).toBe('AUTOMATIC_RESUME_ALLOWED');
+    expect(decision.classification).toBe('AUTOMATIC_RESUME_REFUSED');
+    expect(decision.continuation).not.toBe('AUTOMATIC_ALLOWED');
+    expect(decision.reasonCodes).toEqual(['REVIEWER_BLOCK_REQUIRES_OPERATOR']);
+    expect(usageLimitContinuation(state, after).reading).toBe('REVIEWER_RESUME_BY_OPERATOR');
   });
 
   it('is not eligible before the reset, through the same real path', async () => {
@@ -942,12 +957,16 @@ describe('§5 the pause becomes eligible again, and not before', () => {
   it('does not deadlock on a reset that is already in the past', async () => {
     const { repository, state } = await blockedState();
     // An expired reset is not a permanent block: it is a reset that has passed,
-    // which is the condition for continuing.
+    // which is the condition for an operator to continue — and the only one.
     const expired = parseTaskState({ ...state, reportedResetAt: '2020-01-01T00:00:00.000Z' });
 
     const decision = await decide(expired, repository, REFUSED_AT);
 
-    expect(decision.classification).toBe('AUTOMATIC_RESUME_ALLOWED');
+    expect(decision.reasonCodes).toEqual(['REVIEWER_BLOCK_REQUIRES_OPERATOR']);
+    expect(usageLimitContinuation(expired, REFUSED_AT)).toEqual({
+      reading: 'REVIEWER_RESUME_BY_OPERATOR',
+      permitted: true,
+    });
   });
 
   it('refuses to resume a pause whose message named no time', async () => {

@@ -73,6 +73,7 @@
 
 import { readdirSync } from 'node:fs';
 
+import { recordOnlyResumeRefusals } from '../core/automatic-resume.js';
 import { compareTaskIds } from '../plan/task-id.js';
 import { isStateFileName, taskRuntimeDirectory, TASK_STATE_FILE_EXTENSION } from '../state/state-location.js';
 import { loadTaskState } from '../state/state-store.js';
@@ -297,6 +298,14 @@ export function scanDurableWakes(
       // the product says nothing may decide.
       const resetAt = state.reportedResetAt;
       if (resetAt === null) continue;
+
+      // The reviewer's block is the operator's too, and for the same reason: no
+      // reset instant ever resumes a review, so a wake for one would be a timer
+      // that can only refuse. Asked of the resume policy rather than read off
+      // `blockedAgent` here, so the two cannot drift apart.
+      if (recordOnlyResumeRefusals(state, window.now).includes('REVIEWER_BLOCK_REQUIRES_OPERATOR')) {
+        continue;
+      }
 
       const resetAtMs = Date.parse(resetAt);
       if (!Number.isFinite(resetAtMs)) {

@@ -3167,13 +3167,20 @@ describe('M2-06 — --continue-usage-limit moves a quota pause that nothing else
     expect(agent.count()).toBe(0);
   });
 
-  it('leaves a block whose reset has passed to the path that already owns it', async () => {
+  it('leaves a writer block whose reset has passed to the path that already owns it', async () => {
     const root = repoRoot();
-    paused(root, { reportedResetAt: '2020-01-01T00:00:00.000Z' });
-    const agent = scriptedAgent(agentCommandResult({ stdout: findingsReview() }));
+    // The writer's block: the reviewer's is never the automatic path's, and
+    // §"a reviewer quota block is relaunched only on an operator decision" pins
+    // that this same flag is what moves it.
+    paused(root, {
+      reportedResetAt: '2020-01-01T00:00:00.000Z',
+      blockedAgent: 'claude',
+      resumeFrom: { phase: 'IMPLEMENT', round: 1 },
+    });
+    const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
 
     const run = await runTask(
-      request(root, { continueUsageLimit: true, maxSteps: 2 }),
+      request(root, { continueUsageLimit: true, maxSteps: 1 }),
       deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
     );
 
@@ -3184,14 +3191,12 @@ describe('M2-06 — --continue-usage-limit moves a quota pause that nothing else
     // and was NOT spent, so it is still there for a block that needs it. A flag
     // that fired here would be taking ownership of a question already answered.
     expect(run.continuedUsageLimit).toBe(false);
-    // It really did move, and a reviewer really did run — so this is "the other
-    // path took it", not "nothing happened", which a weaker assertion would
-    // have been satisfied by. (`run.resume` describes the *last* iteration, by
-    // which point the task is in-flight and classifies `ATTENDED_ONLY`; the
-    // grant that moved it is visible in `continuedUsageLimit` being false while
-    // the state changed anyway.)
-    expect(reload(root).state.state).not.toBe('BLOCKED_USAGE_LIMIT');
-    expect(agent.calls.length).toBeGreaterThanOrEqual(1);
+    // It really did move — so this is "the other path took it", not "nothing
+    // happened", which a weaker assertion would have been satisfied by. The
+    // resume is the one step the budget allows, so no agent ran.
+    expect(run.steps).toBe(1);
+    expect(reload(root).state.state).toBe('IMPLEMENTING');
+    expect(agent.count()).toBe(0);
   });
 
   it('refuses every grant that is not an attended one', async () => {
@@ -3326,8 +3331,9 @@ describe('M2-06 — --continue-usage-limit moves a quota pause that nothing else
     const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
 
     // The control that makes the next case mean something: the same fixture,
-    // the same everything, without the flag. It must not move, and the two
-    // record-only denials must be what stopped it.
+    // the same everything, without the flag. It must not move, and the
+    // record-only denials must be what stopped it — the withdrawn record's two,
+    // and the reviewer's own, since this block is the reviewer's.
     const run = await runTask(
       request(root),
       deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
@@ -3338,6 +3344,7 @@ describe('M2-06 — --continue-usage-limit moves a quota pause that nothing else
     expect(run.continuedUsageLimit).toBe(false);
     expect([...run.reasonCodes].sort()).toEqual([
       'CURRENT_COMMIT_MISMATCH',
+      'REVIEWER_BLOCK_REQUIRES_OPERATOR',
       'WORKTREE_NOT_CLEAN',
     ]);
     expect(reload(root).state.state).toBe('BLOCKED_USAGE_LIMIT');
@@ -3487,5 +3494,100 @@ describe('M2-06 — --continue-usage-limit moves a quota pause that nothing else
     expect(reload(root).state.state).toBe('BLOCKED_USAGE_LIMIT');
     // One reviewer call, not a loop of them.
     expect(agent.calls.filter((call) => call.agent === 'codex')).toHaveLength(1);
+  });
+});
+
+/**
+ * A review is a one-shot gate on one verified commit, so a reviewer's quota
+ * block is relaunched on an operator's explicit continuation and never because a
+ * reset instant went by.
+ *
+ * Measured 2026-09-30/10-01 before this existed: a reset passing made the block
+ * `AUTOMATIC_ALLOWED`, any plain run then resumed it into `REVIEWING`, and timers
+ * placed at the reported resets relaunched Codex — 7 launches for 3 completed
+ * review rounds, the other 4 cut off by the quota with their finished slices
+ * thrown away. The writer's block is untouched: §"a blocked task is never moved
+ * by a run that may not continue it" still pins its resume on the clock.
+ */
+describe('a reviewer quota block is relaunched only on an operator decision', () => {
+  const RESET_PASSED = '2026-08-10T08:00:00.000Z';
+
+  /** The reviewer's quota pause, its reset behind us and its record intact. */
+  function reviewerBlock(root: string): StateLoadSuccess {
+    return persist(root, {
+      state: 'BLOCKED_USAGE_LIMIT',
+      blockedAgent: 'codex',
+      resumeFrom: { phase: 'REVIEW', round: 1 },
+      reportedResetAt: RESET_PASSED,
+      reviewRound: 0,
+      currentCommit: SHA_B,
+      worktreeCleanAtCheckpoint: true,
+    });
+  }
+
+  it.each(['ATTENDED', 'AUTOMATIC_RESUME_ONLY'] as const)(
+    'a %s run after the reset launches no reviewer and writes nothing',
+    async (continuationGrant) => {
+      const root = repoRoot();
+      const before = reviewerBlock(root);
+      const agent = cappedAgent(agentCommandResult(), 0);
+      const verify = cappedVerify(0);
+
+      const run = await runTask(
+        request(root, { continuationGrant, maxSteps: 4 }),
+        deps(root, { agent: agent.runner, verify: verify.runner }),
+      );
+
+      expect(run.outcome).toBe('BLOCKED_USAGE_LIMIT');
+      expect(run.resume?.continuation).not.toBe('AUTOMATIC_ALLOWED');
+      // The only refusal: every world fact agrees, so nothing but the rule refused.
+      expect(run.resume?.reasonCodes).toEqual(['REVIEWER_BLOCK_REQUIRES_OPERATOR']);
+      expect(run.steps).toBe(0);
+      expect(agent.count()).toBe(0);
+      expect(verify.count()).toBe(0);
+      const after = reload(root);
+      expect(after.revision).toBe(before.revision);
+      expect(after.state.state).toBe('BLOCKED_USAGE_LIMIT');
+      expect(after.state.blockedAgent).toBe('codex');
+      expect(after.state.reportedResetAt).toBe(RESET_PASSED);
+    },
+  );
+
+  it('names the operator continuation on the refusal', async () => {
+    const root = repoRoot();
+    reviewerBlock(root);
+
+    const run = await runTask(
+      request(root, { maxSteps: 4 }),
+      deps(root, { agent: cappedAgent(agentCommandResult(), 0).runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.usageLimitContinuation).toBe('REVIEWER_RESUME_BY_OPERATOR');
+  });
+
+  it('relaunches exactly the one review when the operator continues it', async () => {
+    const root = repoRoot();
+    reviewerBlock(root);
+    const agent = scriptedAgent(agentCommandResult({ stdout: findingsReview() }));
+    // A day after every other case's clock. The reviewer gate is process-wide and
+    // remembers the exhaustion the case above recorded; this case is about the
+    // operator's continuation, not about that memory, so its clock is past it.
+    let minute = 0;
+    const nextDay = (): string => {
+      minute += 1;
+      return `2026-08-11T09:${String(minute).padStart(2, '0')}:00.000Z`;
+    };
+
+    const run = await runTask(
+      request(root, { continueUsageLimit: true, maxSteps: 2 }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner, now: nextDay }),
+    );
+
+    expect(run.continuedUsageLimit).toBe(true);
+    // One review, the one the record names. Its findings then start the ordinary fix
+    // round, which is the writer's and not a second review.
+    expect(agent.calls[0]?.agent).toBe('codex');
+    expect(agent.calls.filter((call) => call.agent === 'codex')).toHaveLength(1);
+    expect(reload(root).state.state).not.toBe('BLOCKED_USAGE_LIMIT');
   });
 });

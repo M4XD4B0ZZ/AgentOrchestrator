@@ -146,6 +146,15 @@ genau einer Ablehnung (`RESET_AHEAD`) die Erlaubnis `QUOTA_RESTORED_BY_OPERATOR`
 alle anderen Ablehnungen bleiben. Ist das Kontingent doch noch leer, meldet der
 nächste Run einen frischen Block.
 
+**Ein Quota-Block des Reviewers läuft nie von selbst weiter (seit 2026-10-01).**
+Ein Review ist ein einmaliges Tor für einen geprüften Commit. Auch nach der
+gemeldeten Reset-Zeit startet weder ein normaler `run` noch
+`--automatic-resume-only` noch ein Scheduler-Durchlauf das Review neu, und kein
+`--wait-for-reset` wartet darauf (`REVIEWER_BLOCK_REQUIRES_OPERATOR`). Weiter
+geht es nur, wenn du es sagst — nach der Reset-Zeit mit
+`--continue-usage-limit` (`REVIEWER_RESUME_BY_OPERATOR`), davor zusätzlich mit
+`--quota-restored`. Der Quota-Block eines Writers bleibt, wie unten beschrieben.
+
 **Es greift bewusst nicht, wenn eine Reset-Zeit im Record steht** — weder eine
 zukünftige noch eine vergangene. Eine zukünftige gehört der Maschine: sie weiß,
 wann das Fenster zurückkommt, also warte darauf. Eine vergangene gibt

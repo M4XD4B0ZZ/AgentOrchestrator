@@ -290,6 +290,7 @@ describe('M3 slice 2 — the usage-limit continuation reading', () => {
       RESET_UNREADABLE: 'not a timestamp, so nothing can wait for it either',
       RESUME_RECORD_WITHDRAWN: 'no settled commit',
       QUOTA_RESTORED_BY_OPERATOR: '--quota-restored',
+      REVIEWER_RESUME_BY_OPERATOR: 'never relaunched on the clock',
     };
 
     for (const reading of USAGE_LIMIT_CONTINUATION_READINGS) {
@@ -440,5 +441,53 @@ describe('M3 slice 2 — the reading tracks the resume policy', () => {
       expect(recordOnlyResumeRefusals(state, later).length).toBeGreaterThan(0);
       expect(usageLimitContinuation(state, later).permitted).toBe(true);
     }
+  });
+});
+
+/* ══════════════ the reviewer's block: an operator's, never the clock's ═════ */
+
+describe('a reviewer quota block is resumed only by an operator', () => {
+  const REVIEWER = Object.freeze({
+    blockedAgent: 'codex' as const,
+    resumeFrom: { phase: 'REVIEW' as const, round: 1 },
+  });
+
+  it('is never an automatic resume, however far past the reset', () => {
+    expect(recordOnlyResumeRefusals(paused(REVIEWER), NOW)).toEqual([
+      'REVIEWER_BLOCK_REQUIRES_OPERATOR',
+    ]);
+  });
+
+  it('gives an unattended wait nothing to sleep for before the reset', () => {
+    // `run/unattended-resume.ts` sleeps only on exactly `[RESET_TIME_NOT_REACHED]`.
+    const refusals = recordOnlyResumeRefusals(paused({ ...REVIEWER, reportedResetAt: AHEAD }), NOW);
+    expect(refusals).toContain('RESET_TIME_NOT_REACHED');
+    expect(refusals).toContain('REVIEWER_BLOCK_REQUIRES_OPERATOR');
+  });
+
+  it('is the operator’s to continue once the reset has passed', () => {
+    expect(usageLimitContinuation(paused(REVIEWER), NOW)).toEqual({
+      reading: 'REVIEWER_RESUME_BY_OPERATOR',
+      permitted: true,
+    });
+  });
+
+  it('still needs --quota-restored before the reset', () => {
+    const ahead = paused({ ...REVIEWER, reportedResetAt: AHEAD });
+    expect(usageLimitContinuation(ahead, NOW).reading).toBe('RESET_AHEAD');
+    expect(usageLimitContinuation(ahead, NOW, { quotaRestored: true }).reading).toBe(
+      'QUOTA_RESTORED_BY_OPERATOR',
+    );
+  });
+
+  it('keeps the withdrawn-record reading when the record is withdrawn too', () => {
+    expect(usageLimitContinuation(paused({ ...REVIEWER, ...WITHDRAWN }), NOW).reading).toBe(
+      'RESUME_RECORD_WITHDRAWN',
+    );
+  });
+
+  it('leaves the writer’s block on the clock, unchanged', () => {
+    expect(recordOnlyResumeRefusals(paused(), NOW)).toEqual([]);
+    expect(usageLimitContinuation(paused(), NOW).reading).toBe('MACHINE_MAY_STILL_RESUME');
   });
 });
