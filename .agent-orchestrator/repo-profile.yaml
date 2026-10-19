@@ -29,6 +29,13 @@ scope:
   allowedPaths:
     - src
     - tests
+    # RM1-10S (operator decision of 2026-10-19): the four supervisor files RM1-10B may change, as
+    # file entries. Not ops/ and not ops/zera-supervisor: the five provers and
+    # zera-register-task.ps1 stay outside, and no file can be added there.
+    - ops/zera-supervisor/zera-supervisor.ps1
+    - ops/zera-supervisor/zera-wiring-test.ps1
+    - ops/zera-supervisor/zera-grant-lab.mjs
+    - ops/zera-supervisor/README.md
   protectedPaths: []
 completion:
   maxReviewRounds: 3

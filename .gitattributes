@@ -3,3 +3,8 @@
 # against freshly generated content, which always uses LF — a CRLF checkout
 # would fail that test on Windows.
 * text=auto eol=lf
+
+# The Zera supervisor runs under Windows PowerShell 5.1 from a deployed copy
+# that must be byte-equal to a commit (ADR 2026-10-19). Its .ps1 files carry a
+# UTF-8 BOM; every byte is kept exactly as committed, never normalised.
+ops/zera-supervisor/** -text
