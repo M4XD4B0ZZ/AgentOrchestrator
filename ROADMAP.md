@@ -83,7 +83,7 @@ hand. So VWHI ≈ 0.2. Source: section 6.
 | **RM3** Verified pull request    | An approved task reaches a green pull request with no human step; merge stays human | PROPOSED; needs decision D3        | RM1, RM2-01..02            | RM3-01 (ADR) | A pilot task reaches a green PR unattended, with zero merges      |
 | **RM4** Controlled learning      | Recurring failures become reviewed lesson candidates; nothing self-applies    | PROPOSED                                 | RM1-03, RM2-01, RM2-06     | RM4-01       | One candidate reviewed and applied by a person through a PR       |
 | **RM5** Visual regression        | A repository declares a reproducible visual check; a person approves baselines | PROPOSED                                | RM2-05 (before blocking)   | RM5-01       | A HealthApp screen pair is produced and compared by a declared phase |
-| **RM6** Optimisation, knowledge  | Know what a task costs; find past findings and attempts fast                  | PROPOSED                                 | RM1-03                     | RM6-01       | Cost per finished task is reported; a findings search answers     |
+| **RM6** Optimisation, knowledge  | Know what a task costs and the writer level it ran at; find past findings and attempts fast | PROPOSED; RM6-07..09 need D7  | RM1-03                     | RM6-01       | Cost per finished task is reported; a findings search answers     |
 
 **Key numbers today (HealthApp, 2026-09-03 to 2026-10-18; method in RM0):**
 
@@ -531,15 +531,18 @@ phase.
 
 ## RM6 — Optimisation and project knowledge
 
-**Goal.** Know what each task costs, give each repository a measured budget, and find past findings,
-attempts and outcomes quickly.
+**Goal.** Know what each task costs, give each repository a measured budget and a writer level the
+operator chose, and find past findings, attempts and outcomes quickly.
 
 **Existing baseline (`BASELINE`).** AO counts no tokens, cost or turns (G6.1). Every repository gets
 the same 30-minute writer cap and no `--max-turns` or `--model` (G6.2). A quota-cut Codex review loses
 its partial work (G6.3; 4 of 7 launches were cut off on 2026-09-30/10-01). The dashboard read model
 loads states, attempts, passes, attention and delivery records across repositories (read-only).
+Measured 2026-10-19: the installed CLI (2.1.303) lists `--model`, `--effort` and `--max-budget-usd`
+in `claude --help`, and no `--max-turns`. The writer passes none of them, and AO does not record
+which model or effort a writer ran at (details in "Writer model and effort per task" below).
 
-**Dependencies.** RM1-03.
+**Dependencies.** RM1-03. RM6-07 to RM6-09 also need decision D7.
 
 **Tasks.**
 
@@ -550,16 +553,152 @@ loads states, attempts, passes, attention and delivery records across repositori
 | RM6-03 | A read-only, structured search over findings, attempts and outcomes across tasks                              | PROPOSED | Answers "where did rule X fail before" from the records                       |
 | RM6-04 | A cost and duration benchmark per task kind                                                                    | PROPOSED | Reported in the morning report (RM1-06)                                       |
 | RM6-05 | Semantic search only if RM6-03 is measured as not enough                                                       | PROPOSED | A written measurement shows the gap first                                     |
+| RM6-06 | **Writer level evidence.** For every writer run, success and failure, record the requested, effective and reported model and effort beside the task, closed values only. One per-run record shared with RM6-01, a sibling of RM1-03a's failure record, not inside it | PROPOSED | Present on success and failure; a value the CLI did not report is recorded as `NOT_REPORTED`; an import pin and plan equality show it decides nothing |
+| RM6-07 | **Writer level policy** in an operator file outside every repository, per repository and per phase (IMPLEMENT, REMEDIATE): allowed model keys, an effort ceiling, a default. No policy means today's vector. Shares its file with RM6-02. Needs D7 | PROPOSED | `.strict()` schema, an unknown key refuses the file; a test proves no repository file (profile, task file, `.claude/`, `CLAUDE.md`) can set or raise it |
+| RM6-08 | **Task-file request.** An optional, closed `writer` key in the task frontmatter that may only request one model key and one effort per phase; the effective value is the request clamped by RM6-07 | PROPOSED | A request above the ceiling runs at the ceiling and is recorded as clamped; without a policy a request changes nothing; deployed in `dist` before any task file uses the key |
+| RM6-09 | **Level into the writer argv.** `--model` and `--effort` from closed tables in AO's source, before `--tools`; resolved once at task start for both phases and kept with the task for every later launch and resume. Never ultracode | PROPOSED | Pinned argv per level; every token shell-inert; `ultracode`, `--fallback-model` and `[1m]` aliases refused by test; a real-CLI measurement shows repository text cannot change the reported level |
 
 **Regression requirements.** The writer argv tests and the result-stream tests stay green; a
 missing usage value never changes a task state; the dashboard stays GET-only
-(`src/dashboard/http-contract.ts`).
+(`src/dashboard/http-contract.ts`). With no level policy the writer vector stays
+`CLAUDE_WRITER_ARGS` token for token (`tests/dogfood-rem-001.test.ts:91-109`).
 
 **Measurable success.** Cost per finished task; share of writer runs that hit the cap.
 
-**Governance boundaries.** Read-only knowledge; budgets set by the operator.
+**Governance boundaries.** Read-only knowledge; budgets and writer levels set by the operator.
 
-**Completion.** RM6-01..04 `DONE`.
+**Completion.** RM6-01..04 `DONE`. RM6-06..09 `DONE` once D7 allows them, or `DROPPED` by D7.
+
+### Writer model and effort per task (RM6-06 to RM6-09)
+
+**Aim.** AO can give a task the writer effort it needs, and no repository content can raise the
+model, the effort, the permissions or the cost on its own.
+
+**What was checked (2026-10-19, code at `ec74e98`).**
+
+- **CLI.** `claude --version` prints `2.1.303 (Claude Code)`. `claude --help` lists
+  `--effort <level>  Effort level for the current session (low, medium, high, xhigh, max)` and
+  `--model <model>  Model for the current session. Provide an alias for the latest model (e.g.
+  'fable', 'opus', or 'sonnet') or a model's full name.` It also lists `--fallback-model`,
+  `--max-budget-usd` ("only works with --print") and `--disable-slash-commands` ("Disable all
+  skills"). It lists no `--max-turns` and does not name ultracode.
+- **Levels** (docs, `code.claude.com/docs/en/model-config`). The five levels are real, but per
+  model: Opus 4.6 and Sonnet 4.6 have no `xhigh`. The default is `high`, except Opus 5.5, Sonnet
+  5.5 and Haiku 5.5 (`medium`) and Opus 4.7 (`xhigh`). Order of resolution: an explicit choice
+  (`CLAUDE_CODE_EFFORT_LEVEL`, `--effort`, `/effort`), then settings, then the model default.
+  `max` lasts for one session unless set through `CLAUDE_CODE_EFFORT_LEVEL`.
+- **Ultracode** (docs, `model-config` and `workflows`). Not an effort level: a setting with which
+  Claude runs dynamic workflows (many subagents) for substantive tasks. It is turned on by
+  `/effort ultracode`, `--effort ultracode` (starts at `xhigh`; accepted per the docs although the
+  help names only five levels), the `ultracode` settings key or `--settings`, or the word
+  `ultracode` in a prompt a person typed — not in a prompt passed with `-p`. The docs say each
+  request then "uses more tokens and takes longer" and reaches a session or weekly limit sooner. In
+  `-p` a workflow launch is the `Workflow` tool call under the normal permission rules, and a
+  workflow does not pause at a usage limit; its agents fail.
+- **The writer today.** Its vector is `CLAUDE_WRITER_ARGS` (`src/agent/claude-writer.ts:213-247`),
+  plus `--mcp-config`/`--allowedTools` for a granted capability (`:318-328`) and the guard's
+  `--settings` before `--tools` (`:304-316`). No `--model`, no `--effort`. Its environment carries
+  no `CLAUDE_CODE_EFFORT_LEVEL` or `ANTHROPIC_MODEL` (`src/auth/env-guard.ts:354`, `:452`), and
+  `--setting-sources ''` keeps user, project and local settings out. So, by the docs, the writer runs
+  on the account's default model at that model's default effort, unless the machine's managed
+  settings say otherwise. **Not measured:** AO reads the `system/init` message only for MCP tools
+  and servers (`src/agent/mcp-capability-preflight.ts:262-294`) and never its model
+  (`src/agent/internal/claude-result-stream.ts:199-207`).
+- **Workflows are out of the writer's reach today.** Its tools are `Read Edit Write Glob Grep`, with
+  no `Workflow` and no `Agent` tool; `init.tools` was measured as exactly those five on 2.1.239
+  (`claude-result-stream.ts:57-61`), not again on 2.1.303.
+
+**Where the level comes from.**
+
+| Source                                             | May say                                                                     | May never say                                                       |
+| -------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Operator file outside every repository (RM6-07)    | Per repository and phase: allowed model keys, effort ceiling, default       | —                                                                   |
+| Task-file frontmatter (RM6-08)                     | A request: one model key and one effort per phase, from closed sets         | A model string, a level above the ceiling, ultracode, tools, MCP, permissions, budget |
+| Repository profile, task body, `CLAUDE.md`, `.claude/`, handoff | Nothing                                                        | Any of it                                                           |
+
+- **Effective level.** Effort = the request (or the default) lowered to the ceiling. Model = the
+  requested key if the policy allows it, else the default. No policy for the repository = no flag,
+  whatever the task asks (today's vector).
+- **Resolved once, at task start, for both phases**, from the task file as selection read it and the
+  operator file as it was then. It is kept with the task: a `TaskState` field, with the schema
+  version raised — the one state-contract change here. It is never re-read from the worktree,
+  because the writer edits that tree (the run brief is read there, `src/plan/task-brief.ts:19-22`).
+- **IMPLEMENT and REMEDIATE have separate values.** A fix round is narrower and may need less; the
+  numbers come from RM6-01 data, not from a guess.
+
+**Into the argv, safely.** A closed table in AO's source maps each model key to one argv token and
+lists the levels each key accepts; an operator file names keys, never strings. `--model <token>
+--effort <level>` go in before `--tools`, which is variadic and stays last (`claude-writer.ts:225-238`),
+and the whole vector is still checked by `isShellInertArgument` (`claude-writer.ts:489-500`,
+`:522-525`; pattern at `src/doctor/exec.ts:138`). Never: `--effort ultracode`, `--fallback-model`
+(it changes the model without a record), an alias with `[1m]` (not shell-inert), a model, effort or
+ultracode key in the guard's settings file (its bytes stay fixed, `src/agent/writer-write-guard.ts:83-96`),
+or an environment variable for any of them. Every payload starts with AO's own line
+(`src/loop/implement-payload.ts:40`, `src/loop/findings.ts:372` and `:562`), so task prose never
+opens the prompt. The docs say a `-p` prompt accepts `/effort`, `/model`, `/config key=value` and
+`/skill-name`, and a skill's frontmatter may set `effort`. **Not verified:** whether any of these
+acts from later in the prompt. RM6-09 measures it on the real CLI (opt-in, like
+`npm run verify:writer-authority`) before any flag ships, and adds the measured counter-measure (for
+example `--disable-slash-commands`) if one of them changes the reported level.
+
+**Quota, timeout and resume.**
+
+- A higher level costs more tokens and time. How much, on AO's tasks, is not measured: RM6-01 first.
+- The 30-minute cap (`AGENT_COMMAND_TIMEOUT_MS`, `src/agent/agent-command.ts:66`, used at `:398`) and
+  the 64 MiB stdout cap (`:142`) stay. A run cut by either is `AGENT_PROCESS_UNAVAILABLE`
+  (`claude-writer.ts:581`) and parks the task, so a higher level makes that likelier. The cap per
+  repository is RM6-02's, not this item's.
+- Every launch is a new CLI session: the vector has no `--resume`, `--continue` or `--session-id`.
+  After a writer quota block AO commits the partial work (`src/loop/loop-step.ts:794-903`) and the
+  resumed phase starts afresh, so the CLI's "a resumed session keeps its model" does not apply. The
+  pinned level does.
+- A usage-limit block never changes the level, up or down. The wait for a reported reset is unchanged
+  (`src/core/automatic-resume.ts:232-241`).
+- If the operator lowers a ceiling below a running task's pinned level, the next launch refuses with
+  a named reason; it does not change the level silently.
+
+**Evidence (RM6-06).** Per run, closed values only: `requested` (key and level, or `NONE`), the
+policy applied (or `NO_POLICY`), `effective` (the argv tokens, or `CLI_DEFAULT`), `clamped`, the
+reported model (the `system/init` `model`, kept only if it matches a strict model-id pattern, else
+`UNRECOGNISED`), the reported effort (`NOT_REPORTED` until a capture shows the CLI reports it), and
+the models in the result's `modelUsage` (listed on both result variants,
+`docs/decisions/2026-08-22-claude-quota-reset-evidence-measurement.md:160-174`). A mismatch between
+effective and reported is shown, never acted on.
+
+**Ultracode stays off for writers.** AO never passes it, and the writer has no `Workflow` or `Agent`
+tool. The docs say the keyword does not act in a prompt passed with `-p`; AO's prompt arrives on
+stdin under `--print`, a case the docs do not name, so the RM6-09 measurement includes a task body
+that carries the word `ultracode`. Turning ultracode on would add subagents, a new cost class and a
+new failure mode in `-p`; it needs D7 and an ADR first.
+
+**Dependencies and order.**
+
+1. **RM1-03a merged.** RM6-06 reuses its store discipline (binding digest, byte cap, window,
+   `git check-ignore`, lease check), not its schema. That record keeps failures only (every entry
+   needs a failure code and a failed disposition, at least one entry:
+   `src/agent/writer-outcome.ts:75-79`, `:97-112`, `:125` in the RM1-03a worktree) and is evidence
+   only (contract invariant 2). So RM6-01's "into the writer-outcome record" cannot hold
+   success-run data without a new version of that contract, and the pinned level, which decides
+   argv, can never live there. Proposal: RM6-01 and RM6-06 share one sibling per-run record; the
+   operator chooses between that and a version 2 when RM6-01 gets its contract.
+2. **RM6-01 and RM6-06** before any flag is passed, so that today's model, effort, tokens and
+   durations are measured first.
+3. **D7.**
+4. **RM6-02 and RM6-07** in one operator file, read once per invocation on every path that starts a
+   writer. `repositories.yaml` is not that file today: an entry carries only `path` (`.strict()`,
+   `src/registry/repository-registry.ts:246-255`) and only two modules read it (`:30-36`), so
+   `run --repository` never sees it. The precedent is `mcp-capabilities.yaml`: a repository names a
+   closed word, the operator grants (`src/config/mcp-capability-registry.ts:18-30`).
+5. **RM6-09.**
+6. **RM6-08 last**, and deployed before any task file uses the key: the frontmatter schema refuses
+   an unknown key (`.strict()`, `src/plan/internal/task-definition-object-schema.ts:108-126`) and
+   discovery is all or nothing (`src/plan/discover-tasks.ts:389-392`), so one such file on an older
+   `dist` stops planning for the whole repository.
+
+**Out of scope.** The Codex reviewer's model and effort. Any automatic level change — raising the
+level after findings, a failure or a quota block is a retry in disguise. Ultracode, workflows and
+subagents for the writer. `--max-turns` (not in 2.1.303's help) and `--max-budget-usd` (RM6-02).
+A level in the repository profile. Any change to the operator's global or managed Claude settings.
 
 ## 13. What not to build
 
@@ -576,6 +715,8 @@ Confirmed by the audit and the code; each would break a property in section 5.
   decides with less guessing).
 - Any outgoing edge from `READY_FOR_PR`, or a merge decision in the task loop.
 - More agents in parallel as a goal in itself.
+- Ultracode, workflows or subagents for the writer, or a writer model or effort that repository
+  content can raise (RM6-06..09).
 
 ## 14. Operator decisions
 
@@ -587,6 +728,7 @@ Confirmed by the audit and the code; each would break a property in section 5.
 | D4 | An operator acceptance that the delivery gate accepts, as an alternative to `resolve` (RM3-04)                   | RM3-04        | open                                                        |
 | D5 | Approve pilot P1 (Appendix A): window, tasks, review mode                                                        | RM1-09        | **open: the night pilot stays disabled**                    |
 | D6 | Where the supervisor's source lives                                                                              | RM1-10        | **decided 2026-10-19: A, in this repository (ADR first)**   |
+| D7 | Writer model and effort: may AO pass `--model` and `--effort`; which model keys (alias or pinned ID) and levels each repository may use; ultracode stays off | RM6-07        | open                                                        |
 
 **Operator release of 2026-10-19.** RM1-03a and RM1-10 are `APPROVED`: RM1-03a for its contract
 and implementation, RM1-10 for its ADR, migration plan and CI tests. The
@@ -610,6 +752,11 @@ development plan for AgentOrchestrator; a decision that changes it is recorded h
   `schtasks /query`. The numbers in RM0 come from it; estimates are marked.
 - Code references are file:line at `0a74697`. A line number can move; the named symbol is the
   reference.
+- **Writer model and effort (RM6-06..09), checked 2026-10-19** at `ec74e98`: `claude --version`,
+  `claude --help`, `claude agents --help` and `claude ultrareview --help` of the installed CLI
+  2.1.303 (no session was started); the official docs `code.claude.com/docs/en/model-config`,
+  `/workflows` and `/headless`; the RM1-03a code in its unmerged worktree. Its code references are at
+  `ec74e98`.
 
 ## Appendix A — Overnight pilot P1 (PROPOSED)
 
