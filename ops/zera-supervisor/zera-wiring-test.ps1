@@ -13,8 +13,8 @@ Set-StrictMode -Version Latest
 
 # The subject, overridable so a deliberately broken copy can be measured
 # against this same test. A guarantee nobody has broken is a guarantee
-# nobody has measured.
-$Script = if ($args.Count -ge 1) { $args[0] } else { 'C:\Users\Max\AO-runs\zera-supervisor.ps1' }
+# nobody has measured. By default, the supervisor deployed beside this file.
+$Script = if ($args.Count -ge 1) { $args[0] } else { Join-Path $PSScriptRoot 'zera-supervisor.ps1' }
 
 $errors = $null; $tokens = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$tokens, [ref]$errors)
@@ -192,13 +192,17 @@ if ($grantAssign.Count -eq 1) {
 $srcText = Get-Content $Script -Raw -Encoding utf8
 
 $chain = @(
-    @{ lane = 'OPERATOR_REPAIR'; fn = 'Invoke-RepairGrant'; var = '$repair'; path = '$RepairGrant'; prefix = 'REPAIR_GRANT'; file = 'zera-operator-repair-grant.mjs' }
-    @{ lane = 'WRITER_DEATH';    fn = 'Invoke-WriterGrant'; var = '$writer'; path = '$WriterGrant'; prefix = 'WRITER_GRANT'; file = 'zera-writer-death-grant.mjs' }
+    @{ lane = 'OPERATOR_REPAIR'; fn = 'Invoke-RepairGrant'; var = '$repair'; path = '$RepairGrant'; key = 'RepairGrant'; prefix = 'REPAIR_GRANT'; file = 'zera-operator-repair-grant.mjs' }
+    @{ lane = 'WRITER_DEATH';    fn = 'Invoke-WriterGrant'; var = '$writer'; path = '$WriterGrant'; key = 'WriterGrant'; prefix = 'WRITER_GRANT'; file = 'zera-writer-death-grant.mjs' }
 )
 foreach ($c in $chain) {
-    # a. the path variable names the prover file
-    Check "$($c['path']) names $($c['file'])" `
-        ($srcText -match ([regex]::Escape($c['path']) + "\s*=\s*Join-Path \`$RunsDir '" + [regex]::Escape($c['file']) + "'")) $true
+    # a. the path variable names the prover file in the SOURCE folder. Two hops:
+    # the variable is read from the path table, and the table joins the file
+    # from $SourceDir. A prover joined from the state folder would be a script
+    # run out of a folder that holds data, and fails here.
+    Check "$($c['path']) names $($c['file']) in `$SourceDir" `
+        (($srcText -match ([regex]::Escape($c['path']) + "\s*=\s*\`$ZeraPaths\['" + $c['key'] + "'\]")) -and
+         ($srcText -match ("(?m)^\s*" + $c['key'] + "\s*=\s*Join-Path \`$SourceDir '" + [regex]::Escape($c['file']) + "'\s*$"))) $true
 
     # b. the wrapper function runs that path with that prefix
     Check "$($c['fn']) runs $($c['path']) with prefix $($c['prefix'])" `
