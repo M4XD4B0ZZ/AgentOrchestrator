@@ -2988,6 +2988,39 @@ forgets to pass one is still protected.
 - Another tool that could write through the file system: the writer has only
   `Read Edit Write Glob Grep`.
 
+### A failed writer keeps its original code (RM1-03A)
+
+Eight writer failure codes map to the one disposition `AGENT_NEEDS_ATTENTION`, so the task record of
+a deterministic refusal (`AGENT_ARGUMENT_REFUSED`) and of a transient failure
+(`AGENT_PROCESS_UNAVAILABLE`) were byte-identical. When a writer fails, `recordInterruption` now also
+appends one entry, after the state write was attempted, to
+
+```
+.agent-orchestrator/runtime/writer-outcomes/<taskId>.json
+```
+
+An entry holds closed values only: the original `code`, its `disposition`, the static `detail`
+sentence, the phase and round, the closed process facts (`outcome`, `exitCode`, `signal`,
+`outputTruncated`, `failureCode`, `errnoCode`, `durationMs`) and `forbiddenWriteRecorded`, never the
+MEMGUARD record's path. No stdout, stderr, excerpt or CLI text. At most 8 entries: a ninth drops the
+oldest and counts it in `droppedCount`. The write follows the verification-attempt store: the path
+is proved ignored through Git, a binding digest, a byte cap, the lease checked last, an atomic write
+and a read-back. An unreadable existing history is never overwritten.
+
+`run --task <id>` prints one line: `Writer outcome: <code> (<phase> r<round>, <recordedAt>)`, `none`
+or `unreadable`. The record is evidence only. It never changes the state, the outcome or a later
+step; a failed write is reported on the step and never thrown; and only `run/run-plan.ts` reads it.
+
+**One path writes nothing.** When the leased agent seam answers `AGENT_LAUNCH_NOT_WITHDRAWN` (it
+could not show that the writer's `ESTABLISHED` launch mark was withdrawn), the step must start no
+further process (REQUIREMENT 7, `tests/v2-07l-execution-lease.test.ts`), and the store would ask Git.
+So no entry is written, and the step reports `LAUNCH_MARK_NOT_WITHDRAWN`. The newest entry can
+therefore be older than the current stop: compare its `recordedAt` with the state's
+`stateEnteredAt`.
+
+**Not covered:** successful runs, and usage or cost (RM6-01); the supervisor's restart lane reading
+the record (RM1-03b).
+
 ### What V1-05 is not
 
 No state was added to `src/core/states.ts`, no edge to `src/core/transitions.ts`,

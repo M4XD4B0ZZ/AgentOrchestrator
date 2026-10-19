@@ -346,12 +346,16 @@ supervisor.
   variant B): the step reads the leased seam's own answer in memory and skips the store only then.
 - **Contract deviations, approved by the operator on 2026-10-19.** Section 3.3 "on every path": no
   entry when the seam could not show the launch mark withdrawn. Section 5: `src/loop/loop-step.ts`
-  beyond section 3.3 (`writerLaunch` and both writer call sites), the only place that answer is
-  known.
-- **Checks.** Red first; break-tests 10 of 10 caught; 16 lease and writer suites 823 of 823; the full
-  `npm run verify` on the final head of the delivery branch; CI on its pull request. Independent
-  read-only reviews of `05788fa` and of the D1 fix. No Codex review ran and no human approval is
-  claimed.
+  beyond section 3.3 (`writerLaunch` and both writer call sites), the only place within the
+  contract's files where that answer is known.
+- **Checks.** Red first; break-tests 10 of 10 caught; 16 lease and writer suites 823 of 823;
+  independent read-only reviews of `05788fa`, of the D1 fix and of the delivery diff. The full
+  `npm run verify` and CI on the pull request are the gates before merge; their results are in the
+  pull request, not in this file. No Codex review ran. No approval of this delivery is claimed: a
+  person's code review (redaction, atomic write, bounded history, import pin) is still owed before
+  merge.
+- **README.** The section "A failed writer keeps its original code (RM1-03A)" is the operator's
+  section that contract section 7 names.
 - **Open, for RM1-03b.** A write that was skipped or failed leaves an older entry as the newest,
   so RM1-03b compares `recordedAt` with the state's `stateEnteredAt`. `loadWriterOutcomes` keeps
   its read in `try`/`finally` without `catch`, as the verification-attempt store does.
