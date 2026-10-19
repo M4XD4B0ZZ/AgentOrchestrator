@@ -35,7 +35,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
@@ -71,10 +71,15 @@ import {
   type WriterOutcomeLoad,
   type WriterOutcomeWriteRequest,
 } from '../src/agent/writer-outcome-store.js';
+import { mintContainmentAttestation } from '../src/core/internal/containment-attestation.js';
 import type { TaskStateName } from '../src/core/states.js';
 import type { TaskStateInput } from '../src/core/task-state.js';
 import { readDashboardSnapshot } from '../src/dashboard/read-model.js';
-import { releaseRepositoryExecutionLease } from '../src/lease/execution-lease.js';
+import {
+  WRITER_LAUNCH_LEDGER_FILE_NAME,
+  deriveExecutionLeaseLocation,
+  releaseRepositoryExecutionLease,
+} from '../src/lease/execution-lease.js';
 import { AGENT_LAUNCH_NOT_WITHDRAWN } from '../src/loop/leased-spawns.js';
 import {
   runImplementStep,
@@ -97,6 +102,7 @@ import { seedState, startTask, usageLimitResult, writerSuccess } from './helpers
 import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 import { FIXTURE_A_PROFILE, createRepoFixture, removeRepoFixtures } from './helpers/repo-fixtures.js';
 import { writingPassAnswer } from './helpers/scope-git.js';
+import { releaseAll, shareLockOn, type ShareLock } from './helpers/share-lock.js';
 import { removeTrackedWorkspaces } from './helpers/worktree-fixtures.js';
 
 /* ═════════════════════ the one partial mock, and why ════════════════════ */
@@ -184,15 +190,17 @@ function healthyGit(options: GitOptions = {}): GitRunner {
   };
 }
 
-/** A writer guard bound to nothing real, answering as told and counting its launches. */
+/** A writer guard bound to nothing real, answering as told and counting its launches and records. */
 function fakeGuard(
   root: string,
   behaviour: 'OK' | 'QUARANTINED' | 'UNAVAILABLE' | 'VIOLATION' = 'OK',
-): WriterWriteGuard & { readonly starts: () => number } {
+): WriterWriteGuard & { readonly starts: () => number; readonly records: () => number } {
   let starts = 0;
+  let records = 0;
   const violation: WriterViolation = { outsideWrites: [], memoryChanges: [] };
   return {
     starts: () => starts,
+    records: () => records,
     start: () => {
       starts += 1;
       if (behaviour === 'QUARANTINED') {
@@ -209,7 +217,10 @@ function fakeGuard(
         },
       } as const;
     },
-    record: () => join(root, HOME_MARKER, 'violation.json'),
+    record: () => {
+      records += 1;
+      return join(root, HOME_MARKER, 'violation.json');
+    },
   };
 }
 
@@ -536,10 +547,11 @@ describe('a writer failure keeps its original code beside the task record', () =
     expect(loadWriterOutcomes(root, TASK_ID).reading).toBe('ABSENT');
   });
 
-  it('asks Git nothing and records nothing for a result the leased seam made up', async () => {
-    // After `AGENT_LAUNCH_NOT_WITHDRAWN` the step must start nothing more
-    // (REQUIREMENT 7, `tests/v2-07l-execution-lease.test.ts`), and the store's
-    // ignore question is a Git process.
+  it("reads the seam's own AGENT_LAUNCH_NOT_WITHDRAWN answer as a standing mark, whoever returned it", async () => {
+    // The step learns that a mark stands from the identity of the leased seam's
+    // answer, and nothing else. A runner that itself returns that object is
+    // therefore read as a standing mark too: the fail-closed side, and one only
+    // a test fake can take, because the production runner never returns it.
     const root = scratch();
     const git = healthyGit();
     let writerDone = false;
@@ -559,15 +571,231 @@ describe('a writer failure keeps its original code beside the task record', () =
       }),
     );
 
-    expect(result.writerOutcomeEvidence).toEqual({
-      recorded: false,
-      code: 'SEAM_RESULT_NOT_RECORDED',
-      path: null,
-    });
     expect(gitAfterWriter).toBe(0);
     expect(loadWriterOutcomes(root, TASK_ID).reading).toBe('ABSENT');
+    expect(result.writerOutcomeEvidence).toEqual({ recorded: false, code: 'LAUNCH_MARK_NOT_WITHDRAWN', path: null });
     expect(result.state).toBe('HUMAN_DECISION_REQUIRED');
   });
+});
+
+/* ═══ 1b. a launch mark that could not be withdrawn stops the evidence write (D1) ═══ */
+
+/**
+ * A writer that really ran under the real lease of `root`: it writes its
+ * establishment mark while it runs, and, when `stuck`, share-locks the ledger
+ * before it returns, so the seam can neither withdraw the mark nor discard the
+ * history. That is REQUIREMENT 7's own instrument
+ * (`tests/v2-07l-execution-lease.test.ts`, `tests/helpers/share-lock.ts`); no
+ * seam is added to `src` for it.
+ *
+ * Counts every Git command after the writer returned, and reads the ledger's
+ * newest entry while the lock still holds — the control that says the
+ * instrument bit.
+ */
+async function launchWith(
+  phase: WriterOutcomePhase,
+  options: {
+    readonly stuck: boolean;
+    readonly guard?: 'OK' | 'VIOLATION';
+    readonly ran?: AgentCommandResult;
+  },
+): Promise<{
+  readonly result: LoopStepResult;
+  readonly gitAfterWriter: number;
+  readonly ledgerState: string;
+  readonly guard: ReturnType<typeof fakeGuard>;
+  readonly root: string;
+}> {
+  const root = scratch();
+  const authority = leaseAuthorityAt(root);
+  const location = deriveExecutionLeaseLocation(authority.repository);
+  if (!location.ok) throw new Error('fixture has no lease location');
+  const ledgerPath = join(dirname(location.path), WRITER_LAUNCH_LEDGER_FILE_NAME);
+  // Minted against THIS process: the recorder couples the attestation to the
+  // lease's own owner.
+  const attestation = mintContainmentAttestation({
+    ownerPid: process.pid,
+    helperPid: 63_101,
+    childPid: 63_102,
+    mode: 'JOBLIST',
+    assignedAtCreation: true,
+    launchNonce: '00000000000003a1',
+    attestedAt: '2026-10-19T00:00:00.000Z',
+    verifiedInJob: true,
+  });
+  if (attestation === null) throw new Error('fixture could not mint an attestation');
+
+  const git = healthyGit();
+  const guard = fakeGuard(root, options.guard ?? 'OK');
+  let writerReturned = false;
+  let gitAfterWriter = 0;
+  const locks: ShareLock[] = [];
+  try {
+    const result = await step(
+      phase,
+      persist(root, phase),
+      deps(root, {
+        lease: authority,
+        writerGuard: guard,
+        git: async (cwd, args) => {
+          if (writerReturned) gitAfterWriter += 1;
+          return git(cwd, args);
+        },
+        agent: async (_id, _args, _cwd, _payload, hooks) => {
+          hooks?.onLaunchEstablished?.(attestation);
+          if (options.stuck) locks.push(await shareLockOn(ledgerPath));
+          writerReturned = true;
+          return options.ran ?? writerSuccess();
+        },
+      }),
+    );
+    const entries = existsSync(ledgerPath)
+      ? ((JSON.parse(readFileSync(ledgerPath, 'utf8')) as { entries?: readonly { state: string }[] })
+          .entries ?? [])
+      : [];
+    return { result, gitAfterWriter, ledgerState: entries.at(-1)?.state ?? 'NO_ENTRY', guard, root };
+  } finally {
+    // Never a bare `release()` here: see `helpers/share-lock.ts`.
+    await releaseAll(locks);
+  }
+}
+
+/** A process result with every fact empty: what the old shape rule skipped. */
+const EMPTY_FACTS: AgentCommandResult = Object.freeze(
+  agentCommandResult({ outcome: 'UNAVAILABLE', exitCode: null, durationMs: 0 }),
+);
+
+const NOT_RECORDED_MARK_NOT_WITHDRAWN = Object.freeze({ recorded: false, code: 'LAUNCH_MARK_NOT_WITHDRAWN', path: null });
+
+describe('after a launch whose mark could not be withdrawn, the step starts nothing more (D1)', () => {
+  // The blocked case. The ledger is share-locked when the writer returns, so the
+  // establishment mark stands; the seam answers `AGENT_LAUNCH_NOT_WITHDRAWN`.
+  for (const phase of PHASES) {
+    it.runIf(process.platform === 'win32')(
+      `${phase}: the mark cannot be withdrawn — no Git, no record, the mark is still on disk`,
+      async () => {
+        // The writer itself succeeded; only the withdrawal failed.
+        const run = await launchWith(phase, { stuck: true });
+
+        expect(run.gitAfterWriter).toBe(0);
+        expect(loadWriterOutcomes(run.root, TASK_ID).reading).toBe('ABSENT');
+        expect(run.result.writerOutcomeEvidence).toEqual(NOT_RECORDED_MARK_NOT_WITHDRAWN);
+        expect(run.result.outcome).toBe('BLOCKED');
+        expect(run.result.state).toBe('HUMAN_DECISION_REQUIRED');
+        // THE INSTRUMENT'S OWN CONTROL: the affirmative entry was on disk.
+        expect(run.ledgerState).toBe('ESTABLISHED');
+      },
+    );
+
+    it.runIf(process.platform === 'win32')(
+      `${phase}: a forbidden write in the blocked case — no Git, no record; MEMGUARD still records it`,
+      async () => {
+        // D1 as measured: the guard turns the seam's answer into
+        // `AGENT_FORBIDDEN_WRITE`, and the old shape rule let the store ask Git.
+        const run = await launchWith(phase, { stuck: true, guard: 'VIOLATION' });
+
+        expect(run.gitAfterWriter).toBe(0);
+        expect(loadWriterOutcomes(run.root, TASK_ID).reading).toBe('ABSENT');
+        expect(run.result.writerOutcomeEvidence).toEqual(NOT_RECORDED_MARK_NOT_WITHDRAWN);
+        expect(run.result.state).toBe('HUMAN_DECISION_REQUIRED');
+        // MEMGUARD is untouched: its own record of the violation is still made.
+        expect(run.guard.records()).toBe(1);
+        expect(run.ledgerState).toBe('ESTABLISHED');
+      },
+    );
+
+    it.runIf(process.platform === 'win32')(
+      `${phase}: a process that was unavailable in the blocked case — the seam answers for it: no Git, no record`,
+      async () => {
+        const run = await launchWith(phase, {
+          stuck: true,
+          ran: agentCommandResult({ outcome: 'UNAVAILABLE', exitCode: null, failureCode: 'TIMEOUT', durationMs: 20_004 }),
+        });
+
+        expect(run.gitAfterWriter).toBe(0);
+        expect(loadWriterOutcomes(run.root, TASK_ID).reading).toBe('ABSENT');
+        expect(run.result.writerOutcomeEvidence).toEqual(NOT_RECORDED_MARK_NOT_WITHDRAWN);
+        expect(run.result.state).toBe('HUMAN_DECISION_REQUIRED');
+        expect(run.ledgerState).toBe('ESTABLISHED');
+      },
+    );
+  }
+
+  // The regular case. Same instrument, same mark, nothing holds the ledger: the
+  // withdrawal reaches `PENDING` and the store runs as it always did.
+  it('a genuine writer failure is still recorded when the mark comes back', async () => {
+    const run = await launchWith('IMPLEMENT', { stuck: false, ran: agentCommandResult({ exitCode: 2 }) });
+
+    expect(run.ledgerState).toBe('PENDING');
+    expect(run.gitAfterWriter).toBeGreaterThan(0);
+    expect(run.result.writerOutcomeEvidence).toEqual({
+      recorded: true,
+      code: 'HISTORY_STARTED',
+      path: recordPath(run.root),
+    });
+    expect(latestWriterOutcome(loadWriterOutcomes(run.root, TASK_ID))?.code).toBe('AGENT_NONZERO_EXIT');
+  });
+
+  it('a forbidden write in the regular case is recorded, even with every process fact empty', async () => {
+    // `AGENT_FORBIDDEN_WRITE` is not excluded as such: only the standing mark
+    // stops the write.
+    const run = await launchWith('IMPLEMENT', { stuck: false, guard: 'VIOLATION', ran: EMPTY_FACTS });
+
+    expect(run.ledgerState).toBe('PENDING');
+    expect(run.guard.records()).toBe(1);
+    expect(run.result.writerOutcomeEvidence?.recorded).toBe(true);
+    const entry = latestWriterOutcome(loadWriterOutcomes(run.root, TASK_ID));
+    expect(entry?.code).toBe('AGENT_FORBIDDEN_WRITE');
+    expect(entry?.forbiddenWriteRecorded).toBe(true);
+  });
+});
+
+/**
+ * Each condition of the shape rule that 05788fa used instead of the launch state
+ * (`AGENT_PROCESS_UNAVAILABLE`, `UNAVAILABLE`, no exit code, no signal, not cut
+ * off, no failure code, no errno, no time). None of them decides any more: a
+ * regular result that meets all of them is recorded, and so is each result that
+ * breaks exactly one, with that fact kept. The code condition is the regular
+ * forbidden write above.
+ */
+describe('no condition of the old shape rule decides whether a regular failure is recorded', () => {
+  const CASES: readonly (readonly [string, AgentCommandResult])[] = [
+    ['every condition met', EMPTY_FACTS],
+    ['outcome RAN', agentCommandResult({ outcome: 'RAN', exitCode: null, durationMs: 0 })],
+    ['an exit code', agentCommandResult({ outcome: 'UNAVAILABLE', exitCode: 1, durationMs: 0 })],
+    ['a signal', agentCommandResult({ outcome: 'UNAVAILABLE', exitCode: null, signal: 'SIGTERM', durationMs: 0 })],
+    ['output cut off', agentCommandResult({ outcome: 'UNAVAILABLE', exitCode: null, outputTruncated: true, durationMs: 0 })],
+    ['a failure code', agentCommandResult({ outcome: 'UNAVAILABLE', exitCode: null, failureCode: 'TIMEOUT', durationMs: 0 })],
+    ['an errno code', agentCommandResult({ outcome: 'UNAVAILABLE', exitCode: null, errnoCode: 'ENOENT', durationMs: 0 })],
+    ['time spent', agentCommandResult({ outcome: 'UNAVAILABLE', exitCode: null, durationMs: 5 })],
+  ];
+
+  for (const [name, ran] of CASES) {
+    it(`${name}: recorded as AGENT_PROCESS_UNAVAILABLE with its facts`, async () => {
+      const root = scratch();
+      const result = await runImplementStep(
+        persist(root, 'IMPLEMENT'),
+        deps(root, { writerGuard: fakeGuard(root), agent: answers(ran) }),
+      );
+
+      expect(result.writerOutcomeEvidence).toEqual({
+        recorded: true,
+        code: 'HISTORY_STARTED',
+        path: recordPath(root),
+      });
+      const entry = latestWriterOutcome(loadWriterOutcomes(root, TASK_ID));
+      expect(entry?.code).toBe('AGENT_PROCESS_UNAVAILABLE');
+      expect(entry?.process).toEqual({
+        outcome: ran.outcome,
+        exitCode: ran.exitCode,
+        signal: ran.signal,
+        outputTruncated: ran.outputTruncated,
+        failureCode: ran.failureCode,
+        errnoCode: ran.errnoCode,
+        durationMs: ran.durationMs,
+      });
+    });
+  }
 });
 
 /* ═════════════ 2. the task's state file is not touched by it ════════════ */

@@ -123,7 +123,6 @@ import {
 import {
   interruptedResumePoint,
   type AgentBlockEvidence,
-  type AgentProcessEvidence,
   type PermissionDenialObservation,
 } from '../agent/agent-outcome.js';
 import type { AgentRunner } from '../agent/agent-command.js';
@@ -144,7 +143,13 @@ import type { ResumePhase, TaskStateName } from '../core/states.js';
 import { currentRound, reviewBudget } from '../core/review-budget.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
 import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js';
-import { leaseHolds, leasedAgent, leasedGit, leasedVerify } from './leased-spawns.js';
+import {
+  AGENT_LAUNCH_NOT_WITHDRAWN,
+  leaseHolds,
+  leasedAgent,
+  leasedGit,
+  leasedVerify,
+} from './leased-spawns.js';
 import { commitTaskWork, type CommitTaskWorkResult } from '../worktree/commit-task-work.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import { observeRuntime } from '../state/observe-runtime.js';
@@ -328,11 +333,11 @@ export interface WriterOutcomeEvidence {
   readonly recorded: boolean;
   /**
    * The store's own code; `RECORDER_THREW` when the store broke its promise not
-   * to throw; `SEAM_RESULT_NOT_RECORDED` when the store was not called, because
-   * the leased agent seam made the result up itself (see
-   * {@link isSeamSynthesisedResult}).
+   * to throw; `LAUNCH_MARK_NOT_WITHDRAWN` when the store was not called, because
+   * the seam could not show the writer's establishment mark withdrawn (see
+   * {@link writerLaunch}).
    */
-  readonly code: WriterOutcomeRecordCode | 'RECORDER_THREW' | 'SEAM_RESULT_NOT_RECORDED';
+  readonly code: WriterOutcomeRecordCode | 'RECORDER_THREW' | 'LAUNCH_MARK_NOT_WITHDRAWN';
   readonly path: string | null;
 }
 
@@ -967,6 +972,7 @@ async function recordInterruption(
   current: StateLoadSuccess,
   writer: ClaudeWriterFailed,
   deps: LoopDependencies & { readonly phase: 'IMPLEMENT' | 'REMEDIATE'; readonly round: number },
+  launchMarkNotWithdrawn: boolean,
 ): Promise<LoopStepResult> {
   const { now, phase, round } = deps;
 
@@ -980,7 +986,7 @@ async function recordInterruption(
   // state write here is the invariant this whole module rests on, and the
   // evidence is not a state write.
   if (settlement.kind === 'BLOCKED') {
-    const writerOutcomeEvidence = await recordWriterOutcomeEvidence(current, writer, deps);
+    const writerOutcomeEvidence = await recordWriterOutcomeEvidence(current, writer, deps, launchMarkNotWithdrawn);
     return Object.freeze({ ...settlement.result, writerOutcomeEvidence });
   }
 
@@ -997,7 +1003,7 @@ async function recordInterruption(
 
   // After the state write was attempted, on both of its endings. Its result
   // decides nothing below: the outcome is chosen from `record` alone.
-  const writerOutcomeEvidence = await recordWriterOutcomeEvidence(current, writer, deps);
+  const writerOutcomeEvidence = await recordWriterOutcomeEvidence(current, writer, deps, launchMarkNotWithdrawn);
 
   // What Git said is true whether or not the write landed, so both endings
   // carry it — the same rule `saved()` applies to a refused scope write.
@@ -1026,14 +1032,16 @@ async function recordWriterOutcomeEvidence(
   current: StateLoadSuccess,
   writer: ClaudeWriterFailed,
   deps: LoopDependencies & { readonly phase: 'IMPLEMENT' | 'REMEDIATE'; readonly round: number },
+  launchMarkNotWithdrawn: boolean,
 ): Promise<WriterOutcomeEvidence> {
-  // A result the leased seam made up holds no writer failure worth keeping, and
-  // after `AGENT_LAUNCH_NOT_WITHDRAWN` this step must start nothing more: an
-  // `ESTABLISHED` launch mark still stands (REQUIREMENT 7,
-  // `tests/v2-07l-execution-lease.test.ts`). The store asks Git whether its path
-  // is ignored, so it is not called at all: no Git question, no write.
-  if (isSeamSynthesisedResult(writer)) {
-    return Object.freeze({ recorded: false, code: 'SEAM_RESULT_NOT_RECORDED' as const, path: null });
+  // The seam could not show that the writer's `ESTABLISHED` launch mark was
+  // withdrawn, so it may still stand, and this step must start nothing more
+  // (REQUIREMENT 7, `tests/v2-07l-execution-lease.test.ts`). The store asks Git
+  // whether its path is ignored, so it is not called at all: no Git question, no
+  // write. Decided by the launch state alone, never by the writer's code or
+  // process facts: every other failure is recorded.
+  if (launchMarkNotWithdrawn) {
+    return Object.freeze({ recorded: false, code: 'LAUNCH_MARK_NOT_WITHDRAWN' as const, path: null });
   }
   const state = current.state;
   const git = leasedGit(deps);
@@ -1055,44 +1063,51 @@ async function recordWriterOutcomeEvidence(
   }
 }
 
-/**
- * Whether a failed writer's result is one the leased agent seam made up instead
- * of a process: `AGENT_PROCESS_UNAVAILABLE`, `UNAVAILABLE`, no detail at all, no
- * time spent.
- *
- * The seam's three refusals (`AGENT_NOT_AUTHORISED`,
- * `AGENT_LAUNCH_NOT_RECORDED`, `AGENT_LAUNCH_NOT_WITHDRAWN` in
- * `src/loop/leased-spawns.ts`) are distinct objects with exactly these fields,
- * and the identity does not survive into `ClaudeWriterFailed.process`, so the
- * shape is the test. A process that really ran or failed to spawn carries a
- * duration, an `errnoCode` or a `failureCode`. The code is part of the test: a
- * write-guard refusal (`AGENT_WRITE_QUARANTINED`,
- * `AGENT_WRITE_GUARD_UNAVAILABLE`) starts no process either, has the same empty
- * facts, and is kept.
- */
-function isSeamSynthesisedResult(writer: ClaudeWriterFailed): boolean {
-  const process: AgentProcessEvidence = writer.process;
-  return (
-    writer.code === 'AGENT_PROCESS_UNAVAILABLE' &&
-    process.outcome === 'UNAVAILABLE' &&
-    process.exitCode === null &&
-    process.signal === null &&
-    !process.outputTruncated &&
-    process.failureCode === null &&
-    process.errnoCode === null &&
-    process.durationMs === 0
-  );
+/** One writer launch: its options, and what the leased seam said about its establishment mark. */
+interface WriterLaunch {
+  readonly options: ClaudeWriterOptions;
+  /**
+   * `true` once the leased seam answered `AGENT_LAUNCH_NOT_WITHDRAWN`: the
+   * writer ran, and the seam could not show that its `ESTABLISHED` mark was
+   * withdrawn (`STALE_MARK_STANDS`, which also covers a ledger it could not
+   * read), so the mark may still stand. Read after `runClaudeWriter` returns.
+   */
+  readonly launchMarkNotWithdrawn: () => boolean;
 }
 
 /**
- * The options both writer launches share: the leased runner, and the write guard when the caller
- * supplied one (AO-MEMGUARD-001; absent means the production guard inside `runClaudeWriter`).
- * One function for both launches, so the implement step and the fix round cannot drift apart.
+ * The options both writer launches share — the leased runner, and the write guard when the caller
+ * supplied one (AO-MEMGUARD-001; absent means the production guard inside `runClaudeWriter`) — and
+ * the launch's mark state. One function for both launches, so the implement step and the fix
+ * round cannot drift apart.
+ *
+ * ── Why the mark state is read here (RM1-03A, D1) ─────────────────────────
+ *
+ * `leasedAgent` answers the distinct object `AGENT_LAUNCH_NOT_WITHDRAWN` exactly
+ * when it could not show the mark withdrawn (`STALE_MARK_STANDS`); that identity
+ * is what the seam gives its callers to name the refusal. `runClaudeWriter`
+ * copies the answer's fields into `process`, so the identity is gone one layer
+ * up, and the shape that is left is shared by results that are not this
+ * refusal. So the answer is observed here, at the seam's output, in memory: no
+ * process, no read of the ledger, nothing persisted. Only the production runner
+ * sits behind the seam, and it never returns that object; a test runner that
+ * does is read as this refusal, which is the fail-closed side.
+ *
+ * A throw out of the seam sets nothing, and needs nothing: it leaves the step
+ * without a result, so no evidence write follows it.
  */
-function writerLaunchOptions(deps: LoopDependencies): ClaudeWriterOptions {
-  return deps.writerGuard === undefined
-    ? { agent: leasedAgent(deps) }
-    : { agent: leasedAgent(deps), guard: deps.writerGuard };
+function writerLaunch(deps: LoopDependencies): WriterLaunch {
+  const leased = leasedAgent(deps);
+  let launchMarkNotWithdrawn = false;
+  const agent: AgentRunner = async (id, args, cwd, payload, hooks) => {
+    const answer = await leased(id, args, cwd, payload, hooks);
+    if (answer === AGENT_LAUNCH_NOT_WITHDRAWN) launchMarkNotWithdrawn = true;
+    return answer;
+  };
+  return Object.freeze({
+    options: deps.writerGuard === undefined ? { agent } : { agent, guard: deps.writerGuard },
+    launchMarkNotWithdrawn: () => launchMarkNotWithdrawn,
+  });
 }
 
 /** The advance options, separated from the execution seams they travel with. */
@@ -2198,6 +2213,7 @@ export async function runRemediateStep(
   const before = await enforceScope(current, { ...scopeGuard, writerRan: false });
   if (before.blocked !== null) return before.blocked;
 
+  const launch = writerLaunch(deps);
   const writer = await runClaudeWriter(
     {
       worktreePath: authorisedWorktreePath,
@@ -2206,11 +2222,16 @@ export async function runRemediateStep(
       payload: cause.payload,
       mcp: deps.writerMcp,
     },
-    writerLaunchOptions(deps),
+    launch.options,
   );
 
   if (!writer.ok) {
-    return await recordInterruption(current, writer, { ...deps, phase: 'REMEDIATE', round });
+    return await recordInterruption(
+      current,
+      writer,
+      { ...deps, phase: 'REMEDIATE', round },
+      launch.launchMarkNotWithdrawn(),
+    );
   }
 
   // POST-SCOPE. Identical to the implement pass, and deliberately so: the two
@@ -2479,6 +2500,7 @@ export async function runImplementStep(
   // the readback a writer would have run `git status` for is already in hand.
   const briefing = await orchestratorBriefingFor(deps, state, before.assessment.approvedPaths);
 
+  const launch = writerLaunch(deps);
   const writer = await runClaudeWriter(
     {
       worktreePath: authorisedWorktreePath,
@@ -2487,11 +2509,16 @@ export async function runImplementStep(
       payload: buildImplementPayload(brief.brief, round, briefing),
       mcp: deps.writerMcp,
     },
-    writerLaunchOptions(deps),
+    launch.options,
   );
 
   if (!writer.ok) {
-    return await recordInterruption(current, writer, { ...deps, phase: 'IMPLEMENT', round });
+    return await recordInterruption(
+      current,
+      writer,
+      { ...deps, phase: 'IMPLEMENT', round },
+      launch.launchMarkNotWithdrawn(),
+    );
   }
 
   // POST-SCOPE. The guarantee: no mutating step is left successfully until the
