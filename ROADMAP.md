@@ -754,6 +754,12 @@ and no file can be added there.
   that has already started keeps the scope of its base commit, RM1-10B included, so the removal
   changes no running task. Check before the removal that no task with a state has a base commit
   that carries the entries and still needs them.
+- **Removal (prepared 2026-10-20).** The pull request that carries this sentence removes the four
+  entries; the profile is then byte for byte the one before PR #116 (blob `02f1a54`). Checked
+  read-only before it was opened: of the 13 tasks with a state, only RM1-10B (`REVIEWING`, base
+  `1b99c15`) has a base commit that carries the entries, and its delivery (PR #120) needs no AO
+  run; `REVIEW-INSTRUMENT-001` has no state. Merged only after PR #120, with its own release. The
+  conditions above end with that merge.
 
 ## 15. Sources and how this file was checked
 
