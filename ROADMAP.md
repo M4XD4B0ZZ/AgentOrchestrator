@@ -20,7 +20,7 @@
 11. [RM5 — Visual regression capability](#rm5--visual-regression-capability)
 12. [RM6 — Optimisation and project knowledge](#rm6--optimisation-and-project-knowledge)
 13. [What not to build](#13-what-not-to-build)
-14. [Open operator decisions](#14-open-operator-decisions)
+14. [Operator decisions](#14-operator-decisions)
 15. [Sources and how this file was checked](#15-sources-and-how-this-file-was-checked)
 16. [Appendix A — Overnight pilot P1](#appendix-a--overnight-pilot-p1-proposed)
 
@@ -30,8 +30,8 @@
   earlier roadmap file existed in any branch or commit (checked 2026-10-18 with
   `git log --all -- ROADMAP.md`). The operator chose this path on 2026-10-18 (option A).
 - **Authority order.** The code and its tests say what AO does. `README.md` records what was built
-  and why. `CLAUDE.md` governs how work is delivered in this repository. This file only proposes an
-  order of future work.
+  and why. `CLAUDE.md` governs how work is delivered in this repository. This file is the leading
+  development plan: it orders future work and records the operator's decisions (section 14).
 - **Names.** The operator's brief calls the milestones M0 to M6. `README.md` already uses M1 to M8
   for finished milestones (for example "Autonomous delivery (M1)", M3 persistent scheduler, M4
   unattended completion, M8). To keep the two apart, this file writes **RM0 to RM6** ("roadmap
@@ -78,7 +78,7 @@ hand. So VWHI ≈ 0.2. Source: section 6.
 | Milestone                        | Goal in one line                                                              | Status                                   | Depends on                 | First step   | Done when                                                         |
 | -------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------- | -------------------------- | ------------ | ----------------------------------------------------------------- |
 | **RM0** Baseline                 | One repeatable, trusted set of numbers                                        | `BASELINE` recorded here; tasks PROPOSED | —                          | RM0-01       | One command reproduces section 6's table                          |
-| **RM1** Unattended operation     | A 6–8 h night runs only approved tasks, stops safely, never merges, reports   | PROPOSED                                 | RM0-01                     | RM1-02       | Two pilot nights pass Appendix A's success criteria               |
+| **RM1** Unattended operation     | A 6–8 h night runs only approved tasks, stops safely, never merges, reports   | D2, D6 decided; RM1-03a approved; D5 open | RM0-01                     | RM1-03a      | Two pilot nights pass Appendix A's success criteria               |
 | **RM2** Better remediation       | A fix round knows what to fix; a failure keeps its cause                      | PROPOSED                                 | RM0-01; RM1-03             | RM2-01       | Fewer rounds per finished task; fewer resolves at a spent budget  |
 | **RM3** Verified pull request    | An approved task reaches a green pull request with no human step; merge stays human | PROPOSED; needs decision D3        | RM1, RM2-01..02            | RM3-01 (ADR) | A pilot task reaches a green PR unattended, with zero merges      |
 | **RM4** Controlled learning      | Recurring failures become reviewed lesson candidates; nothing self-applies    | PROPOSED                                 | RM1-03, RM2-01, RM2-06     | RM4-01       | One candidate reviewed and applied by a person through a PR       |
@@ -134,8 +134,36 @@ RM0 baseline ──► RM1 unattended ──► RM2 remediation ──► RM3 ve
    stays non-blocking evidence until RM2-05 gives emulator flakes an operator-only re-run door.
 7. **RM6** starts with usage capture inside RM1-03; the rest waits for data.
 
-**The critical path is** RM0-01 → RM1-02, RM1-01, RM1-03, RM1-04 → pilot P1 → RM2-01, RM2-02 →
-RM3-01 (decision) → RM3-02.
+**The critical path is** RM0-01 → RM1-03a → RM1-10 → RM1-01, RM1-02, RM1-03b → RM1-04 → RM1-08 →
+D5 → pilot P1 → RM2-01, RM2-02 → RM3-01 (decision) → RM3-02.
+
+### The way to pilot P1 (operator decisions of 2026-10-19)
+
+The operator fixed this order on 2026-10-19 (D2 = A, D6 = A, RM1-03a approved, D5 open). Steps
+without a hard dependency on each other may be prepared in parallel. Heavy runs — an AO or HealthApp
+verification, a HealthApp CI job on the self-hosted runner — still run one at a time on the shared
+machine.
+
+| #   | Step                              | Item                                          | Hard dependency                              | May be prepared in parallel with |
+| --- | --------------------------------- | --------------------------------------------- | -------------------------------------------- | -------------------------------- |
+| 1   | Baseline                          | RM0-01                                        | —                                            | 2, 3, 6                          |
+| 2   | Writer outcomes in AO             | RM1-03a (approved; contract PR #112)          | its contract merged on `main`                | 1, 3, 6                          |
+| 3   | Supervisor under version control  | RM1-10 (D6 = A; ADR + phase 1: PR #114)       | its ADR accepted                             | 1, 2, 6                          |
+| 4   | Night allow-list                  | RM1-01                                        | RM1-10                                       | 5                                |
+| 5   | Stagnation detection              | RM1-02                                        | RM1-10                                       | 4                                |
+| 5b  | Restart lane reads the record     | RM1-03b                                       | RM1-03a, RM1-10                              | 4, 5                             |
+| 6   | Declared review mode              | RM1-04 (D2 = A: `stop-at-reviewing` for P1)   | —                                            | 1, 2, 3                          |
+| 7   | Safety and deployment preflight   | RM1-08                                        | 1 to 6 done; `dist` deployed from `main`     | —                                |
+| 8   | Pilot release                     | D5                                            | 7 passes                                     | —                                |
+| 9   | Two controlled pilot nights       | RM1-09                                        | D5                                           | —                                |
+
+- **RM1-03 is done in two parts.** RM1-03a is AO's record. RM1-03b is the supervisor's restart lane
+  reading it, so it needs the supervisor in this repository first (RM1-10). Appendix A.2 counts
+  RM1-03 only when both parts are done.
+- **RM1-05 is not a P1 prerequisite.** With D2 = A no Codex review runs at night. The machine-wide
+  reviewer lock is needed before the first night in mode `codex`.
+- **RM1-06 and RM1-07 stay optional for P1.** A.2 allows a morning report written by hand from the
+  records for the first night.
 
 ## 5. Governance boundaries for every milestone
 
@@ -200,6 +228,11 @@ asks the operator to decide its wording.
   persisted (they are, since #98). `README.md:9045-9047` says an operator sees observed byte counts
   in a report (no renderer reads them; G2.5). `README.md:15094-15096` predates MEMGUARD.
 - `CLAUDE.md:98-100` contradicts the delivery code (section 5).
+- **AO's own task list is stale** (measured 2026-10-19). `REVIEW-INSTRUMENT-001`, `M1-DOGFOOD-001`
+  and `M1-DOGFOOD-002` say `OPEN` in Git although their work is merged; nine `M1-RELEASE-*` files
+  exist only in the local checkout (`.git/info/exclude`) and say `OPEN` too. A `run` on this
+  repository without `--task` therefore selects an old task. Until RM0-05 is done, every AO run on
+  this repository names its task.
 
 **Dependencies.** None.
 
@@ -211,6 +244,7 @@ asks the operator to decide its wording.
 | RM0-02 | Refresh the `README.md` status block and the four stale sentences above                                                                                                    | PROPOSED | Each sentence matches the code; the status block names every merged PR since #97                 |
 | RM0-03 | Operator decision on the `CLAUDE.md` sentence about PR, CI and merge "outside v1" (D1)                                                                                     | PROPOSED | A decision is recorded; `CLAUDE.md` changes only on that decision                                |
 | RM0-04 | Record the VWHI counting rules (section 2) as the operator's accepted definition                                                                                           | PROPOSED | The operator accepts or changes section 2                                                        |
+| RM0-05 | Bring AO's own task list in line: each delivered task `DONE`, local-only task files resolved                                                                               | PROPOSED | A read-only `run --repository <AO root>` ranks no delivered task                                  |
 
 **Regression requirements.** RM0-01 reads only; a test asserts it writes no file and starts no
 process. RM0-02 keeps every README sentence that a test pins (for example
@@ -265,7 +299,8 @@ on its own, and leaves a morning report a person can act on in minutes.
    task with merged dependencies can start.
 4. **The review policy and the code disagree.** Since 2026-10-02 attended runs stop before Codex by
    policy, done by stepping `--max-steps` by hand. Under the code, any attended run continues a
-   `REVIEWING` task into a Codex review. Today that is DESIGN-023.
+   `REVIEWING` task into a Codex review. It was DESIGN-023 until its delivery on 2026-10-19
+   (HealthApp #356; the task file says `DONE`, so the planner no longer selects it).
 5. **The reviewer lock is per process** (`src/loop/reviewer-provider-gate.ts:45-48`). Two AO
    processes on one machine can both launch Codex (the audit's "per machine" claim is only partly
    true).
@@ -274,8 +309,12 @@ on its own, and leaves a morning report a person can act on in minutes.
 7. **An empty queue is a silent stop every 30 minutes.**
 8. **The supervisor's merge list names only CAPTURE-003..006**, and its scheduled-task comment says
    it passes no grant flag (it passes three kinds). Both are stale.
+9. **The supervisor is not under version control** (measured 2026-10-19). `C:\Users\Max\AO-runs` is
+   no Git repository, so a change there gets no pull request and no CI, and its labs run only by
+   hand. Decision D6 = A moves its source into this repository (RM1-10).
 
-**Dependencies.** RM0-01 (to measure the pilot).
+**Dependencies.** RM0-01 (to measure the pilot). RM1-10 for every item whose "Where" is the
+supervisor.
 
 **Tasks.**
 
@@ -283,13 +322,15 @@ on its own, and leaves a morning report a person can act on in minutes.
 | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | RM1-01 | **Night allow-list.** The operator writes the IDs approved for one night into a file outside every repository; the supervisor admits nothing else                                                           | supervisor      | PROPOSED | A wiring test: an eligible task that is not on the list is never started; an empty list starts nothing and says so once     |
 | RM1-02 | **Classifier after AO #110.** A Codex block is an operator item, never a future wake; two passes with no state change stop the run and notify once                                                           | supervisor      | PROPOSED | Replayed records of 2026-09-15 give `OPERATOR_ONLY` and one notification, not 12 silent passes                               |
-| RM1-03 | **Writer-outcome record** (C3). Bounded, append-only `runtime/writer-outcomes/<task>.json`: failure code, result subtype, duration, usage when present. Evidence only, never authority                       | AO              | PROPOSED | Tests per code; `TaskState` unchanged; the restart lane can then skip `AGENT_ARGUMENT_REFUSED`; README section               |
-| RM1-04 | **Declared review mode** per repository in the operator registry: `codex` (today) or `stop-at-reviewing` (today's hand practice, made declarative). Decision D2 first                                       | AO + operator   | PROPOSED | With `stop-at-reviewing` a run ends at `REVIEWING` with an attention item and zero reviewer launches (asserted by a test)     |
+| RM1-03a | **Writer-outcome record** (C3), AO part. Bounded, per-task evidence record `runtime/writer-outcomes/<task>.json`: original failure code, its static cause, closed process facts. Evidence only, never authority. Contract: `.agent-orchestrator/tasks/RM1-03A.md` (PR #112) | AO | APPROVED 2026-10-19 | Tests per failure class; task state byte-equal; an import pin and plan equality show it decides nothing |
+| RM1-03b | **Restart lane reads the record.** The supervisor's writer-restart lane refuses a recorded deterministic code (`AGENT_ARGUMENT_REFUSED`) | supervisor | PROPOSED | A supervisor-lab case: a recorded `AGENT_ARGUMENT_REFUSED` is never restarted |
+| RM1-04 | **Declared review mode** per repository in the operator registry: `codex` or `stop-at-reviewing` (today's hand practice, made declarative). D2 = A (2026-10-19): `stop-at-reviewing` for pilot P1 | AO + operator | PROPOSED; D2 decided | With `stop-at-reviewing` a run ends at `REVIEWING` with an attention item and zero reviewer launches (asserted by a test) |
 | RM1-05 | **Machine-wide reviewer lock**: a file lock under the user profile, so two AO processes cannot both launch Codex                                                                                             | AO              | PROPOSED | A dist-artefact test with two processes: one launch, one refusal                                                              |
 | RM1-06 | **Morning report.** A read-only roll-up over a time window, built on the dashboard read model: tasks started, states reached, rounds and finding counts, attempts (phase, exit), blockers with the exact next command, quota state, time spent; successes included | AO (read-only)  | PROPOSED | Built from fixtures; every line traceable to a record; one short ntfy line at the end of a night                              |
 | RM1-07 | **Heartbeat and stale items.** The supervisor writes a heartbeat; the dashboard shows the last pass; attention items of unregistered repositories show as stale                                              | supervisor + AO | PROPOSED | The dashboard tells "running", "stopped at <time>" and "never ran" apart                                                      |
-| RM1-08 | **Supervisor hygiene.** Merge list emptied (no merge lane in RM1); scheduled-task comment corrected; `dist` deployed from `main` before the pilot                                                             | supervisor      | PROPOSED | A checklist in Appendix A passes                                                                                              |
+| RM1-08 | **Supervisor hygiene and safety/deployment preflight.** Merge list emptied (no merge lane in RM1); scheduled-task comment corrected; `dist` deployed from `main`; the A.2 checklist as one read-only check | supervisor + AO | PROPOSED | The preflight passes on the evening before a pilot night and names every failed item |
 | RM1-09 | **Pilot P1** (Appendix A): an evening rehearsal, then two nights                                                                                                                                            | operation       | PROPOSED | Appendix A's success criteria                                                                                                 |
+| RM1-10 | **Supervisor under version control** (D6 = A, 2026-10-19). Its source moves from `C:\Users\Max\AO-runs` into this repository: an ADR first, no secret committed, its labs in CI, a deployment to the Windows machine from a canonical commit, a way back, the Task Scheduler entry unchanged until the pilot. ADR and phase 1 (byte-equal copy, CI guards): PR #114 | AO repository | APPROVED (D6 = A); ADR first | The labs pass in CI; the deployed copy is byte-equal to a named commit; nothing secret is in Git |
 
 **Regression requirements.** All AO tests stay green, including `m4-01-unattended-completion`,
 `m3-01-persistent-scheduler` and the dist-artefact suites. The supervisor's own lab
@@ -304,7 +345,8 @@ a stop and one message); morning-report lines that disagree with the records (ta
 relaunch stays human. The supervisor is enabled only for the approved pilot window and disabled
 after it.
 
-**Completion.** RM1-01..08 `DONE` and two pilot nights meet Appendix A's success criteria.
+**Completion.** RM1-01, -02, -03a, -03b, -04, -06, -07, -08 and -10 `DONE` (RM1-05 before the first
+night in mode `codex`), and two pilot nights meet Appendix A's success criteria.
 
 ## RM2 — Better remediation
 
@@ -535,15 +577,21 @@ Confirmed by the audit and the code; each would break a property in section 5.
 - Any outgoing edge from `READY_FOR_PR`, or a merge decision in the task loop.
 - More agents in parallel as a goal in itself.
 
-## 14. Open operator decisions
+## 14. Operator decisions
 
-| ID | Decision                                                                                                         | Needed before |
-| -- | ---------------------------------------------------------------------------------------------------------------- | ------------- |
-| D1 | Wording of `CLAUDE.md:98-100` (PR, CI and merge "outside v1") against the delivery code                          | RM0-03        |
-| D2 | Night review mode: Codex within its quota, or stop at `REVIEWING` for a review by a person the next morning      | RM1-04, P1    |
-| D3 | May AO open a pull request unattended for an approved `READY_FOR_PR` task (RM3-01)?                              | RM3           |
-| D4 | An operator acceptance that the delivery gate accepts, as an alternative to `resolve` (RM3-04)                   | RM3-04        |
-| D5 | Approve pilot P1 (Appendix A): window, tasks, review mode                                                        | RM1-09        |
+| ID | Decision                                                                                                         | Needed before | State                                                       |
+| -- | ---------------------------------------------------------------------------------------------------------------- | ------------- | ----------------------------------------------------------- |
+| D1 | Wording of `CLAUDE.md:98-100` (PR, CI and merge "outside v1") against the delivery code                          | RM0-03        | open                                                        |
+| D2 | Night review mode: Codex within its quota, or stop at `REVIEWING` for a review by a person the next morning      | RM1-04, P1    | **decided 2026-10-19: A, `stop-at-reviewing` for pilot P1** |
+| D3 | May AO open a pull request unattended for an approved `READY_FOR_PR` task (RM3-01)?                              | RM3           | open                                                        |
+| D4 | An operator acceptance that the delivery gate accepts, as an alternative to `resolve` (RM3-04)                   | RM3-04        | open                                                        |
+| D5 | Approve pilot P1 (Appendix A): window, tasks, review mode                                                        | RM1-09        | **open: the night pilot stays disabled**                    |
+| D6 | Where the supervisor's source lives                                                                              | RM1-10        | **decided 2026-10-19: A, in this repository (ADR first)**   |
+
+**Operator release of 2026-10-19.** RM1-03a and RM1-10 are `APPROVED`: RM1-03a for its contract
+and implementation, RM1-10 for its ADR, migration plan and CI tests. The
+release covers no merge: every pull request still needs its own release. This file is the leading
+development plan for AgentOrchestrator; a decision that changes it is recorded here.
 
 ## 15. Sources and how this file was checked
 
@@ -586,17 +634,18 @@ new orchestrator. It needs decision D5.
 
 ### A.2 Entry prerequisites (all must hold; checked the evening before)
 
-1. RM1-01, RM1-02, RM1-03, RM1-04 and RM1-08 are `DONE`; RM1-06 is `DONE` or the operator accepts
-   a morning report written by hand from the records for the first night. RM1-03 counts only when
-   the supervisor's writer-restart lane reads the writer-outcome record and does not restart a
-   deterministic code (`AGENT_ARGUMENT_REFUSED`); see section 4, point 3.
-2. Decision D2 (review mode) and D5 (this pilot) are recorded.
+1. RM0-01, RM1-01, RM1-02, RM1-03a, RM1-03b, RM1-04, RM1-08 and RM1-10 are `DONE`; RM1-06 is
+   `DONE` or the operator accepts a morning report written by hand from the records for the first
+   night. RM1-03 counts only when both parts are done: the supervisor's writer-restart lane reads the
+   writer-outcome record and does not restart a deterministic code (`AGENT_ARGUMENT_REFUSED`); see
+   section 4, point 3.
+2. Decision D2 (review mode) is recorded (A, 2026-10-19); D5 (this pilot) is recorded.
 3. `dist/` is deployed from `main` (`dist/.ao-provenance.json` names the `main` HEAD, `CANONICAL`).
    `agent-loop doctor` passes. `agent-loop lease status` is `FREE` for every registered repository.
 4. The project checkout is on its default branch, clean and fast-forwardable from `origin`.
 5. **No task is left in a state the night would continue against policy.** A task at `REVIEWING`
-   under a no-Codex policy (today: DESIGN-023) is delivered or parked first; otherwise any attended
-   run would start its Codex review.
+   under a no-Codex policy is delivered or parked first (DESIGN-023 was delivered on 2026-10-19);
+   otherwise any attended run would start its Codex review.
 6. Every task on the night list has a merged contract and task file, a declared scope, all
    dependencies `DONE` on the default branch, and a brief that fits the brief limit.
 7. The supervisor's lab (`zera-grant-lab.mjs`, `zera-wiring-test.ps1`) passes on the deployed `dist`.
@@ -629,6 +678,7 @@ change to storage, no new dependency). One repository, one task at a time.
   (or an attended Claude session on the operator's order) reviews it in the morning.
 - In both modes the writer never reviews its own change, and no task is reported as delivery-ready
   without a review.
+- **For P1 the mode is `stop-at-reviewing`** (D2 = A, 2026-10-19).
 
 ### A.6 Stop conditions (each ends the night or the task, and sends one message)
 
