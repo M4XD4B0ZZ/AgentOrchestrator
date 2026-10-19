@@ -348,6 +348,29 @@ after it.
 **Completion.** RM1-01, -02, -03a, -03b, -04, -06, -07, -08 and -10 `DONE` (RM1-05 before the first
 night in mode `codex`), and two pilot nights meet Appendix A's success criteria.
 
+**RM1-10 phase 2 (task RM1-10B) delivery record (2026-10-20).** RM1-10 stays `APPROVED`: phases 3
+to 5 remain.
+
+- **Implementation.** `fed1880` (`AO:RM1-10B:IMPLEMENT:r1`), written by AO's writer in an attended
+  run on 2026-10-19 under the temporary RM1-10S scope (PR #116). Five files:
+  `ops/zera-supervisor/{zera-supervisor.ps1, zera-wiring-test.ps1, zera-grant-lab.mjs, README.md}`
+  and `tests/ops-zera-supervisor.test.ts`. AO's verify passed on `fed1880` (BUILD exit 0, VERIFY
+  exit 0); the task stopped at `REVIEWING`. No Codex review ran. Production source is unchanged in
+  this delivery.
+- **Checks (overnight 2026-10-20).** An independent read-only review (a Claude agent) and break-tests
+  in an isolated copy: 25 planted faults, 16 caught. A notification-privacy probe against a local
+  endpoint with verbose, debug and transcript on: no channel name and no endpoint in any output, live
+  or dry run. The grant lab with explicit folders: 49 of 49 cases pass. Defaults unchanged: the
+  scheduled task needs no change.
+- **Open — repair before any run with a non-default `-StateDir`** (a follow-up task, not yet
+  written): an empty `-StateDir ""` falls back to the production folder; `D:state` and `\state`
+  pass the "absolute folder" check; the supervisor README still shows the grant lab without its
+  four folders. Untested today: the hand-off of the parameters to `Resolve-ZeraPaths` and the
+  script-level path variables (four planted faults survive), `-Verbose:$false` in `Notify` (removing
+  it leaks the channel when verbose is on — measured), the refusal of a parameter without a value,
+  and the grant lab's argument checks.
+- **No approval of this delivery is claimed.** A person's review is owed before merge.
+
 ## RM2 — Better remediation
 
 **Goal.** A fix round knows what to fix, a repeated finding is seen as repeated, and every failure
