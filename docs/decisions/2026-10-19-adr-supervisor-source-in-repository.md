@@ -62,8 +62,11 @@ no CI and no history, and its labs run only by hand. The pilot P1 needs four sup
    transcripts and history stay outside Git for good.
 3. **Exact bytes.** `.gitattributes` keeps every byte of `ops/zera-supervisor/` as committed
    (`-text`), so the BOM survives and a deployed copy can be compared byte for byte.
-4. **No secret in Git.** The ntfy topic stays in `notify.yaml`; CI scans the folder for credentials;
-   transcripts are never copied in.
+4. **No secret in Git.** The ntfy topic stays in `notify.yaml`; transcripts are never copied in. CI
+   checks the folder for known credential shapes only (token prefixes, a private key, an
+   `ntfy.sh/<topic>` URL); it cannot know a bare topic string. So the topic itself is checked
+   locally against `notify.yaml` before every commit to this folder and before every deploy
+   (phase 3).
 5. **Production never runs from a working tree.** As with `dist/` (ADR 2026-09-15), a branch switch
    in the checkout must not change what the scheduled task runs. A deploy step copies
    `ops/zera-supervisor/` from a canonical, clean commit (the tip of `origin/main`) to the deployed
@@ -77,8 +80,8 @@ no CI and no history, and its labs run only by hand. The pilot P1 needs four sup
 | Phase | Change | Production effect | Gate |
 | --- | --- | --- | --- |
 | 1 (this pull request) | This record; a byte-equal copy of the ten files in `ops/zera-supervisor/`; `.gitattributes`; `tests/ops-zera-supervisor.test.ts` | none | CI; the copy is byte-equal to production (checked by hash before the commit) |
-| 2 | Paths from parameters: `$RunsDir` from the deployed folder (`$PSScriptRoot`), a separate `$StateDir` defaulting to today's folder; the wiring test updated for it | none until deployed | CI: the wiring test; the grant lab with explicit lab folder, ledger and runtime |
-| 3 | A deploy script with provenance and a dry run; the grant lab runs against a deployed runtime before every deploy | none until run | A dry run shows the file list and hashes; nothing is written |
+| 2 | Paths from parameters: `$RunsDir` from the deployed folder (`$PSScriptRoot`), a separate `$StateDir` defaulting to today's folder; the wiring test updated for it. The dry-run notify line stops printing the full notify URL: today it prints the topic, and the transcript keeps it (that is how nine transcripts hold it) | none until deployed | CI: the wiring test; the grant lab with explicit lab folder, ledger and runtime |
+| 3 | A deploy script with provenance and a dry run; the grant lab runs against a deployed runtime before every deploy; the deploy refuses a file that contains the topic from `notify.yaml` | none until run | A dry run shows the file list and hashes; nothing is written |
 | 4 | First deploy, while the scheduled task is disabled: back up the current production files, deploy, prove byte-equality with the named commit, keep the scheduled task's action path | the same bytes as before (phase 1 copy) | Hash compare; the wiring test on the deployed copy |
 | 5 | RM1-01, RM1-02, RM1-03b, RM1-08 as pull requests against `ops/zera-supervisor/` | after each deploy | CI + the lab |
 
