@@ -75,6 +75,7 @@ import type { TaskStateName } from '../src/core/states.js';
 import type { TaskStateInput } from '../src/core/task-state.js';
 import { readDashboardSnapshot } from '../src/dashboard/read-model.js';
 import { releaseRepositoryExecutionLease } from '../src/lease/execution-lease.js';
+import { AGENT_LAUNCH_NOT_WITHDRAWN } from '../src/loop/leased-spawns.js';
 import {
   runImplementStep,
   runRemediateStep,
@@ -534,6 +535,39 @@ describe('a writer failure keeps its original code beside the task record', () =
     expect(result.writerOutcomeEvidence).toBeNull();
     expect(loadWriterOutcomes(root, TASK_ID).reading).toBe('ABSENT');
   });
+
+  it('asks Git nothing and records nothing for a result the leased seam made up', async () => {
+    // After `AGENT_LAUNCH_NOT_WITHDRAWN` the step must start nothing more
+    // (REQUIREMENT 7, `tests/v2-07l-execution-lease.test.ts`), and the store's
+    // ignore question is a Git process.
+    const root = scratch();
+    const git = healthyGit();
+    let writerDone = false;
+    let gitAfterWriter = 0;
+    const result = await runImplementStep(
+      persist(root, 'IMPLEMENT'),
+      deps(root, {
+        git: async (cwd, args) => {
+          if (writerDone) gitAfterWriter += 1;
+          return git(cwd, args);
+        },
+        writerGuard: fakeGuard(root),
+        agent: async () => {
+          writerDone = true;
+          return AGENT_LAUNCH_NOT_WITHDRAWN;
+        },
+      }),
+    );
+
+    expect(result.writerOutcomeEvidence).toEqual({
+      recorded: false,
+      code: 'SEAM_RESULT_NOT_RECORDED',
+      path: null,
+    });
+    expect(gitAfterWriter).toBe(0);
+    expect(loadWriterOutcomes(root, TASK_ID).reading).toBe('ABSENT');
+    expect(result.state).toBe('HUMAN_DECISION_REQUIRED');
+  });
 });
 
 /* ═════════════ 2. the task's state file is not touched by it ════════════ */
@@ -920,16 +954,35 @@ function importersOf(moduleName: string): string[] {
     .sort();
 }
 
-/** What a plan decides. Everything but the display field. */
+/**
+ * A value as data: a function becomes a marker, a `Map` or `Set` its entries.
+ *
+ * `selection.planning.graph` carries two closures (`has`, `node`) that every
+ * plan makes afresh, so two plans read with nothing changed in between are
+ * already unequal by reference (measured 2026-10-19). The comparison is about
+ * what a plan decides, not about which closure it holds.
+ */
+function dataOf(value: unknown): unknown {
+  if (typeof value === 'function') return '[function]';
+  if (value instanceof Map) return ['Map', [...value].map(([k, v]) => [dataOf(k), dataOf(v)])];
+  if (value instanceof Set) return ['Set', [...value].map(dataOf)];
+  if (Array.isArray(value)) return value.map(dataOf);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, dataOf(v)]));
+  }
+  return value;
+}
+
+/** What a plan decides, as data. Everything but the display field. */
 function decided(plan: RunPlan) {
-  return {
+  return dataOf({
     selection: plan.selection,
     target: plan.target,
     state: plan.state,
     conclusion: plan.conclusion,
     reasonCodes: plan.reasonCodes,
     resume: plan.resume,
-  };
+  });
 }
 
 async function parkedPlanFixture() {

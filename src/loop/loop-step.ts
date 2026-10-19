@@ -123,6 +123,7 @@ import {
 import {
   interruptedResumePoint,
   type AgentBlockEvidence,
+  type AgentProcessEvidence,
   type PermissionDenialObservation,
 } from '../agent/agent-outcome.js';
 import type { AgentRunner } from '../agent/agent-command.js';
@@ -325,8 +326,13 @@ export interface LoopStepResult {
 /** What the writer-outcome write did. Reported, never persisted in the task state. */
 export interface WriterOutcomeEvidence {
   readonly recorded: boolean;
-  /** The store's own code, or `RECORDER_THREW` when the store broke its promise not to throw. */
-  readonly code: WriterOutcomeRecordCode | 'RECORDER_THREW';
+  /**
+   * The store's own code; `RECORDER_THREW` when the store broke its promise not
+   * to throw; `SEAM_RESULT_NOT_RECORDED` when the store was not called, because
+   * the leased agent seam made the result up itself (see
+   * {@link isSeamSynthesisedResult}).
+   */
+  readonly code: WriterOutcomeRecordCode | 'RECORDER_THREW' | 'SEAM_RESULT_NOT_RECORDED';
   readonly path: string | null;
 }
 
@@ -1021,6 +1027,14 @@ async function recordWriterOutcomeEvidence(
   writer: ClaudeWriterFailed,
   deps: LoopDependencies & { readonly phase: 'IMPLEMENT' | 'REMEDIATE'; readonly round: number },
 ): Promise<WriterOutcomeEvidence> {
+  // A result the leased seam made up holds no writer failure worth keeping, and
+  // after `AGENT_LAUNCH_NOT_WITHDRAWN` this step must start nothing more: an
+  // `ESTABLISHED` launch mark still stands (REQUIREMENT 7,
+  // `tests/v2-07l-execution-lease.test.ts`). The store asks Git whether its path
+  // is ignored, so it is not called at all: no Git question, no write.
+  if (isSeamSynthesisedResult(writer)) {
+    return Object.freeze({ recorded: false, code: 'SEAM_RESULT_NOT_RECORDED' as const, path: null });
+  }
   const state = current.state;
   const git = leasedGit(deps);
   try {
@@ -1039,6 +1053,35 @@ async function recordWriterOutcomeEvidence(
   } catch {
     return Object.freeze({ recorded: false, code: 'RECORDER_THREW' as const, path: null });
   }
+}
+
+/**
+ * Whether a failed writer's result is one the leased agent seam made up instead
+ * of a process: `AGENT_PROCESS_UNAVAILABLE`, `UNAVAILABLE`, no detail at all, no
+ * time spent.
+ *
+ * The seam's three refusals (`AGENT_NOT_AUTHORISED`,
+ * `AGENT_LAUNCH_NOT_RECORDED`, `AGENT_LAUNCH_NOT_WITHDRAWN` in
+ * `src/loop/leased-spawns.ts`) are distinct objects with exactly these fields,
+ * and the identity does not survive into `ClaudeWriterFailed.process`, so the
+ * shape is the test. A process that really ran or failed to spawn carries a
+ * duration, an `errnoCode` or a `failureCode`. The code is part of the test: a
+ * write-guard refusal (`AGENT_WRITE_QUARANTINED`,
+ * `AGENT_WRITE_GUARD_UNAVAILABLE`) starts no process either, has the same empty
+ * facts, and is kept.
+ */
+function isSeamSynthesisedResult(writer: ClaudeWriterFailed): boolean {
+  const process: AgentProcessEvidence = writer.process;
+  return (
+    writer.code === 'AGENT_PROCESS_UNAVAILABLE' &&
+    process.outcome === 'UNAVAILABLE' &&
+    process.exitCode === null &&
+    process.signal === null &&
+    !process.outputTruncated &&
+    process.failureCode === null &&
+    process.errnoCode === null &&
+    process.durationMs === 0
+  );
 }
 
 /**
