@@ -97,6 +97,9 @@ merged to `main`, no milestone is planned after it, and nothing is open. What
 stands under [Not implemented yet](#not-implemented-yet) stays unimplemented on
 purpose, and that section is the answer to "why does it not do X", not a backlog.
 
+**Proposed work after the close is in [ROADMAP.md](ROADMAP.md)** (2026-10-19). Nothing
+in it is approved or built; each item reopens work only by its own decision.
+
 **Reopened three times since, narrowly. The first two closed again on
 2026-09-10; the third, opened 2026-09-12, is still open.** Each time for the
 same reason and under the rule stated three paragraphs down: a *fresh decision
