@@ -147,7 +147,7 @@ machine.
 | #   | Step                              | Item                                          | Hard dependency                              | May be prepared in parallel with |
 | --- | --------------------------------- | --------------------------------------------- | -------------------------------------------- | -------------------------------- |
 | 1   | Baseline                          | RM0-01                                        | —                                            | 2, 3, 6                          |
-| 2   | Writer outcomes in AO             | RM1-03a (approved; contract PR #112)          | its contract merged on `main`                | 1, 3, 6                          |
+| 2   | Writer outcomes in AO             | RM1-03a (done; contract PR #112)              | its contract merged on `main`                | 1, 3, 6                          |
 | 3   | Supervisor under version control  | RM1-10 (D6 = A; ADR + phase 1: PR #114)       | its ADR accepted                             | 1, 2, 6                          |
 | 4   | Night allow-list                  | RM1-01                                        | RM1-10                                       | 5                                |
 | 5   | Stagnation detection              | RM1-02                                        | RM1-10                                       | 4                                |
@@ -322,7 +322,7 @@ supervisor.
 | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | RM1-01 | **Night allow-list.** The operator writes the IDs approved for one night into a file outside every repository; the supervisor admits nothing else                                                           | supervisor      | PROPOSED | A wiring test: an eligible task that is not on the list is never started; an empty list starts nothing and says so once     |
 | RM1-02 | **Classifier after AO #110.** A Codex block is an operator item, never a future wake; two passes with no state change stop the run and notify once                                                           | supervisor      | PROPOSED | Replayed records of 2026-09-15 give `OPERATOR_ONLY` and one notification, not 12 silent passes                               |
-| RM1-03a | **Writer-outcome record** (C3), AO part. Bounded, per-task evidence record `runtime/writer-outcomes/<task>.json`: original failure code, its static cause, closed process facts. Evidence only, never authority. Contract: `.agent-orchestrator/tasks/RM1-03A.md` (PR #112) | AO | APPROVED 2026-10-19 | Tests per failure class; task state byte-equal; an import pin and plan equality show it decides nothing |
+| RM1-03a | **Writer-outcome record** (C3), AO part. Bounded, per-task evidence record `runtime/writer-outcomes/<task>.json`: original failure code, its static cause, closed process facts. Evidence only, never authority. Contract: `.agent-orchestrator/tasks/RM1-03A.md` (PR #112) | AO | DONE (its delivery PR; record below) | Tests per failure class; task state byte-equal; an import pin and plan equality show it decides nothing |
 | RM1-03b | **Restart lane reads the record.** The supervisor's writer-restart lane refuses a recorded deterministic code (`AGENT_ARGUMENT_REFUSED`) | supervisor | PROPOSED | A supervisor-lab case: a recorded `AGENT_ARGUMENT_REFUSED` is never restarted |
 | RM1-04 | **Declared review mode** per repository in the operator registry: `codex` or `stop-at-reviewing` (today's hand practice, made declarative). D2 = A (2026-10-19): `stop-at-reviewing` for pilot P1 | AO + operator | PROPOSED; D2 decided | With `stop-at-reviewing` a run ends at `REVIEWING` with an attention item and zero reviewer launches (asserted by a test) |
 | RM1-05 | **Machine-wide reviewer lock**: a file lock under the user profile, so two AO processes cannot both launch Codex                                                                                             | AO              | PROPOSED | A dist-artefact test with two processes: one launch, one refusal                                                              |
@@ -331,6 +331,30 @@ supervisor.
 | RM1-08 | **Supervisor hygiene and safety/deployment preflight.** Merge list emptied (no merge lane in RM1); scheduled-task comment corrected; `dist` deployed from `main`; the A.2 checklist as one read-only check | supervisor + AO | PROPOSED | The preflight passes on the evening before a pilot night and names every failed item |
 | RM1-09 | **Pilot P1** (Appendix A): an evening rehearsal, then two nights                                                                                                                                            | operation       | PROPOSED | Appendix A's success criteria                                                                                                 |
 | RM1-10 | **Supervisor under version control** (D6 = A, 2026-10-19). Its source moves from `C:\Users\Max\AO-runs` into this repository: an ADR first, no secret committed, its labs in CI, a deployment to the Windows machine from a canonical commit, a way back, the Task Scheduler entry unchanged until the pilot. ADR and phase 1 (byte-equal copy, CI guards): PR #114 | AO repository | APPROVED (D6 = A); ADR first | The labs pass in CI; the deployed copy is byte-equal to a named commit; nothing secret is in Git |
+
+**RM1-03a delivery record (2026-10-19).**
+
+- **Commits.** `9627a9c` AO's writer (attended run). `05788fa` operator repair adopted by AO from
+  `BLOCKED_VERIFY` (the plan-equality test compared closures; a result the lease seam made up was
+  recorded with Git after the writer); AO's verify passed on it and the task reached `REVIEWING`.
+  `39e4c67` operator repair outside AO for defect D1 (below), byte-equal to the reviewed patch. AO
+  has no repair lane from `REVIEWING`, so its record stays `REVIEWING`; the task file is `DONE`.
+- **D1**, found by the independent review of `05788fa` and measured: after
+  `AGENT_LAUNCH_NOT_WITHDRAWN` and a MEMGUARD violation the evidence store ran two Git processes
+  while an `ESTABLISHED` launch mark could still stand (REQUIREMENT 7,
+  `tests/v2-07l-execution-lease.test.ts`). Fixed with the real launch state (operator decision:
+  variant B): the step reads the leased seam's own answer in memory and skips the store only then.
+- **Contract deviations, approved by the operator on 2026-10-19.** Section 3.3 "on every path": no
+  entry when the seam could not show the launch mark withdrawn. Section 5: `src/loop/loop-step.ts`
+  beyond section 3.3 (`writerLaunch` and both writer call sites), the only place that answer is
+  known.
+- **Checks.** Red first; break-tests 10 of 10 caught; 16 lease and writer suites 823 of 823; the full
+  `npm run verify` on the final head of the delivery branch; CI on its pull request. Independent
+  read-only reviews of `05788fa` and of the D1 fix. No Codex review ran and no human approval is
+  claimed.
+- **Open, for RM1-03b.** A write that was skipped or failed leaves an older entry as the newest,
+  so RM1-03b compares `recordedAt` with the state's `stateEnteredAt`. `loadWriterOutcomes` keeps
+  its read in `try`/`finally` without `catch`, as the verification-attempt store does.
 
 **Regression requirements.** All AO tests stay green, including `m4-01-unattended-completion`,
 `m3-01-persistent-scheduler` and the dist-artefact suites. The supervisor's own lab
