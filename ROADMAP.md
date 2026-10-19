@@ -123,7 +123,8 @@ RM0 baseline ──► RM1 unattended ──► RM2 remediation ──► RM3 ve
 3. **One move: the writer-outcome record (audit C3, gap G2.1) is RM1-03, not RM2.** The
    writer-restart lane of the supervisor restarts four writer failure codes, one of them
    deterministic (`AGENT_ARGUMENT_REFUSED`), because AO does not keep the code. A safe night needs
-   that record first. RM2 and RM6 then reuse it.
+   that record first, so RM1-03 is a prerequisite of pilot P1 (Appendix A.2). RM2 and RM6 then
+   reuse it.
 4. **RM2 before RM3.** 24 of 28 `resolve` acts came after a spent review budget, and 82 % of review
    rounds had findings. More automatic pull requests on top of that loop would mean more `resolve`,
    not more useful work.
@@ -133,7 +134,7 @@ RM0 baseline ──► RM1 unattended ──► RM2 remediation ──► RM3 ve
    stays non-blocking evidence until RM2-05 gives emulator flakes an operator-only re-run door.
 7. **RM6** starts with usage capture inside RM1-03; the rest waits for data.
 
-**The critical path is** RM0-01 → RM1-02, RM1-01, RM1-04 → pilot P1 → RM1-03 → RM2-01, RM2-02 →
+**The critical path is** RM0-01 → RM1-02, RM1-01, RM1-03, RM1-04 → pilot P1 → RM2-01, RM2-02 →
 RM3-01 (decision) → RM3-02.
 
 ## 5. Governance boundaries for every milestone
@@ -292,7 +293,8 @@ on its own, and leaves a morning report a person can act on in minutes.
 
 **Regression requirements.** All AO tests stay green, including `m4-01-unattended-completion`,
 `m3-01-persistent-scheduler` and the dist-artefact suites. The supervisor's own lab
-(`zera-grant-lab.mjs`, `zera-wiring-test.ps1`) passes, with new cases for RM1-01 and RM1-02.
+(`zera-grant-lab.mjs`, `zera-wiring-test.ps1`) passes, with new cases for RM1-01 and RM1-02, and
+for RM1-03 a case where the writer-restart lane refuses a recorded `AGENT_ARGUMENT_REFUSED`.
 
 **Measurable success.** Per night: approved tasks started; tasks that reached `REVIEWING` or
 `READY_FOR_PR`; human acts needed the next morning; passes with no progress (target: at most 2 before
@@ -584,8 +586,10 @@ new orchestrator. It needs decision D5.
 
 ### A.2 Entry prerequisites (all must hold; checked the evening before)
 
-1. RM1-01, RM1-02, RM1-04 and RM1-08 are `DONE`; RM1-06 is `DONE` or the operator accepts a morning
-   report written by hand from the records for the first night.
+1. RM1-01, RM1-02, RM1-03, RM1-04 and RM1-08 are `DONE`; RM1-06 is `DONE` or the operator accepts
+   a morning report written by hand from the records for the first night. RM1-03 counts only when
+   the supervisor's writer-restart lane reads the writer-outcome record and does not restart a
+   deterministic code (`AGENT_ARGUMENT_REFUSED`); see section 4, point 3.
 2. Decision D2 (review mode) and D5 (this pilot) are recorded.
 3. `dist/` is deployed from `main` (`dist/.ao-provenance.json` names the `main` HEAD, `CANONICAL`).
    `agent-loop doctor` passes. `agent-loop lease status` is `FREE` for every registered repository.
