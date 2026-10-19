@@ -127,6 +127,11 @@ import {
 } from '../agent/agent-outcome.js';
 import type { AgentRunner } from '../agent/agent-command.js';
 import { recordAgentInterruption } from '../agent/record-interruption.js';
+import { writerOutcomeFrom } from '../agent/writer-outcome.js';
+import {
+  recordWriterOutcome,
+  type WriterOutcomeRecordCode,
+} from '../agent/writer-outcome-store.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import type { InterruptionCheckpoint } from '../core/interruption-checkpoint.js';
 import { mintInterruptionCheckpoint } from '../core/internal/interruption-checkpoint.js';
@@ -305,6 +310,24 @@ export interface LoopStepResult {
    * configured driver stopped it.
    */
   readonly commit: CommitTaskWorkResult | null;
+  /**
+   * What became of this step's attempt to keep the writer's failure code on
+   * disk (RM1-03A), or `null` when no writer failed in this step.
+   *
+   * Filled by `recordInterruption` alone, on every path out of it, after the
+   * state write was attempted. Evidence only: the outcome, the state and
+   * everything a later step does are the same whether this landed or not, and a
+   * store that refused is reported here rather than thrown.
+   */
+  readonly writerOutcomeEvidence: WriterOutcomeEvidence | null;
+}
+
+/** What the writer-outcome write did. Reported, never persisted in the task state. */
+export interface WriterOutcomeEvidence {
+  readonly recorded: boolean;
+  /** The store's own code, or `RECORDER_THREW` when the store broke its promise not to throw. */
+  readonly code: WriterOutcomeRecordCode | 'RECORDER_THREW';
+  readonly path: string | null;
 }
 
 /** What the loop must be told about the world. */
@@ -496,6 +519,7 @@ function result(from: Partial<LoopStepResult> & { readonly outcome: LoopStepOutc
     scope: null,
     permissionDenials: null,
     commit: null,
+    writerOutcomeEvidence: null,
     ...from,
   });
 }
@@ -946,9 +970,13 @@ async function recordInterruption(
       : UNSETTLED;
 
   // The scope gate refused, and it has already made this step's one durable
-  // write. Returned unchanged: a second write here is the invariant this whole
-  // module rests on.
-  if (settlement.kind === 'BLOCKED') return settlement.result;
+  // write. Returned unchanged but for the writer-outcome evidence: a second
+  // state write here is the invariant this whole module rests on, and the
+  // evidence is not a state write.
+  if (settlement.kind === 'BLOCKED') {
+    const writerOutcomeEvidence = await recordWriterOutcomeEvidence(current, writer, deps);
+    return Object.freeze({ ...settlement.result, writerOutcomeEvidence });
+  }
 
   const fallback: AgentBlockEvidence = {
     blockedAgent: 'claude',
@@ -961,13 +989,56 @@ async function recordInterruption(
     { now, fallback, checkpoint: settlement.checkpoint, ...leaseAdvanceOptions(deps) },
   );
 
+  // After the state write was attempted, on both of its endings. Its result
+  // decides nothing below: the outcome is chosen from `record` alone.
+  const writerOutcomeEvidence = await recordWriterOutcomeEvidence(current, writer, deps);
+
   // What Git said is true whether or not the write landed, so both endings
   // carry it — the same rule `saved()` applies to a refused scope write.
-  const measured = { scope: settlement.scope, commit: settlement.commit };
+  const measured = { scope: settlement.scope, commit: settlement.commit, writerOutcomeEvidence };
   if (record.outcome === 'STATE_NOT_RECORDED') {
     return result({ outcome: 'STATE_NOT_RECORDED', save: record.save, ...measured });
   }
   return result({ outcome: 'BLOCKED', state: record.state, save: record.save, ...measured });
+}
+
+/**
+ * Keeps the failed writer's original code on disk, beside the task record, as
+ * evidence only (RM1-03A).
+ *
+ * `recordAgentInterruption` is given the disposition and the block, and eight
+ * codes share `AGENT_NEEDS_ATTENTION` — so without this the task record of a
+ * deterministic refusal and of a transient process failure are byte-identical.
+ *
+ * The lease and the Git runner are the ones this step already holds: the store
+ * re-proves the lease immediately before its write, and asks Git through the
+ * fenced seam whether the record's path is ignored. Never throws. A store that
+ * refuses, or one that breaks its own promise and throws, is reported and
+ * changes nothing else.
+ */
+async function recordWriterOutcomeEvidence(
+  current: StateLoadSuccess,
+  writer: ClaudeWriterFailed,
+  deps: LoopDependencies & { readonly phase: 'IMPLEMENT' | 'REMEDIATE'; readonly round: number },
+): Promise<WriterOutcomeEvidence> {
+  const state = current.state;
+  const git = leasedGit(deps);
+  try {
+    const written = await recordWriterOutcome({
+      repositoryRoot: state.repositoryRoot,
+      taskId: state.taskId,
+      entry: writerOutcomeFrom(writer, {
+        recordedAt: deps.now,
+        phase: deps.phase,
+        round: deps.round,
+      }),
+      leaseHolds: () => leaseHolds(deps),
+      checkIgnored: (relativePath) => askRuntimeIgnored(git, state.repositoryRoot, relativePath),
+    });
+    return Object.freeze({ recorded: written.recorded, code: written.code, path: written.path });
+  } catch {
+    return Object.freeze({ recorded: false, code: 'RECORDER_THREW' as const, path: null });
+  }
 }
 
 /**

@@ -203,6 +203,27 @@ function verificationAttemptLines(load: RunPlan['verificationAttempts']): readon
   return out;
 }
 
+/**
+ * The writer-outcome line (RM1-03A): the newest failure code, `none` with no
+ * record, `unreadable` for any other reading. One line, and it decides nothing.
+ *
+ * Every value printed is closed — a code, a phase, a round and an ISO instant
+ * the record's schema validated — so nothing foreign can reach the console here.
+ */
+function writerOutcomeLines(load: RunPlan['writerOutcome']): readonly string[] {
+  if (load === null) return [];
+  if (load.reading === 'ABSENT') return [line('Writer outcome', 'none')];
+  const outcomes = load.reading === 'WRITER_OUTCOME_HISTORY' ? load.record?.outcomes : undefined;
+  const newest = outcomes === undefined ? undefined : outcomes[outcomes.length - 1];
+  if (newest === undefined) return [line('Writer outcome', 'unreadable')];
+  return [
+    line(
+      'Writer outcome',
+      `${newest.code} (${newest.phase} r${String(newest.round)}, ${newest.recordedAt})`,
+    ),
+  ];
+}
+
 function excerptLines(label: string, excerpt: readonly string[]): readonly string[] {
   if (excerpt.length === 0) return [`      ${label}: (nothing recorded)`];
   return [`      ${label}:`, ...excerpt.map((text) => `      | ${text}`)];
@@ -291,6 +312,7 @@ export function renderRunPlan(
   }
 
   lines.push(...verificationAttemptLines(plan.verificationAttempts));
+  lines.push(...writerOutcomeLines(plan.writerOutcome));
 
   lines.push(
     line('Reasons', codes(plan.reasonCodes)),
