@@ -126,6 +126,18 @@ function Get-ZeraArg([object[]]$argv, [string]$name) {
     return $null
 }
 
+# Every parameter is written as its name and, for a folder, a separate value. The colon form
+# (-StateDir:D:\x, -DryRun:$true) and a splat arrive in $args as "-StateDir:" and a value, which
+# Get-ZeraArg and the -DryRun check would not see: the state would silently go to the default
+# folder, and a dry run would run live. Refused instead, before anything is read or written.
+function Assert-ZeraArgForms([object[]]$argv) {
+    foreach ($a in $argv) {
+        if ("$a" -match '^-(StateDir|AoRoot|RepoRoot|DryRun):') {
+            throw "write -$($Matches[1]) without a colon: the colon form and a splat are refused"
+        }
+    }
+}
+
 # The whole path table, and the only place a path is decided. Pure: it reads
 # nothing but its arguments (the environment variable is the default of one of
 # them) and touches no file, so a test can call it alone.
@@ -135,7 +147,8 @@ function Get-ZeraArg([object[]]$argv, [string]$name) {
 # \state), changes meaning with the current location or drive -- under the
 # Push-Location into the AO root below, the retry ledger would be read and
 # written somewhere other than the state folder. A ZERA_STATE_DIR that is set
-# but blank is refused, as a blank -StateDir is.
+# but blank is refused, as a blank -StateDir is. The match is case-exact: -match
+# folds case by culture and reads a Kelvin sign as the drive letter K.
 function Resolve-ZeraPaths {
     param(
         [string]$SourceDir,
@@ -152,7 +165,7 @@ function Resolve-ZeraPaths {
     if ([string]::IsNullOrWhiteSpace($AoRoot))   { $AoRoot   = 'D:\AgentOrchestrator' }
     if ([string]::IsNullOrWhiteSpace($RepoRoot)) { $RepoRoot = 'D:\Workspaces_VSCode\HealthApp' }
     foreach ($dir in @($SourceDir, $StateDir, $AoRoot, $RepoRoot)) {
-        if ([string]::IsNullOrWhiteSpace($dir) -or -not ($dir -match '^[A-Za-z]:\\' -or $dir -match '^\\\\[^\\]+\\[^\\]+')) {
+        if ([string]::IsNullOrWhiteSpace($dir) -or -not ($dir -cmatch '^[A-Za-z]:\\' -or $dir -cmatch '^\\\\[^\\]+\\[^\\]+')) {
             throw "not an absolute folder: '$dir'"
         }
     }
@@ -173,6 +186,8 @@ function Resolve-ZeraPaths {
         TranscriptDir = Join-Path $StateDir 'transcripts'
     }
 }
+
+Assert-ZeraArgForms $args
 
 $ZeraPaths = Resolve-ZeraPaths -SourceDir $PSScriptRoot `
     -StateDir (Get-ZeraArg $args '-StateDir') `

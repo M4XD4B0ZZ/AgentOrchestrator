@@ -198,7 +198,9 @@ function, `Resolve-ZeraPaths`, decides every path; nothing else builds one.
 No state file is read from the source folder and no script from the state
 folder. Every folder must be fully qualified — a drive letter and a backslash, or a UNC share;
 `D:state` and `\state` are refused. An empty or blank `-StateDir`, and a `ZERA_STATE_DIR` that
-is set but blank, are refused rather than read as "use the default".
+is set but blank, are refused rather than read as "use the default". Write each parameter as
+`-Name <value>` and `-DryRun` bare: the colon form (`-StateDir:<dir>`, `-DryRun:$true`) and a splat
+are refused, because they reach the script in a shape it would otherwise not recognise.
 
 The machine paths are parameters too: `-AoRoot <dir>` (default
 `D:\AgentOrchestrator`) and `-RepoRoot <dir>` (default

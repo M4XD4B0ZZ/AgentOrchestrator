@@ -420,24 +420,79 @@ foreach ($a in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Lan
 };
 
 describe.runIf(process.platform === 'win32')('RM1-10B repair: a wrong path argument stops the supervisor', () => {
-  it('refuses a parameter name with an empty or blank value', () => {
+  it('refuses a parameter name with no value, an empty one or a blank one', () => {
     const run = runPowerShell(`${loadFunctions(['Get-ZeraArg'])}
 foreach ($v in @('', '   ')) { try { Get-ZeraArg @('-StateDir', $v) '-StateDir' | Out-Null; "BLANK[$($v.Length)]=accepted" } catch { "BLANK[$($v.Length)]=refused" } }
+try { Get-ZeraArg @('-StateDir') '-StateDir' | Out-Null; 'LAST=accepted' } catch { 'LAST=refused' }
+try { Get-ZeraArg @('-StateDir', '-DryRun') '-StateDir' | Out-Null; 'SWITCH=accepted' } catch { 'SWITCH=refused' }
 try { Get-ZeraArg @('-StateDir', 'D:\\x') '-StateDir' | Out-Null; 'VALUE=accepted' } catch { 'VALUE=refused' }
 `);
     expect(run.status, run.stdout + run.stderr).toBe(0);
     expect(run.stdout).toMatch(/^BLANK\[0\]=refused\s*$/m);
     expect(run.stdout).toMatch(/^BLANK\[3\]=refused\s*$/m);
+    expect(run.stdout).toMatch(/^LAST=refused\s*$/m);
+    expect(run.stdout).toMatch(/^SWITCH=refused\s*$/m);
     expect(run.stdout).toMatch(/^VALUE=accepted\s*$/m);
   }, 150_000);
 
-  it('accepts only fully qualified folders', () => {
-    const cases = ['C:state', '\\state', 'relative\\state', 'D:\\state', '\\\\host\\share\\state'];
+  it('refuses the colon form and a splat of every parameter, as PowerShell really delivers them', () => {
+    // A script that holds only the guard and then says PASSED, called in-process the ways an operator
+    // or a wrapper would call the supervisor: what reaches $args is PowerShell's, not this test's.
+    const inner = join(scratchDir('argv'), 'guard.ps1');
+    writeFileSync(inner, `${loadFunctions(['Assert-ZeraArgForms'])}\nAssert-ZeraArgForms $args\n'PASSED'\n`, 'utf8');
+    const run = runPowerShell(`
+$inner = ${psQuote(inner)}
+function Probe([string]$label, [scriptblock]$call) {
+    try { $out = & $call; if ("$out" -match 'PASSED') { "$label=accepted" } else { "$label=silent" } } catch { "$label=refused" }
+}
+Probe 'COLON' { & $inner -StateDir:D:\\x }
+Probe 'COLON_EMPTY' { & $inner -StateDir:'' }
+Probe 'COLON_NULL' { & $inner -StateDir:$null }
+Probe 'SPLAT' { $p = @{ StateDir = 'D:\\x' }; & $inner @p }
+Probe 'AOROOT' { & $inner -AoRoot:D:\\x }
+Probe 'REPOROOT' { & $inner -reporoot:D:\\x }
+Probe 'DRYRUN' { & $inner -DryRun:$true }
+Probe 'PLAIN' { & $inner -StateDir 'D:\\x' -AoRoot 'D:\\y' -DryRun }
+`);
+    expect(run.status, run.stdout + run.stderr).toBe(0);
+    for (const label of ['COLON', 'COLON_EMPTY', 'COLON_NULL', 'SPLAT', 'AOROOT', 'REPOROOT', 'DRYRUN']) {
+      expect(run.stdout, label).toMatch(new RegExp(`^${label}=refused\\s*$`, 'm'));
+    }
+    expect(run.stdout).toMatch(/^PLAIN=accepted\s*$/m);
+  }, 150_000);
+
+  it('runs the guard on the script level, on $args, before the path table is built', () => {
+    const run = runPowerShell(`
+$t = $null; $e = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(${psQuote(SUPERVISOR)}, [ref]$t, [ref]$e)
+if ($e.Count -gt 0) { throw 'the supervisor does not parse' }
+$top = $ast.EndBlock.Statements
+$guard = @($top | Where-Object { $_.Extent.Text -match '^Assert-ZeraArgForms\\b' })
+$table = @($top | Where-Object { $_.Extent.Text -match '^\\$ZeraPaths\\s*=\\s*Resolve-ZeraPaths\\b' })
+'GUARDS=' + $guard.Count
+'TABLES=' + $table.Count
+if ($guard.Count -eq 1) { 'GUARD_TEXT=' + $guard[0].Extent.Text }
+if ($guard.Count -eq 1 -and $table.Count -eq 1) { 'ORDER=' + ($guard[0].Extent.StartOffset -lt $table[0].Extent.StartOffset) }
+`);
+    expect(run.status, run.stdout + run.stderr).toBe(0);
+    expect(run.stdout).toMatch(/^GUARDS=1\s*$/m);
+    expect(run.stdout).toMatch(/^TABLES=1\s*$/m);
+    expect(run.stdout).toMatch(/^GUARD_TEXT=Assert-ZeraArgForms \$args\s*$/m);
+    expect(run.stdout).toMatch(/^ORDER=True\s*$/m);
+  }, 150_000);
+
+  it('accepts only fully qualified folders, for every folder parameter', () => {
+    const cases = ['C:state', '\\state', 'relative\\state', '\\\\host', 'x\\D:\\y', 'D:\\state', '\\\\host\\share\\state'];
     const env = { ...process.env };
     delete env.ZERA_STATE_DIR;
     const run = runPowerShell(
       `${loadFunctions(['Resolve-ZeraPaths'])}
 foreach ($d in @(${cases.map(psQuote).join(', ')})) { try { Resolve-ZeraPaths -SourceDir 'D:\\src' -StateDir $d | Out-Null; "DIR[$d]=accepted" } catch { "DIR[$d]=refused" } }
+$kelvin = "$([char]0x212A):\\state"
+try { Resolve-ZeraPaths -SourceDir 'D:\\src' -StateDir $kelvin | Out-Null; 'KELVIN=accepted' } catch { 'KELVIN=refused' }
+try { Resolve-ZeraPaths -SourceDir 'D:\\src' -AoRoot 'D:ao' | Out-Null; 'AOROOT=accepted' } catch { 'AOROOT=refused' }
+try { Resolve-ZeraPaths -SourceDir 'D:\\src' -RepoRoot '\\repo' | Out-Null; 'REPOROOT=accepted' } catch { 'REPOROOT=refused' }
+try { Resolve-ZeraPaths -SourceDir 'src' | Out-Null; 'SOURCE=accepted' } catch { 'SOURCE=refused' }
 `,
       env,
     );
@@ -447,8 +502,15 @@ foreach ($d in @(${cases.map(psQuote).join(', ')})) { try { Resolve-ZeraPaths -S
     expect(verdict('C:state')).toBe('refused');
     expect(verdict('\\state')).toBe('refused');
     expect(verdict('relative\\state')).toBe('refused');
+    expect(verdict('\\\\host')).toBe('refused');
+    expect(verdict('x\\D:\\y')).toBe('refused');
     expect(verdict('D:\\state')).toBe('accepted');
     expect(verdict('\\\\host\\share\\state')).toBe('accepted');
+    // A Kelvin sign is no drive letter: -match would fold it to K, -cmatch does not.
+    expect(run.stdout).toMatch(/^KELVIN=refused\s*$/m);
+    expect(run.stdout).toMatch(/^AOROOT=refused\s*$/m);
+    expect(run.stdout).toMatch(/^REPOROOT=refused\s*$/m);
+    expect(run.stdout).toMatch(/^SOURCE=refused\s*$/m);
   }, 150_000);
 
   it('refuses a ZERA_STATE_DIR that is set but blank, and ignores it when -StateDir is given', () => {
@@ -457,7 +519,7 @@ foreach ($d in @(${cases.map(psQuote).join(', ')})) { try { Resolve-ZeraPaths -S
 try { $t = Resolve-ZeraPaths -SourceDir 'D:\\src'; "ENV_BLANK=accepted:$($t['StateDir'])" } catch { 'ENV_BLANK=refused' }
 try { $t = Resolve-ZeraPaths -SourceDir 'D:\\src' -StateDir 'D:\\state'; "ENV_BLANK_WITH_PARAM=accepted:$($t['StateDir'])" } catch { 'ENV_BLANK_WITH_PARAM=refused' }
 `,
-      { ...process.env, ZERA_STATE_DIR: '   ' },
+      { ...process.env, ZERA_STATE_DIR: ' ' },
     );
     expect(run.status, run.stdout + run.stderr).toBe(0);
     expect(run.stdout).toMatch(/^ENV_BLANK=refused\s*$/m);
@@ -487,7 +549,7 @@ describe.runIf(process.platform === 'win32')('RM1-10B repair: the script level i
 });
 
 describe.runIf(process.platform === 'win32')('RM1-10B repair: Notify names no channel, with verbose on', () => {
-  it('prints only the closed failure line, and nothing else, through a 200 and an echoing 500', async () => {
+  it('prints only the closed failure lines, and nothing else, through a 200, an echoing 500 and a bad URL', async () => {
     const sentinel = `zera-sentinel-${randomBytes(8).toString('hex')}`;
     const hits: number[] = [];
     const server = createServer((req, res) => {
@@ -502,7 +564,12 @@ describe.runIf(process.platform === 'win32')('RM1-10B repair: Notify names no ch
       const port = typeof address === 'object' && address !== null ? address.port : 0;
       const home = scratchDir('home');
       mkdirSync(join(home, '.agent-orchestrator'));
-      writeFileSync(join(home, '.agent-orchestrator', 'notify.yaml'), `endpoint: http://127.0.0.1:${port}\ntopic: ${sentinel}\n`);
+      const notifyFile = join(home, '.agent-orchestrator', 'notify.yaml');
+      writeFileSync(notifyFile, `endpoint: http://127.0.0.1:${port}\ntopic: ${sentinel}\n`);
+      // Port 99999 is not a port: the request fails before it is sent, with a message that names the
+      // whole URL, topic included — the leak a printed exception text would carry.
+      const badFile = join(scratchDir('bad'), 'notify.yaml');
+      writeFileSync(badFile, `endpoint: http://127.0.0.1:99999\ntopic: ${sentinel}\n`);
       const state = scratchDir('state');
       const transcript = join(state, 'transcript.txt');
       const run = await runPowerShellAsync(
@@ -513,23 +580,30 @@ $VerbosePreference = 'Continue'; $DebugPreference = 'Continue'; $InformationPref
 Start-Transcript -Path ${psQuote(transcript)} | Out-Null
 Notify 'Zera probe [200]' 'probe body'
 Notify 'Zera probe [500]' 'probe body'
+[System.IO.File]::Copy(${psQuote(badFile)}, ${psQuote(notifyFile)}, $true)
+Notify 'Zera probe [bad]' 'probe body'
 Stop-Transcript | Out-Null
 `,
         { ...process.env, USERPROFILE: home },
       );
       const output = run.stdout + run.stderr + (existsSync(transcript) ? readFileSync(transcript, 'utf8') : '');
       expect(run.status, output).toBe(0);
-      // Both answers were really given, so the absences below are not vacuous.
+      // Both served answers were really given, so the absences below are not vacuous.
       expect(hits).toEqual([200, 500]);
       expect(output).not.toContain(sentinel);
       expect(output).not.toContain(`127.0.0.1:${port}`);
-      // Verbose lines of ordinary cmdlets (the stamp file) are allowed; a leak in one of them is
-      // caught by the two absences above. Every other line must be exactly the closed one.
+      expect(output).not.toContain('99999');
+      // Nothing on the error stream, and on stdout exactly the two closed lines — no other line, in any
+      // language (no prefix is filtered out).
+      expect(run.stderr).toBe('');
       const plain = run.stdout
         .split(/\r?\n/)
         .map((text) => text.trim())
-        .filter((text) => text !== '' && !/^(VERBOSE|DEBUG):/.test(text));
-      expect(plain).toEqual(['notify failed: the notification endpoint did not take the message -- Zera probe [500]']);
+        .filter((text) => text !== '');
+      expect(plain).toEqual([
+        'notify failed: the notification endpoint did not take the message -- Zera probe [500]',
+        'notify failed: the notification endpoint did not take the message -- Zera probe [bad]',
+      ]);
     } finally {
       server.close();
     }
