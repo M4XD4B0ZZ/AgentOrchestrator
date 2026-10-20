@@ -42,7 +42,7 @@ directly under `D:\`.
 | Deployed runtime | `dist/` is written only by `npm run deploy` | never write into `dist/` from scratch work |
 | MEMGUARD | it guards the memory folders, not repository paths; `.scratch/` changes nothing there | — |
 | TypeScript, the build, the tests | `tsconfig.json` includes `src/`, `tests/`, `scripts/`; `tsconfig.build.json` includes `src/`; Vitest collects `tests/**/*.test.ts` | — |
-| CodeGraph | its live watcher reads the root `.gitignore`. Measured 2026-10-20: with only a `.git/info/exclude` entry, the watcher indexed a `.ts` file under `.scratch/`; a full index and `codegraph sync` honour both | `codegraph files` lists no `.scratch/` path |
+| CodeGraph | its live watcher reads the root `.gitignore` **once, when its background service starts**. Measured 2026-10-20: with only a `.git/info/exclude` entry, the watcher indexed a `.ts` file under `.scratch/`; a full index and `codegraph sync` honour both. A service that was already running when `/.scratch/` entered `.gitignore` (PR #121) still indexes new code files there until it is restarted. Restart: close every Claude Code session that uses this repository (the service runs under its CodeGraph MCP server) or stop it with `codegraph daemon`; the next session starts a fresh one. Until then, run `codegraph sync .` after writing code into `.scratch/` | `codegraph files` lists no `.scratch/` path; a new `.ts` probe there is not found by `codegraph query` |
 
 ## Git worktrees under `.scratch/worktrees/`
 
@@ -52,7 +52,8 @@ looks for packages in every parent folder. A folder under `.scratch/` without it
 `node_modules` resolves `vitest` from `D:\AgentOrchestrator\node_modules` (measured 2026-10-20), so
 `npx` and `node` there silently use the main checkout's packages. Rules:
 
-1. Only once the `.gitignore` entry is on `main` and in the checkout (see CodeGraph above).
+1. Only once the `.gitignore` entry is on `main` and in the checkout, and the CodeGraph service has
+   been restarted since (see CodeGraph above) — otherwise it indexes the worktree's whole source.
 2. Run `npm ci` in the worktree before any `npx`, `node` or test command. Check that the test
    runner resolves inside the worktree — for this repository,
    `node -p "require.resolve('vitest/package.json')"`; for HealthApp, the same with `jest`. The
