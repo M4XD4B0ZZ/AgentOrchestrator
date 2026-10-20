@@ -337,28 +337,42 @@ supervisor.
 - **Commits.** `9627a9c` AO's writer (attended run). `05788fa` operator repair adopted by AO from
   `BLOCKED_VERIFY` (the plan-equality test compared closures; a result the lease seam made up was
   recorded with Git after the writer); AO's verify passed on it and the task reached `REVIEWING`.
-  `39e4c67` operator repair outside AO for defect D1 (below), byte-equal to the reviewed patch. AO
-  has no repair lane from `REVIEWING`, so its record stays `REVIEWING`; the task file is `DONE`.
+  `39e4c67` operator repair outside AO for defect D1 (below), byte-equal to the reviewed patch.
+  `7cfd57b` operator repair outside AO for defect D-1 (below), 2026-10-20. AO has no repair lane
+  from `REVIEWING`, so its record stays `REVIEWING`; the task file is `DONE`.
 - **D1**, found by the independent review of `05788fa` and measured: after
   `AGENT_LAUNCH_NOT_WITHDRAWN` and a MEMGUARD violation the evidence store ran two Git processes
   while an `ESTABLISHED` launch mark could still stand (REQUIREMENT 7,
   `tests/v2-07l-execution-lease.test.ts`). Fixed with the real launch state (operator decision:
   variant B): the step reads the leased seam's own answer in memory and skips the store only then.
+- **D-1**, found by the independent review of the delivery pull request and measured: a record
+  another process holds a byte-range lock on made `readSync` throw `EBUSY` inside
+  `loadWriterOutcomes`, so the read-only `run` plan exited 1 instead of printing
+  `Writer outcome: unreadable`. Repaired before delivery (operator decision 2026-10-20, option A):
+  one `catch` reads a failed system call (an error naming its `syscall` and errno) as `MALFORMED`;
+  any other error is thrown. No new process, no change to the lease, the decision or the task state.
 - **Contract deviations, approved by the operator on 2026-10-19.** Section 3.3 "on every path": no
   entry when the seam could not show the launch mark withdrawn. Section 5: `src/loop/loop-step.ts`
   beyond section 3.3 (`writerLaunch` and both writer call sites), the only place within the
   contract's files where that answer is known.
 - **Checks.** Red first; break-tests 10 of 10 caught; 16 lease and writer suites 823 of 823;
-  independent read-only reviews of `05788fa`, of the D1 fix and of the delivery diff. The full
-  `npm run verify` and CI on the pull request are the gates before merge; their results are in the
-  pull request, not in this file. No Codex review ran. No approval of this delivery is claimed: a
+  independent read-only reviews of `05788fa`, of the D1 fix and of the delivery diff. For D-1: red
+  first (2 failed, 64 passed on `2684104`), 66 of 66 with the repair; 11 planted faults, 10 caught —
+  the one survivor, the write-side byte cap, cannot be reached by 8 bounded entries. The full
+  `npm run verify` and CI on the pull request's final head are the gates before merge; their results
+  are in the pull request, not in this file. CI results from before `7cfd57b` do not cover D-1. No
+  Codex review ran. No approval of this delivery is claimed: a
   person's code review (redaction, atomic write, bounded history, import pin) is still owed before
   merge.
 - **README.** The section "A failed writer keeps its original code (RM1-03A)" is the operator's
   section that contract section 7 names.
 - **Open, for RM1-03b.** A write that was skipped or failed leaves an older entry as the newest,
-  so RM1-03b compares `recordedAt` with the state's `stateEnteredAt`. `loadWriterOutcomes` keeps
-  its read in `try`/`finally` without `catch`, as the verification-attempt store does.
+  so RM1-03b compares `recordedAt` with the state's `stateEnteredAt`.
+- **Open, outside this delivery.** Six sibling loaders keep their read in `try`/`finally` without
+  `catch` — the D-1 shape — in `verify/verification-attempt-store.ts`,
+  `verify/verification-pass-store.ts`, `deliver/delivery-conclusion-store.ts`,
+  `deliver/delivery-evidence-store.ts`, `deliver/merge-reconciliation-store.ts` and
+  `deliver/post-merge-verification-store.ts`. Seen by reading, not measured; a separate item.
 
 **Regression requirements.** All AO tests stay green, including `m4-01-unattended-completion`,
 `m3-01-persistent-scheduler` and the dist-artefact suites. The supervisor's own lab

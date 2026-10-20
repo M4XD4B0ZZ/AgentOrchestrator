@@ -3011,6 +3011,12 @@ and a read-back. An unreadable existing history is never overwritten.
 or `unreadable`. The record is evidence only. It never changes the state, the outcome or a later
 step; a failed write is reported on the step and never thrown; and only `run/run-plan.ts` reads it.
 
+**A locked record reads `unreadable` (D-1).** A record that cannot be opened, or that opens and then
+refuses to be read — another process holding a byte-range lock on it answers `EBUSY` — is read as
+`unreadable`: the plan decides exactly as with no record, and the store refuses to overwrite it
+(`EXISTING_HISTORY_UNREADABLE`). Only a failed system call is read that way. Any other error inside
+the loader is a defect in this code and is thrown, not hidden.
+
 **One path writes nothing.** When the leased agent seam answers `AGENT_LAUNCH_NOT_WITHDRAWN` (it
 could not show that the writer's `ESTABLISHED` launch mark was withdrawn), the step must start no
 further process (REQUIREMENT 7, `tests/v2-07l-execution-lease.test.ts`), and the store would ask Git.
