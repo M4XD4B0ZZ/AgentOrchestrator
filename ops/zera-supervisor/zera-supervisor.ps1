@@ -111,12 +111,13 @@ Set-StrictMode -Version Latest
 # to the first of them instead of meaning a dry run.
 
 # The value after a named argument, or $null when it is absent. A name with no
-# value after it is refused rather than read as "absent": falling back to the
-# default would put the state in a folder the operator did not ask for.
+# value after it, or with an empty or blank one, is refused rather than read as
+# "absent": falling back to the default would put the state in a folder the
+# operator did not ask for.
 function Get-ZeraArg([object[]]$argv, [string]$name) {
     for ($i = 0; $i -lt $argv.Count; $i++) {
         if ("$($argv[$i])" -eq $name) {
-            if ($i + 1 -ge $argv.Count -or "$($argv[$i + 1])" -like '-*') {
+            if ($i + 1 -ge $argv.Count -or "$($argv[$i + 1])" -like '-*' -or [string]::IsNullOrWhiteSpace("$($argv[$i + 1])")) {
                 throw "$name needs a value"
             }
             return "$($argv[$i + 1])"
@@ -129,9 +130,12 @@ function Get-ZeraArg([object[]]$argv, [string]$name) {
 # nothing but its arguments (the environment variable is the default of one of
 # them) and touches no file, so a test can call it alone.
 #
-# Every folder must be absolute. A relative one would change meaning under the
-# Push-Location into the AO root below, and the retry ledger would be read and
-# written somewhere other than the state folder.
+# Every folder must be fully qualified: a drive letter and a backslash, or a UNC
+# share. A relative folder, and a rooted one that is not fully qualified (D:state,
+# \state), changes meaning with the current location or drive -- under the
+# Push-Location into the AO root below, the retry ledger would be read and
+# written somewhere other than the state folder. A ZERA_STATE_DIR that is set
+# but blank is refused, as a blank -StateDir is.
 function Resolve-ZeraPaths {
     param(
         [string]$SourceDir,
@@ -140,12 +144,15 @@ function Resolve-ZeraPaths {
         [string]$AoRoot,
         [string]$RepoRoot
     )
+    if ([string]::IsNullOrWhiteSpace($StateDir) -and $EnvStateDir.Length -gt 0 -and [string]::IsNullOrWhiteSpace($EnvStateDir)) {
+        throw 'ZERA_STATE_DIR is set but blank'
+    }
     if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = $EnvStateDir }
     if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = 'C:\Users\Max\AO-runs' }
     if ([string]::IsNullOrWhiteSpace($AoRoot))   { $AoRoot   = 'D:\AgentOrchestrator' }
     if ([string]::IsNullOrWhiteSpace($RepoRoot)) { $RepoRoot = 'D:\Workspaces_VSCode\HealthApp' }
     foreach ($dir in @($SourceDir, $StateDir, $AoRoot, $RepoRoot)) {
-        if ([string]::IsNullOrWhiteSpace($dir) -or -not [System.IO.Path]::IsPathRooted($dir)) {
+        if ([string]::IsNullOrWhiteSpace($dir) -or -not ($dir -match '^[A-Za-z]:\\' -or $dir -match '^\\\\[^\\]+\\[^\\]+')) {
             throw "not an absolute folder: '$dir'"
         }
     }

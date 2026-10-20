@@ -196,7 +196,9 @@ function, `Resolve-ZeraPaths`, decides every path; nothing else builds one.
 | state | `-StateDir <dir>`, else `$env:ZERA_STATE_DIR`, else `C:\Users\Max\AO-runs` | `zera-unattended-status.txt`, `zera-retry-budget.json`, `zera-supervisor.lock`, `zera-last-notify.txt`, `transcripts/` |
 
 No state file is read from the source folder and no script from the state
-folder. Every folder must be absolute.
+folder. Every folder must be fully qualified — a drive letter and a backslash, or a UNC share;
+`D:state` and `\state` are refused. An empty or blank `-StateDir`, and a `ZERA_STATE_DIR` that
+is set but blank, are refused rather than read as "use the default".
 
 The machine paths are parameters too: `-AoRoot <dir>` (default
 `D:\AgentOrchestrator`) and `-RepoRoot <dir>` (default
@@ -265,7 +267,7 @@ node C:\Users\Max\AO-runs\zera-writer-death-grant.mjs --repository D:\Workspaces
 node C:\Users\Max\AO-runs\zera-delivery-gate.mjs --repository D:\Workspaces_VSCode\HealthApp --task CAPTURE-003 --canonical-branch chore/clean-arch-structure
 
 # re-verify the two new lanes. Both are read-only and touch nothing real.
-node C:\Users\Max\AO-runs\zera-grant-lab.mjs            # 49 cases, expects LAB_VERDICT = ALL_PASS
+node C:\Users\Max\AO-runs\zera-grant-lab.mjs --ao-root D:\AgentOrchestrator --source-dir C:\Users\Max\AO-runs --lab <empty temp folder> --budget <a file that does not exist>   # 49 cases, expects LAB_VERDICT = ALL_PASS
 powershell -ExecutionPolicy Bypass -File C:\Users\Max\AO-runs\zera-wiring-test.ps1   # 30 cases, expects WIRING_VERDICT = ALL_PASS
 
 # turn it on / off
