@@ -36,6 +36,11 @@ temp/
 *.tmp
 *.log
 
+# The operator scratch workspace: probes, labs, review notes, patches, reports.
+# Never committed, never read by AgentOrchestrator, the build or the tests. The
+# rule and its safety checks: docs/SCRATCH-WORKSPACE.md.
+/.scratch/
+
 # Local orchestrator runtime state. ONLY `runtime/` is ignored, and that is a
 # product requirement rather than a preference: `startTask` asks Git — with
 # `git check-ignore` — whether `.agent-orchestrator/runtime/<taskId>.json` is

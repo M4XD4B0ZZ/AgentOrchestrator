@@ -178,6 +178,11 @@ contract in plain German on one page. It is a summary and never an authority:
 where it and the operator guide disagree, the guide is right, and where the guide
 and the shipped code disagree, the code is.
 
+Scratch work on this repository — probes, labs, review notes, patches, reports —
+lives under `.scratch/` at the repository root, which Git ignores. The binding
+operator rule, its layout and its safety checks are in
+[`docs/SCRATCH-WORKSPACE.md`](docs/SCRATCH-WORKSPACE.md).
+
 ```powershell
 npm install
 npm run build          # writes build/. To change what the scheduled production
