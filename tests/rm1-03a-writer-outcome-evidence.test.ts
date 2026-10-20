@@ -25,9 +25,12 @@
  * in place.
  */
 
+import { spawn } from 'node:child_process';
 import {
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -334,6 +337,13 @@ function recordPath(root: string): string {
   if (!location.ok) throw new Error('location not derivable');
   return location.path;
 }
+
+/** An error carrying an errno code and nothing else, as an injected `open` throws it. */
+const errnoError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
+
+/** The shape Node gives a failed system call: an errno code and the call that failed. */
+const systemCallError = (code: string, syscall: string): NodeJS.ErrnoException =>
+  Object.assign(new Error(`${code}: ${syscall}`), { code, syscall, errno: -1 });
 
 /* ═════════════ 1. every failure class keeps its exact code ══════════════ */
 
@@ -857,6 +867,17 @@ describe('the record is bounded, and a loss is visible', () => {
     writeFileSync(path, ' '.repeat(MAX_WRITER_OUTCOME_RECORD_BYTES + 1));
     expect(loadWriterOutcomes(root, TASK_ID).reading).toBe('MALFORMED');
   });
+
+  it('refuses a valid record padded past the byte cap on read: only the size check can', async () => {
+    const root = scratch();
+    expect((await record(root, entryOf())).recorded).toBe(true);
+    const path = recordPath(root);
+    // Trailing whitespace keeps it valid JSON and a valid record; the size is all that is wrong.
+    writeFileSync(path, Buffer.concat([readFileSync(path), Buffer.alloc(MAX_WRITER_OUTCOME_RECORD_BYTES, 0x20)]));
+    const subject = { taskId: TASK_ID, repositoryRoot: root };
+    expect(readWriterOutcomes(JSON.parse(readFileSync(path, 'utf8')), subject).reading).toBe('WRITER_OUTCOME_HISTORY');
+    expect(loadWriterOutcomes(root, TASK_ID).reading).toBe('MALFORMED');
+  });
 });
 
 /* ═══════════════════ 4. closed values only ══════════════════════════════ */
@@ -1112,6 +1133,44 @@ describe('a failed evidence write changes nothing else', () => {
       expect(readFileSync(recordPath(root), 'utf8')).toBe(foreign);
     });
 
+    it('refuses an entry its own reader would refuse, before anything is written', async () => {
+      const root = scratch();
+      const good = entryOf();
+      const bad = { ...good, process: { ...good.process, durationMs: -1 } } as WriterOutcomeEntry;
+      const written = await record(root, bad);
+      expect(written).toMatchObject({ recorded: false, code: 'RECORD_CONTRACT_VIOLATION' });
+      expect(existsSync(recordPath(root))).toBe(false);
+    });
+
+    it('reports a read-back that does not match what was written', async () => {
+      const root = scratch();
+      // A different, valid record about the same task id, handed back on the read-back.
+      const other = scratch();
+      expect((await record(other, entryOf('AGENT_NONZERO_EXIT', 7))).recorded).toBe(true);
+      let opens = 0;
+      const open = (_path: string): number => {
+        opens += 1;
+        if (opens === 1) throw errnoError('ENOENT');
+        return openSync(recordPath(other), 'r');
+      };
+      const written = await record(root, entryOf('AGENT_NONZERO_EXIT', 1), { open });
+      expect(opens).toBe(2);
+      expect(written).toMatchObject({ recorded: false, code: 'READBACK_FAILED' });
+    });
+
+    it('reads an open that fails for any reason but absence as unreadable, and never overwrites it', async () => {
+      const root = scratch();
+      expect((await record(root, entryOf('AGENT_ARGUMENT_REFUSED'))).recorded).toBe(true);
+      const before = readFileSync(recordPath(root));
+      const denied = (): number => {
+        throw errnoError('EACCES');
+      };
+      expect(loadWriterOutcomes(root, TASK_ID, denied).reading).toBe('MALFORMED');
+      const written = await record(root, entryOf('AGENT_NONZERO_EXIT', 2), { open: denied });
+      expect(written).toMatchObject({ recorded: false, code: 'EXISTING_HISTORY_UNREADABLE' });
+      expect(readFileSync(recordPath(root)).equals(before)).toBe(true);
+    });
+
     it('lives under the repository root, never under the worktree', () => {
       const root = scratch();
       const location = deriveWriterOutcomeLocation(root, TASK_ID);
@@ -1312,5 +1371,113 @@ describe('the plan prints one writer-outcome line', () => {
 
     // No task in hand, no line.
     expect(writerLines({ ...absent, writerOutcome: null }, fixture.repository)).toEqual([]);
+  });
+});
+
+/* ═══════════ 9. an unreadable record is read, never thrown (D-1) ═══════════ */
+
+/** A second process holding a byte-range lock over the whole file, until released. */
+async function byteRangeLock(path: string): Promise<() => Promise<void>> {
+  const script =
+    `$fs = [IO.File]::Open('${path.replace(/'/g, "''")}', 'Open', 'ReadWrite', 'ReadWrite'); ` +
+    `$fs.Lock(0, $fs.Length); [Console]::Out.WriteLine('LOCKED'); [Console]::Out.Flush(); ` +
+    `[void][Console]::In.ReadLine(); $fs.Unlock(0, $fs.Length); $fs.Close()`;
+  const holder = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+  const closed = new Promise<void>((resolveClosed) => holder.on('close', () => resolveClosed()));
+  await new Promise<void>((resolveLocked, rejectLocked) => {
+    const timer = setTimeout(() => rejectLocked(new Error('the lock holder never locked')), 30_000);
+    holder.stdout.on('data', (data) => {
+      if (String(data).includes('LOCKED')) {
+        clearTimeout(timer);
+        resolveLocked();
+      }
+    });
+  });
+  return async () => {
+    holder.stdin.end('\n');
+    await closed;
+  };
+}
+
+describe('an unreadable record is read as unreadable, never thrown (D-1)', () => {
+  it.runIf(process.platform === 'win32')(
+    'a record another process has locked: the plan says unreadable and decides as before, a write refuses it',
+    async () => {
+      const fixture = await parkedPlanFixture();
+      const absent = await fixture.plan();
+      expect((await fixture.write(entryOf('AGENT_ARGUMENT_REFUSED'))).recorded).toBe(true);
+      const before = readFileSync(fixture.path);
+
+      const release = await byteRangeLock(fixture.path);
+      let lockedRead: unknown = null;
+      let locked: RunPlan | null = null;
+      let written: Awaited<ReturnType<typeof fixture.write>> | null = null;
+      let thrown: unknown = null;
+      try {
+        // The lock is real: Node's own read of the file is refused while it stands.
+        try {
+          readFileSync(fixture.path);
+        } catch (error: unknown) {
+          lockedRead = (error as NodeJS.ErrnoException).code;
+        }
+        locked = await fixture.plan();
+        written = await fixture.write(entryOf('AGENT_NONZERO_EXIT', 2));
+      } catch (error: unknown) {
+        thrown = error;
+      } finally {
+        await release();
+      }
+
+      expect(lockedRead).toBe('EBUSY');
+      expect(thrown).toBeNull();
+      expect(locked?.writerOutcome?.reading).toBe('MALFORMED');
+      expect(decided(locked as RunPlan)).toEqual(decided(absent));
+      expect(
+        renderRunPlan(locked as RunPlan, fixture.repository)
+          .split('\n')
+          .filter((text) => text.startsWith('Writer outcome')),
+      ).toEqual(['Writer outcome: unreadable']);
+      // Never overwritten: the write refused it, and the bytes are the ones from before the lock.
+      expect(written).toMatchObject({ recorded: false, code: 'EXISTING_HISTORY_UNREADABLE' });
+      expect(readFileSync(fixture.path).equals(before)).toBe(true);
+      expect((await fixture.plan()).writerOutcome?.reading).toBe('WRITER_OUTCOME_HISTORY');
+    },
+    60_000,
+  );
+
+  it('a read the filesystem refuses after the open reads unreadable, and the handle is closed', async () => {
+    const root = scratch();
+    expect((await record(root, entryOf())).recorded).toBe(true);
+    for (const code of ['EBUSY', 'EIO', 'EACCES']) {
+      let handle = -1;
+      const open = (path: string): number => {
+        handle = openSync(path, 'r');
+        return handle;
+      };
+      const refused = (): number => {
+        throw systemCallError(code, 'read');
+      };
+      expect(loadWriterOutcomes(root, TASK_ID, open, refused).reading, code).toBe('MALFORMED');
+      expect(() => fstatSync(handle), code).toThrow();
+    }
+    expect(loadWriterOutcomes(root, TASK_ID).reading).toBe('WRITER_OUTCOME_HISTORY');
+  });
+
+  it('a fault that is not a failed system call is thrown, not read as an unreadable record', async () => {
+    const root = scratch();
+    expect((await record(root, entryOf())).recorded).toBe(true);
+    const defect = new TypeError('a defect in the reader');
+    expect(() =>
+      loadWriterOutcomes(root, TASK_ID, undefined, () => {
+        throw defect;
+      }),
+    ).toThrow(defect);
+    // An error code alone does not make a system call: Node's own argument errors carry one too.
+    const argumentError = Object.assign(new RangeError('offset out of range'), { code: 'ERR_OUT_OF_RANGE' });
+    expect(() =>
+      loadWriterOutcomes(root, TASK_ID, undefined, () => {
+        throw argumentError;
+      }),
+    ).toThrow(argumentError);
   });
 });

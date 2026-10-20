@@ -335,12 +335,23 @@ function load(
   return Object.freeze({ reading, path, record });
 }
 
+/** Whether an error is Node's report of a failed system call: it names the call and its errno. */
+function isSystemCallFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const { code, syscall } = error as NodeJS.ErrnoException;
+  return typeof code === 'string' && typeof syscall === 'string';
+}
+
 /**
  * Reads back the writer-outcome record for one task. The one loader.
  *
- * Never throws. An unreadable file, an oversized one, a directory, one that is
- * not JSON and one that is JSON of the wrong shape all reach a reading rather
- * than an exception, and only a not-found open reads as `ABSENT`.
+ * Never throws for anything the disk does. A file that cannot be opened, one
+ * that opens and then refuses to be read (another process holding a lock on
+ * it), an oversized one, a directory, one that is not JSON and one that is JSON
+ * of the wrong shape all reach a reading rather than an exception, and only a
+ * not-found open reads as `ABSENT`. After the open, a failure that is not a
+ * failed system call is a defect in this code, and is thrown rather than read
+ * as an unreadable record.
  */
 export function loadWriterOutcomes(
   repositoryRoot: string,
@@ -389,6 +400,12 @@ export function loadWriterOutcomes(
 
     const result = readWriterOutcomes(raw, subject);
     return load(result.reading, location.path, result.record);
+  } catch (error: unknown) {
+    // A file that opened and then refused to be stated or read is unreadable: another process
+    // holding a byte-range lock answers `EBUSY` here. Only a failed system call is read that way.
+    // Anything else is a defect in this code, and is thrown rather than hidden as a reading.
+    if (!isSystemCallFailure(error)) throw error;
+    return load('MALFORMED', location.path);
   } finally {
     try {
       closeSync(handle);
