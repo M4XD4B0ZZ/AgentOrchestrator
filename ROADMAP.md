@@ -330,6 +330,7 @@ supervisor.
 | RM1-07 | **Heartbeat and stale items.** The supervisor writes a heartbeat; the dashboard shows the last pass; attention items of unregistered repositories show as stale                                              | supervisor + AO | PROPOSED | The dashboard tells "running", "stopped at <time>" and "never ran" apart                                                      |
 | RM1-08 | **Supervisor hygiene and safety/deployment preflight.** Merge list emptied (no merge lane in RM1); scheduled-task comment corrected; `dist` deployed from `main`; the A.2 checklist as one read-only check | supervisor + AO | PROPOSED | The preflight passes on the evening before a pilot night and names every failed item |
 | RM1-09 | **Pilot P1** (Appendix A): an evening rehearsal, then two nights                                                                                                                                            | operation       | PROPOSED | Appendix A's success criteria                                                                                                 |
+| RM1-11 | **Scope per task.** A task may narrow the profile's scope, never widen it, and the scope gate enforces the task's own list. Today AO enforces only the repository profile, so one task's need widens it for every task that starts later (RM1-10S, section 14). The list is read from the task file at the task's base commit, never from the worktree; the frontmatter key ships in `dist` before any task file uses it (`.strict()` schema). Not a P1 prerequisite; before more parallel work | AO | PROPOSED | Tests: a change outside the task's own list is a scope violation; a task cannot add a path the profile does not allow; a task without the key keeps today's scope |
 | RM1-10 | **Supervisor under version control** (D6 = A, 2026-10-19). Its source moves from `C:\Users\Max\AO-runs` into this repository: an ADR first, no secret committed, its labs in CI, a deployment to the Windows machine from a canonical commit, a way back, the Task Scheduler entry unchanged until the pilot. ADR and phase 1 (byte-equal copy, CI guards): PR #114 | AO repository | APPROVED (D6 = A); ADR first | The labs pass in CI; the deployed copy is byte-equal to a named commit; nothing secret is in Git |
 
 **Regression requirements.** All AO tests stay green, including `m4-01-unattended-completion`,
@@ -734,6 +735,25 @@ Confirmed by the audit and the code; each would break a property in section 5.
 and implementation, RM1-10 for its ADR, migration plan and CI tests. The
 release covers no merge: every pull request still needs its own release. This file is the leading
 development plan for AgentOrchestrator; a decision that changes it is recorded here.
+
+**Temporary scope for RM1-10B (operator decision of 2026-10-19).** AO implements RM1-10B. For that,
+PR #116 (merge `ca1658f`, task RM1-10S) added four file entries to `scope.allowedPaths`:
+`ops/zera-supervisor/zera-supervisor.ps1`, `zera-wiring-test.ps1`, `zera-grant-lab.mjs` and
+`README.md` in the same folder. Not `ops/`: the provers and `zera-register-task.ps1` stay outside,
+and no file can be added there.
+
+- **Why it is temporary.** AO enforces only the repository profile, read at each task's base commit
+  (`src/scope/pinned-scope.ts`). It has no scope per task (RM1-11). So the four entries reach every
+  task of this repository that starts while they stand, not only RM1-10B. Tasks that started before
+  keep `src` and `tests`; on 2026-10-19 that was 12 of 13 `OPEN` tasks. `REVIEW-INSTRUMENT-001` had
+  no state yet.
+- **Conditions while the entries stand.** No AO run on this repository without an explicit
+  `--task`. No unattended AO run on this repository. No other new AO task starts here. Only
+  RM1-10B runs, attended.
+- **Way back.** After RM1-10B is delivered, a separate pull request removes the four entries. A task
+  that has already started keeps the scope of its base commit, RM1-10B included, so the removal
+  changes no running task. Check before the removal that no task with a state has a base commit
+  that carries the entries and still needs them.
 
 ## 15. Sources and how this file was checked
 
