@@ -355,20 +355,38 @@ to 5 remain.
   run on 2026-10-19 under the temporary RM1-10S scope (PR #116). Five files:
   `ops/zera-supervisor/{zera-supervisor.ps1, zera-wiring-test.ps1, zera-grant-lab.mjs, README.md}`
   and `tests/ops-zera-supervisor.test.ts`. AO's verify passed on `fed1880` (BUILD exit 0, VERIFY
-  exit 0); the task stopped at `REVIEWING`. No Codex review ran. Production source is unchanged in
-  this delivery.
+  exit 0); the task stopped at `REVIEWING`. No Codex review ran.
 - **Checks (overnight 2026-10-20).** An independent read-only review (a Claude agent) and break-tests
   in an isolated copy: 25 planted faults, 16 caught. A notification-privacy probe against a local
-  endpoint with verbose, debug and transcript on: no channel name and no endpoint in any output, live
-  or dry run. The grant lab with explicit folders: 49 of 49 cases pass. Defaults unchanged: the
-  scheduled task needs no change.
-- **Open — repair before any run with a non-default `-StateDir`** (a follow-up task, not yet
-  written): an empty `-StateDir ""` falls back to the production folder; `D:state` and `\state`
-  pass the "absolute folder" check; the supervisor README still shows the grant lab without its
-  four folders. Untested today: the hand-off of the parameters to `Resolve-ZeraPaths` and the
-  script-level path variables (four planted faults survive), `-Verbose:$false` in `Notify` (removing
-  it leaks the channel when verbose is on — measured), the refusal of a parameter without a value,
-  and the grant lab's argument checks.
+  endpoint (200, 500, 404) with verbose, debug and transcript on: no channel name and no endpoint in
+  any output, live or dry run. The grant lab with explicit folders: 49 of 49 cases pass. Defaults
+  unchanged: the scheduled task needs no change.
+- **Operator repair before delivery (2026-10-20; operator decision "option B", no new AO task).**
+  Written by hand, not by AO's writer, in three commits on top of `fed1880`:
+  - `178d84d`: an empty or blank `-StateDir` is refused (it fell back to the production folder); a
+    folder must be fully qualified (`D:state` and `\state` passed); a `ZERA_STATE_DIR` that is set
+    but blank is refused; the README's grant-lab line names its four folders; tests for the
+    surviving faults (the `Resolve-ZeraPaths` call and every path binding, read from the syntax
+    tree; `Notify` with verbose on; the grant lab's argument checks).
+  - `1e4c0d8`, after an independent review (a Claude agent) of `178d84d`: the colon form and a
+    splat (`-StateDir:D:\x`, `-DryRun:$true`), which reach `$args` as `-StateDir:` and a value, are
+    refused — before, the state silently went to the production folder and a dry run would run
+    live (measured; the defect dates from `fed1880`); the drive check is case-exact (`-match` read a
+    Kelvin sign as `K`); tighter tests.
+  - `f0648ee`: `Notify` posts through `System.Net.WebRequest`. Measured: a transcript records a
+    cmdlet's caught terminating error, and `Invoke-RestMethod`'s named the whole URL with the topic
+    (a malformed endpoint) or the host (a name that does not resolve). The .NET call is not recorded.
+  - Checks: red first (the final tests fail 6, 4 and 1 times on the supervisor of `fed1880`,
+    `178d84d` and `1e4c0d8`), 19 of 19 on `f0648ee`; break-tests 38 of 38 caught (the 25 of the
+    night plus 13 for the repair). The grant lab, the provers and `src/` are unchanged since
+    `fed1880`. The full `npm run verify` and CI on the pull request's final head are the gates;
+    their results are in the pull request, not in this file.
+- **Open.** A fully qualified folder on a drive that does not exist (`-StateDir Q:\x`, Q unmounted)
+  still passes the check; `Join-Path` then yields nothing and the run goes on without lock, status
+  or transcript (reasoned by the review; predates `fed1880`'s repair; outside the authorised
+  change list). The lock and the retry ledger are per state folder, so a run with another
+  `-StateDir` is a second supervisor the production lock does not see. A misspelled parameter name
+  is ignored.
 - **No approval of this delivery is claimed.** A person's review is owed before merge.
 
 ## RM2 — Better remediation
