@@ -3014,8 +3014,9 @@ step; a failed write is reported on the step and never thrown; and only `run/run
 **A locked record reads `unreadable` (D-1).** A record that cannot be opened, or that opens and then
 refuses to be read — another process holding a byte-range lock on it answers `EBUSY` — is read as
 `unreadable`: the plan decides exactly as with no record, and the store refuses to overwrite it
-(`EXISTING_HISTORY_UNREADABLE`). Only a failed system call is read that way. Any other error inside
-the loader is a defect in this code and is thrown, not hidden.
+(`EXISTING_HISTORY_UNREADABLE`). A failed open of any kind reads `unreadable`, as before. After the
+open, only a failed system call is read that way; any other error is a defect in this code and is
+thrown, not hidden.
 
 **One path writes nothing.** When the leased agent seam answers `AGENT_LAUNCH_NOT_WITHDRAWN` (it
 could not show that the writer's `ESTABLISHED` launch mark was withdrawn), the step must start no

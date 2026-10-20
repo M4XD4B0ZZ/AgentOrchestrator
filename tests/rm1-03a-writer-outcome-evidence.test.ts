@@ -1376,26 +1376,52 @@ describe('the plan prints one writer-outcome line', () => {
 
 /* ═══════════ 9. an unreadable record is read, never thrown (D-1) ═══════════ */
 
-/** A second process holding a byte-range lock over the whole file, until released. */
+/**
+ * A second process holding a byte-range lock over the whole file, until released.
+ *
+ * Resolves only once the holder has said it holds the lock. The script stops at its first error, so
+ * a failed open or lock never reaches that line. A holder that fails to spawn, exits first or never
+ * locks fails the case, and is killed rather than left behind. Closing its stdin is
+ * the release: its `ReadLine` returns, it unlocks and exits — also when this test process dies.
+ */
 async function byteRangeLock(path: string): Promise<() => Promise<void>> {
   const script =
-    `$fs = [IO.File]::Open('${path.replace(/'/g, "''")}', 'Open', 'ReadWrite', 'ReadWrite'); ` +
+    `$ErrorActionPreference = 'Stop'; $fs = [IO.File]::Open('${path.replace(/'/g, "''")}', 'Open', 'ReadWrite', 'ReadWrite'); ` +
     `$fs.Lock(0, $fs.Length); [Console]::Out.WriteLine('LOCKED'); [Console]::Out.Flush(); ` +
     `[void][Console]::In.ReadLine(); $fs.Unlock(0, $fs.Length); $fs.Close()`;
-  const holder = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
-  const closed = new Promise<void>((resolveClosed) => holder.on('close', () => resolveClosed()));
-  await new Promise<void>((resolveLocked, rejectLocked) => {
-    const timer = setTimeout(() => rejectLocked(new Error('the lock holder never locked')), 30_000);
-    holder.stdout.on('data', (data) => {
-      if (String(data).includes('LOCKED')) {
-        clearTimeout(timer);
-        resolveLocked();
-      }
-    });
+  const holder = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    stdio: ['pipe', 'pipe', 'ignore'],
   });
+  const closed = new Promise<void>((resolveClosed) => holder.on('close', () => resolveClosed()));
+  const settled = (): Promise<unknown> => Promise.race([closed, new Promise((done) => setTimeout(done, 10_000))]);
+  // Writing to a holder that has already gone fails on the pipe; the `close` above reports the end.
+  holder.stdin.on('error', () => undefined);
+  try {
+    await new Promise<void>((resolveLocked, rejectLocked) => {
+      const timer = setTimeout(() => rejectLocked(new Error('the lock holder never locked')), 30_000);
+      holder.on('error', (error: Error) => {
+        clearTimeout(timer);
+        rejectLocked(error);
+      });
+      holder.on('exit', () => {
+        clearTimeout(timer);
+        rejectLocked(new Error('the lock holder exited before it locked'));
+      });
+      holder.stdout.on('data', (data) => {
+        if (String(data).includes('LOCKED')) {
+          clearTimeout(timer);
+          resolveLocked();
+        }
+      });
+    });
+  } catch (error: unknown) {
+    holder.kill();
+    await settled();
+    throw error;
+  }
   return async () => {
     holder.stdin.end('\n');
-    await closed;
+    await settled();
   };
 }
 
@@ -1442,7 +1468,7 @@ describe('an unreadable record is read as unreadable, never thrown (D-1)', () =>
       expect(readFileSync(fixture.path).equals(before)).toBe(true);
       expect((await fixture.plan()).writerOutcome?.reading).toBe('WRITER_OUTCOME_HISTORY');
     },
-    60_000,
+    150_000,
   );
 
   it('a read the filesystem refuses after the open reads unreadable, and the handle is closed', async () => {

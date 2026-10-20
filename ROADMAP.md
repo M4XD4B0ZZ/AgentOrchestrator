@@ -369,11 +369,14 @@ supervisor.
   section that contract section 7 names.
 - **Open, for RM1-03b.** A write that was skipped or failed leaves an older entry as the newest,
   so RM1-03b compares `recordedAt` with the state's `stateEnteredAt`.
-- **Open, outside this delivery.** Six sibling loaders keep their read in `try`/`finally` without
-  `catch` — the D-1 shape — in `verify/verification-attempt-store.ts`,
-  `verify/verification-pass-store.ts`, `deliver/delivery-conclusion-store.ts`,
-  `deliver/delivery-evidence-store.ts`, `deliver/merge-reconciliation-store.ts` and
-  `deliver/post-merge-verification-store.ts`. Seen by reading, not measured; a separate item.
+- **Open, outside this delivery.** Three sibling loaders keep their read in `try`/`finally`
+  without `catch` — the D-1 shape: `verify/verification-attempt-store.ts`,
+  `verify/verification-pass-store.ts` and `deliver/post-merge-verification-store.ts`. Seen by
+  reading, not measured; a separate item. Three others — `deliver/delivery-conclusion-store.ts`,
+  `deliver/delivery-evidence-store.ts`, `deliver/merge-reconciliation-store.ts` — already read
+  every error after the open as `MALFORMED`. So the stores now follow two rules: those three hide
+  any error after the open; `loadWriterOutcomes` hides only a failed system call and throws the
+  rest (operator instruction of 2026-10-20). Which rule the remaining three get is for that item.
 
 **Regression requirements.** All AO tests stay green, including `m4-01-unattended-completion`,
 `m3-01-persistent-scheduler` and the dist-artefact suites. The supervisor's own lab
