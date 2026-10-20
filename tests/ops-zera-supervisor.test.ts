@@ -549,12 +549,18 @@ describe.runIf(process.platform === 'win32')('RM1-10B repair: the script level i
 });
 
 describe.runIf(process.platform === 'win32')('RM1-10B repair: Notify names no channel, with verbose on', () => {
-  it('prints only the closed failure lines, and nothing else, through a 200, an echoing 500 and a bad URL', async () => {
+  it('prints only the closed failure lines, and nothing else: a 200, an echoing 500, a bad URL, no such host', async () => {
     const sentinel = `zera-sentinel-${randomBytes(8).toString('hex')}`;
     const hits: number[] = [];
+    const received: string[] = [];
     const server = createServer((req, res) => {
       const status = String(req.headers.title ?? '').includes('[500]') ? 500 : 200;
       hits.push(status);
+      let bodyText = '';
+      req.on('data', (chunk) => {
+        bodyText += String(chunk);
+      });
+      req.on('end', () => received.push(`${req.method ?? ''} ${bodyText}`));
       res.writeHead(status, { 'content-type': 'text/plain' });
       res.end(status === 200 ? `{"id":"ok","topic":"${sentinel}"}` : `no such channel: ${req.url ?? ''}`);
     });
@@ -570,6 +576,9 @@ describe.runIf(process.platform === 'win32')('RM1-10B repair: Notify names no ch
       // whole URL, topic included — the leak a printed exception text would carry.
       const badFile = join(scratchDir('bad'), 'notify.yaml');
       writeFileSync(badFile, `endpoint: http://127.0.0.1:99999\ntopic: ${sentinel}\n`);
+      // A host that cannot resolve: its error names the host, which is the endpoint.
+      const nohostFile = join(scratchDir('nohost'), 'notify.yaml');
+      writeFileSync(nohostFile, `endpoint: http://${sentinel}.invalid\ntopic: ${sentinel}\n`);
       const state = scratchDir('state');
       const transcript = join(state, 'transcript.txt');
       const run = await runPowerShellAsync(
@@ -582,6 +591,8 @@ Notify 'Zera probe [200]' 'probe body'
 Notify 'Zera probe [500]' 'probe body'
 [System.IO.File]::Copy(${psQuote(badFile)}, ${psQuote(notifyFile)}, $true)
 Notify 'Zera probe [bad]' 'probe body'
+[System.IO.File]::Copy(${psQuote(nohostFile)}, ${psQuote(notifyFile)}, $true)
+Notify 'Zera probe [nohost]' 'probe body'
 Stop-Transcript | Out-Null
 `,
         { ...process.env, USERPROFILE: home },
@@ -590,6 +601,8 @@ Stop-Transcript | Out-Null
       expect(run.status, output).toBe(0);
       // Both served answers were really given, so the absences below are not vacuous.
       expect(hits).toEqual([200, 500]);
+      // The request is the one Invoke-RestMethod sent: a POST of the body.
+      expect(received).toEqual(['POST probe body', 'POST probe body']);
       expect(output).not.toContain(sentinel);
       expect(output).not.toContain(`127.0.0.1:${port}`);
       expect(output).not.toContain('99999');
@@ -603,6 +616,7 @@ Stop-Transcript | Out-Null
       expect(plain).toEqual([
         'notify failed: the notification endpoint did not take the message -- Zera probe [500]',
         'notify failed: the notification endpoint did not take the message -- Zera probe [bad]',
+        'notify failed: the notification endpoint did not take the message -- Zera probe [nohost]',
       ]);
     } finally {
       server.close();

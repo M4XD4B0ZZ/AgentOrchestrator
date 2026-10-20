@@ -506,9 +506,21 @@ function Notify([string]$title, [string]$body) {
     if (-not $endpoint -or -not $topic) { return }
     $url = ($endpoint.TrimEnd('/')) + '/' + $topic
     if ($DryRun) { Write-Host "DRY-RUN: would notify -- $title"; return }
+    # Sent through .NET, not Invoke-RestMethod. A transcript records a cmdlet's terminating error even
+    # when it is caught, and Invoke-RestMethod's name the whole URL, topic included (a malformed
+    # endpoint), or the host (a name that does not resolve) -- measured 2026-10-20. The exception of a
+    # .NET method call is not recorded, and nothing here writes a verbose line.
     try {
-        Invoke-RestMethod -Uri $url -Method Post -Body $body -Headers @{ Title = $title } -TimeoutSec 20 `
-            -ErrorAction Stop -Verbose:$false | Out-Null
+        $request = [System.Net.WebRequest]::Create($url)
+        $request.Method = 'POST'
+        $request.Timeout = 20000
+        $request.Headers.Add('Title', $title)
+        $payload = [System.Text.Encoding]::UTF8.GetBytes($body)
+        $request.ContentType = 'text/plain; charset=utf-8'
+        $request.ContentLength = $payload.Length
+        $stream = $request.GetRequestStream()
+        try { $stream.Write($payload, 0, $payload.Length) } finally { $stream.Close() }
+        $request.GetResponse().Close()
     } catch {
         Write-Host "notify failed: the notification endpoint did not take the message -- $title"
     }
