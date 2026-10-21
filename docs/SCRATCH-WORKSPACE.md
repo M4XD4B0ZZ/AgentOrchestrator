@@ -42,7 +42,38 @@ directly under `D:\`.
 | Deployed runtime | `dist/` is written only by `npm run deploy` | never write into `dist/` from scratch work |
 | MEMGUARD | it guards the memory folders, not repository paths; `.scratch/` changes nothing there | — |
 | TypeScript, the build, the tests | `tsconfig.json` includes `src/`, `tests/`, `scripts/`; `tsconfig.build.json` includes `src/`; Vitest collects `tests/**/*.test.ts` | — |
-| CodeGraph | its live watcher reads the root `.gitignore` **once, when its background service starts**. Measured 2026-10-20: with only a `.git/info/exclude` entry, the watcher indexed a `.ts` file under `.scratch/`; a full index and `codegraph sync` honour both. A service that was already running when `/.scratch/` entered `.gitignore` (PR #121) still indexes new code files there until it is restarted. Restart: close every Claude Code session that uses this repository (the service runs under its CodeGraph MCP server) or stop it with `codegraph daemon`; the next session starts a fresh one. Until then, run `codegraph sync .` after writing code into `.scratch/` | `codegraph files` lists no `.scratch/` path; a new `.ts` probe there is not found by `codegraph query` |
+| CodeGraph | its live watcher reads the root `.gitignore` **once, when its background service starts**. Measured 2026-10-20: with only a `.git/info/exclude` entry, the watcher indexed a `.ts` file under `.scratch/`; a full index and `codegraph sync` honour both. A service that was already running when `/.scratch/` entered `.gitignore` (PR #121) still indexes new code files there until it is restarted. Restart it from inside a session with CodeGraph's own `stopDaemonAt` (section "Restarting the CodeGraph service" below); closing every Claude Code session that uses this repository restarts it too. Until then, run `codegraph sync .` after writing code into `.scratch/` | `codegraph files` lists no `.scratch/` path; a new `.ts` probe there is not found by `codegraph query` |
+
+### Restarting the CodeGraph service
+
+A session does not have to be closed. Measured 2026-10-20 with CodeGraph 1.5.0, from inside a
+running Claude Code session: CodeGraph's own `stopDaemonAt` stopped only this repository's service
+(`"outcome":"term"`). The session's CodeGraph server went on answering in-process, with an ignore
+matcher built from the current `.gitignore`: a new `.ts` probe under `.scratch/` was not indexed
+(`codegraph query` found nothing after 25 s). On 2026-10-21, after a day of HealthApp worktrees and
+probe files under `.scratch/`, `codegraph files` listed no `.scratch/` path.
+
+Save this as a `.cjs` file under `.scratch/` and run `node <file> D:\AgentOrchestrator`:
+
+```js
+// Stops only the CodeGraph service registered for the given root, through CodeGraph's own registry.
+const path = require('path');
+const lib = path.join(process.env.APPDATA, 'npm', 'node_modules', '@colbymchenry', 'codegraph',
+  'node_modules', '@colbymchenry', 'codegraph-win32-x64', 'lib', 'dist', 'mcp', 'daemon-registry.js');
+const registry = require(lib);
+const root = process.argv[2].toLowerCase();
+const record = registry.listDaemons({ prune: false }).find((d) => d.root.toLowerCase() === root);
+if (!record) {
+  console.log('no CodeGraph service is registered for this root');
+} else {
+  registry.stopDaemonAt(record.root).then((result) => console.log(JSON.stringify(result)));
+}
+```
+
+It prints the root, the process id and `"outcome":"term"`. Then check with a new `.ts` probe under
+`.scratch/` and `codegraph query`. The path is the global npm install of CodeGraph 1.5.0 on
+Windows; after an update, check that `daemon-registry.js` still exports `listDaemons` and
+`stopDaemonAt`. Do not use `codegraph daemon` from an agent's shell: it is an interactive picker.
 
 ## Git worktrees under `.scratch/worktrees/`
 
