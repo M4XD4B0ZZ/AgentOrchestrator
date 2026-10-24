@@ -185,6 +185,53 @@ Open work, not accepted residuals. Each one was measured during attended runs on
   2026-09-23, three review rounds after the 04:06Z window reset brought the 5-hour window to 90-96%
   (from the sessions' own `rate_limits`), and the fourth round stopped at BLOCKED_USAGE_LIMIT.
 
+## Paths
+
+The supervisor keeps two folders apart (ADR 2026-10-19, phase 2). One pure
+function, `Resolve-ZeraPaths`, decides every path; nothing else builds one.
+
+| Folder | Where it comes from | What is in it |
+| --- | --- | --- |
+| source | the folder `zera-supervisor.ps1` runs from (`$PSScriptRoot`) | the five helper scripts: `ao-classify.mjs`, `zera-delivery-gate.mjs`, `zera-quota-grant.mjs`, `zera-operator-repair-grant.mjs`, `zera-writer-death-grant.mjs` |
+| state | `-StateDir <dir>`, else `$env:ZERA_STATE_DIR`, else `C:\Users\Max\AO-runs` | `zera-unattended-status.txt`, `zera-retry-budget.json`, `zera-supervisor.lock`, `zera-last-notify.txt`, `transcripts/` |
+
+No state file is read from the source folder and no script from the state
+folder. Every folder must be fully qualified — a drive letter and a backslash, or a UNC share;
+`D:state` and `\state` are refused. An empty or blank `-StateDir`, and a `ZERA_STATE_DIR` that
+is set but blank, are refused rather than read as "use the default". Write each parameter as
+`-Name <value>` and `-DryRun` bare: the colon form (`-StateDir:<dir>`, `-DryRun:$true`) and a splat
+are refused, because they reach the script in a shape it would otherwise not recognise.
+
+The machine paths are parameters too: `-AoRoot <dir>` (default
+`D:\AgentOrchestrator`) and `-RepoRoot <dir>` (default
+`D:\Workspaces_VSCode\HealthApp`). The supervisor sets `AO_ROOT` for every
+helper it starts and passes `--budget <state>\zera-retry-budget.json` to both
+provers that read the ledger, so no helper falls back to its own built-in path
+when the supervisor calls it. Run by hand, the provers still do.
+
+**With no parameter, every path is what it was.** Deployed in
+`C:\Users\Max\AO-runs`, source and state are both that folder, so the scheduled
+task's action path and working directory need no change, and a rollback is a
+copy of the old files. `-DryRun` and `--dry-run` both still work.
+
+```powershell
+# a deployed copy with its state elsewhere
+powershell -ExecutionPolicy Bypass -File <deployed>\zera-supervisor.ps1 -DryRun -StateDir <state>
+
+# the wiring test checks the supervisor beside it unless given another
+powershell -ExecutionPolicy Bypass -File <deployed>\zera-wiring-test.ps1 [<supervisor.ps1>]
+
+# the grant lab has no built-in path: all four are required. Run it by hand,
+# against a deployed AO runtime; --budget must name a file that does not exist,
+# and neither it nor --lab may sit inside --source-dir.
+node <deployed>\zera-grant-lab.mjs --ao-root <AO runtime> --source-dir <deployed> `
+    --lab <empty folder> --budget <lab folder>\budget.json
+```
+
+The notification channel is never printed. The dry-run line names the title
+only (`DRY-RUN: would notify -- <title>`), and a failed notify prints a closed
+message with neither the URL nor the exception text.
+
 ## Files
 
 | File | What it is |
@@ -222,7 +269,7 @@ node C:\Users\Max\AO-runs\zera-writer-death-grant.mjs --repository D:\Workspaces
 node C:\Users\Max\AO-runs\zera-delivery-gate.mjs --repository D:\Workspaces_VSCode\HealthApp --task CAPTURE-003 --canonical-branch chore/clean-arch-structure
 
 # re-verify the two new lanes. Both are read-only and touch nothing real.
-node C:\Users\Max\AO-runs\zera-grant-lab.mjs            # 49 cases, expects LAB_VERDICT = ALL_PASS
+node C:\Users\Max\AO-runs\zera-grant-lab.mjs --ao-root D:\AgentOrchestrator --source-dir C:\Users\Max\AO-runs --lab <empty temp folder> --budget <a file that does not exist>   # 49 cases, expects LAB_VERDICT = ALL_PASS
 powershell -ExecutionPolicy Bypass -File C:\Users\Max\AO-runs\zera-wiring-test.ps1   # 30 cases, expects WIRING_VERDICT = ALL_PASS
 
 # turn it on / off

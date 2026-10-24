@@ -6,19 +6,58 @@
  * history bound with AO's OWN `verificationAttemptBinding` — then runs the
  * prover against it and compares the verdict with what the case expects.
  *
- * Nothing here touches D:\Workspaces_VSCode\HealthApp or D:\AgentOrchestrator.
- * Every case lives under its own directory in the lab root and is deleted and
- * rebuilt on each run, so a case can never inherit another case's tree.
+ * It writes nothing outside the lab folder. It reads the deployed AO runtime it
+ * is given and the provers in the source folder it is given, and every case
+ * lives under its own directory in the lab root and is deleted and rebuilt on
+ * each run, so a case can never inherit another case's tree.
+ *
+ *   node zera-grant-lab.mjs --ao-root <dir> --source-dir <dir> --lab <dir> --budget <file>
+ *
+ * No path is built in, and none is guessed: all four are required.
+ *
+ *   --ao-root     the deployed AO runtime the provers judge with (its `dist/`)
+ *   --source-dir  the folder holding the five helper scripts
+ *   --lab         where the disposable repositories are built
+ *   --budget      the retry ledger every prover call reads unless a case brings
+ *                 its own. It must name no existing file, so the lab can never
+ *                 read a real ledger; the lab never writes it.
+ *
+ * Neither the lab folder nor the ledger may sit inside the source folder, which
+ * today is also the supervisor's state folder.
  */
 
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const AO_ROOT = 'D:\\AgentOrchestrator';
-const RUNS = 'C:\\Users\\Max\\AO-runs';
-const LAB = resolve(process.argv[2] ?? join(process.env.TEMP ?? '.', 'zera-grant-lab'));
+function argOf(name) {
+  const i = process.argv.indexOf(name);
+  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : null;
+}
+
+function refuse(why) {
+  console.error(`zera-grant-lab: ${why}`);
+  console.error('usage: node zera-grant-lab.mjs --ao-root <dir> --source-dir <dir> --lab <dir> --budget <file>');
+  process.exit(2);
+}
+
+function inside(parent, child) {
+  const rel = relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+for (const name of ['--ao-root', '--source-dir', '--lab', '--budget']) {
+  if (!argOf(name)) refuse(`${name} is required`);
+}
+const AO_ROOT = resolve(argOf('--ao-root'));
+const SOURCE_DIR = resolve(argOf('--source-dir'));
+const LAB = resolve(argOf('--lab'));
+const BUDGET = resolve(argOf('--budget'));
+
+if (existsSync(BUDGET)) refuse(`--budget names an existing file (${BUDGET}); give the lab a ledger of its own`);
+if (inside(SOURCE_DIR, LAB)) refuse(`--lab (${LAB}) is inside --source-dir (${SOURCE_DIR})`);
+if (inside(SOURCE_DIR, BUDGET)) refuse(`--budget (${BUDGET}) is inside --source-dir (${SOURCE_DIR})`);
 
 const { verificationAttemptBinding } = await import(
   pathToFileURL(join(AO_ROOT, 'dist', 'verify', 'verification-attempt.js')).href
@@ -225,9 +264,14 @@ function baseRecord(facts, over) {
   };
 }
 
+/**
+ * Runs one prover with AO_ROOT and a ledger always passed explicitly, so no
+ * prover falls back to its built-in runtime or its built-in ledger.
+ */
 function runProver(script, repo, extra = []) {
+  const budget = extra.includes('--budget') ? [] : ['--budget', BUDGET];
   try {
-    const out = execFileSync(process.execPath, [join(RUNS, script), '--repository', repo, ...extra], {
+    const out = execFileSync(process.execPath, [join(SOURCE_DIR, script), '--repository', repo, ...extra, ...budget], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, AO_ROOT },

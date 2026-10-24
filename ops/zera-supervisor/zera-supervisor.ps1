@@ -93,23 +93,133 @@
 $ErrorActionPreference = 'Continue'
 Set-StrictMode -Version Latest
 
+# ── Paths ───────────────────────────────────────────────────────────────────
+#
+# Two folders, never mixed (ADR 2026-10-19, phase 2):
+#
+#   source  the folder this script runs from ($PSScriptRoot). The five helper
+#           scripts are joined from it, and nothing else is.
+#   state   -StateDir, else $env:ZERA_STATE_DIR, else today's folder. The status
+#           file, the retry ledger, the lock, the last-notify stamp and the
+#           transcripts are joined from it, and no script is.
+#
+# With no parameter both are today's folder, so the scheduled task's action path
+# and working directory need no change and a rollback is a copy of the old files.
+#
+# Parameters are read from $args by hand, as -DryRun always was. A param() block
+# would make every parameter positional, and a bare `--dry-run` would then bind
+# to the first of them instead of meaning a dry run.
+
+# The value after a named argument, or $null when it is absent. A name with no
+# value after it, or with an empty or blank one, is refused rather than read as
+# "absent": falling back to the default would put the state in a folder the
+# operator did not ask for.
+function Get-ZeraArg([object[]]$argv, [string]$name) {
+    for ($i = 0; $i -lt $argv.Count; $i++) {
+        if ("$($argv[$i])" -eq $name) {
+            if ($i + 1 -ge $argv.Count -or "$($argv[$i + 1])" -like '-*' -or [string]::IsNullOrWhiteSpace("$($argv[$i + 1])")) {
+                throw "$name needs a value"
+            }
+            return "$($argv[$i + 1])"
+        }
+    }
+    return $null
+}
+
+# Every parameter is written as its name and, for a folder, a separate value. The colon form
+# (-StateDir:D:\x, -DryRun:$true) and a splat arrive in $args as "-StateDir:" and a value, which
+# Get-ZeraArg and the -DryRun check would not see: the state would silently go to the default
+# folder, and a dry run would run live. Refused instead, before anything is read or written.
+function Assert-ZeraArgForms([object[]]$argv) {
+    foreach ($a in $argv) {
+        if ("$a" -match '^-(StateDir|AoRoot|RepoRoot|DryRun):') {
+            throw "write -$($Matches[1]) without a colon: the colon form and a splat are refused"
+        }
+    }
+}
+
+# The whole path table, and the only place a path is decided. Pure: it reads
+# nothing but its arguments (the environment variable is the default of one of
+# them) and touches no file, so a test can call it alone.
+#
+# Every folder must be fully qualified: a drive letter and a backslash, or a UNC
+# share. A relative folder, and a rooted one that is not fully qualified (D:state,
+# \state), changes meaning with the current location or drive -- under the
+# Push-Location into the AO root below, the retry ledger would be read and
+# written somewhere other than the state folder. A ZERA_STATE_DIR that is set
+# but blank is refused, as a blank -StateDir is. The match is case-exact: -match
+# folds case by culture and reads a Kelvin sign as the drive letter K.
+function Resolve-ZeraPaths {
+    param(
+        [string]$SourceDir,
+        [string]$StateDir,
+        [string]$EnvStateDir = $env:ZERA_STATE_DIR,
+        [string]$AoRoot,
+        [string]$RepoRoot
+    )
+    if ([string]::IsNullOrWhiteSpace($StateDir) -and $EnvStateDir.Length -gt 0 -and [string]::IsNullOrWhiteSpace($EnvStateDir)) {
+        throw 'ZERA_STATE_DIR is set but blank'
+    }
+    if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = $EnvStateDir }
+    if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = 'C:\Users\Max\AO-runs' }
+    if ([string]::IsNullOrWhiteSpace($AoRoot))   { $AoRoot   = 'D:\AgentOrchestrator' }
+    if ([string]::IsNullOrWhiteSpace($RepoRoot)) { $RepoRoot = 'D:\Workspaces_VSCode\HealthApp' }
+    foreach ($dir in @($SourceDir, $StateDir, $AoRoot, $RepoRoot)) {
+        if ([string]::IsNullOrWhiteSpace($dir) -or -not ($dir -cmatch '^[A-Za-z]:\\' -or $dir -cmatch '^\\\\[^\\]+\\[^\\]+')) {
+            throw "not an absolute folder: '$dir'"
+        }
+    }
+    return [ordered]@{
+        SourceDir     = $SourceDir
+        StateDir      = $StateDir
+        AoRoot        = $AoRoot
+        RepoRoot      = $RepoRoot
+        Classifier    = Join-Path $SourceDir 'ao-classify.mjs'
+        DeliveryGate  = Join-Path $SourceDir 'zera-delivery-gate.mjs'
+        QuotaGrant    = Join-Path $SourceDir 'zera-quota-grant.mjs'
+        RepairGrant   = Join-Path $SourceDir 'zera-operator-repair-grant.mjs'
+        WriterGrant   = Join-Path $SourceDir 'zera-writer-death-grant.mjs'
+        StatusFile    = Join-Path $StateDir 'zera-unattended-status.txt'
+        RetryFile     = Join-Path $StateDir 'zera-retry-budget.json'
+        LockFile      = Join-Path $StateDir 'zera-supervisor.lock'
+        NotifyStamp   = Join-Path $StateDir 'zera-last-notify.txt'
+        TranscriptDir = Join-Path $StateDir 'transcripts'
+    }
+}
+
+Assert-ZeraArgForms $args
+
+$ZeraPaths = Resolve-ZeraPaths -SourceDir $PSScriptRoot `
+    -StateDir (Get-ZeraArg $args '-StateDir') `
+    -AoRoot (Get-ZeraArg $args '-AoRoot') `
+    -RepoRoot (Get-ZeraArg $args '-RepoRoot')
+
+$SourceDir        = $ZeraPaths['SourceDir']
+$StateDir         = $ZeraPaths['StateDir']
+$AoRoot           = $ZeraPaths['AoRoot']
+$RepoRoot         = $ZeraPaths['RepoRoot']
+
+$Classifier       = $ZeraPaths['Classifier']
+$DeliveryGate     = $ZeraPaths['DeliveryGate']
+$QuotaGrant       = $ZeraPaths['QuotaGrant']
+$RepairGrant      = $ZeraPaths['RepairGrant']
+$WriterGrant      = $ZeraPaths['WriterGrant']
+$StatusFile       = $ZeraPaths['StatusFile']
+$RetryFile        = $ZeraPaths['RetryFile']
+$LockFile         = $ZeraPaths['LockFile']
+$NotifyStamp      = $ZeraPaths['NotifyStamp']
+$TranscriptDir    = $ZeraPaths['TranscriptDir']
+
+# Every helper reads AO_ROOT and falls back to a built-in path without it. Set
+# here, once, for this process, so every node child the supervisor starts --
+# classifier, provers, delivery gate -- inherits the AO root this run was given,
+# whatever the caller's environment said.
+$env:AO_ROOT = $AoRoot
+
 # ── Configuration ───────────────────────────────────────────────────────────
 
-$AoRoot           = 'D:\AgentOrchestrator'
-$RepoRoot         = 'D:\Workspaces_VSCode\HealthApp'
 $CanonicalBranch  = 'chore/clean-arch-structure'
 $CanonicalRemote  = 'origin'
-$RunsDir          = 'C:\Users\Max\AO-runs'
-
-$Classifier       = Join-Path $RunsDir 'ao-classify.mjs'
-$DeliveryGate     = Join-Path $RunsDir 'zera-delivery-gate.mjs'
-$QuotaGrant       = Join-Path $RunsDir 'zera-quota-grant.mjs'
-$RepairGrant      = Join-Path $RunsDir 'zera-operator-repair-grant.mjs'
-$WriterGrant      = Join-Path $RunsDir 'zera-writer-death-grant.mjs'
-$StatusFile       = Join-Path $RunsDir 'zera-unattended-status.txt'
-$RetryFile        = Join-Path $RunsDir 'zera-retry-budget.json'
-$LockFile         = Join-Path $RunsDir 'zera-supervisor.lock'
-$TranscriptDir    = Join-Path $RunsDir 'transcripts'
 
 # The standing merge authorisation covers exactly these tasks and no others.
 # CAPTURE-007 and later carry open provider/privacy decisions; unrelated
@@ -350,7 +460,7 @@ function Set-Error([string]$text) {
 # The record lives on disk, because the process exiting between triggers is the
 # normal case and an in-memory guard would suppress nothing.
 function Test-NotifyIsNew([string]$title, [string]$body) {
-    $stamp = Join-Path $RunsDir 'zera-last-notify.txt'
+    $stamp = $NotifyStamp
     $key = $title + '|' + $body
     $sha = [System.Security.Cryptography.SHA256]::Create()
     $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($key))).Replace('-', '')
@@ -372,10 +482,15 @@ function Test-NotifyIsNew([string]$title, [string]$body) {
 # reported is no longer the current condition, so the next distinct one should
 # get through even if its text happens to match.
 function Clear-NotifyStamp {
-    $stamp = Join-Path $RunsDir 'zera-last-notify.txt'
+    $stamp = $NotifyStamp
     if (Test-Path $stamp) { Remove-Item $stamp -Force -ErrorAction SilentlyContinue }
 }
 
+# The topic is the channel's only credential: anyone who knows it can read and
+# post. So no line this writes -- console, transcript, status -- names the topic
+# or the URL built from it. A web exception's text is not printed either: it is
+# not this script's to vouch for, and a transcript keeps it for good. Nine old
+# transcripts hold the topic because the dry-run line once printed the URL.
 function Notify([string]$title, [string]$body) {
     if (-not (Test-NotifyIsNew $title $body)) {
         Write-Host "notification suppressed (unchanged since the last one): $title"
@@ -390,11 +505,24 @@ function Notify([string]$title, [string]$body) {
     }
     if (-not $endpoint -or -not $topic) { return }
     $url = ($endpoint.TrimEnd('/')) + '/' + $topic
-    if ($DryRun) { Write-Host "DRY-RUN: would notify $url -- $title"; return }
+    if ($DryRun) { Write-Host "DRY-RUN: would notify -- $title"; return }
+    # Sent through .NET, not Invoke-RestMethod. A transcript records a cmdlet's terminating error even
+    # when it is caught, and Invoke-RestMethod's name the whole URL, topic included (a malformed
+    # endpoint), or the host (a name that does not resolve) -- measured 2026-10-20. The exception of a
+    # .NET method call is not recorded, and nothing here writes a verbose line.
     try {
-        Invoke-RestMethod -Uri $url -Method Post -Body $body -Headers @{ Title = $title } -TimeoutSec 20 | Out-Null
+        $request = [System.Net.WebRequest]::Create($url)
+        $request.Method = 'POST'
+        $request.Timeout = 20000
+        $request.Headers.Add('Title', $title)
+        $payload = [System.Text.Encoding]::UTF8.GetBytes($body)
+        $request.ContentType = 'text/plain; charset=utf-8'
+        $request.ContentLength = $payload.Length
+        $stream = $request.GetRequestStream()
+        try { $stream.Write($payload, 0, $payload.Length) } finally { $stream.Close() }
+        $request.GetResponse().Close()
     } catch {
-        Write-Host "notify failed: $($_.Exception.Message)"
+        Write-Host "notify failed: the notification endpoint did not take the message -- $title"
     }
 }
 
@@ -855,7 +983,7 @@ $pass = 0
 $writerDeathGrantsThisRun = 0
 
 try {
-    Set-Action "supervisor starting ($($script:Report['mode'])); transcript $transcript"
+    Set-Action "supervisor starting ($($script:Report['mode'])); source $SourceDir; state $StateDir; transcript $transcript"
 
     while ($pass -lt $MaxOuterPasses) {
         $pass = $pass + 1
