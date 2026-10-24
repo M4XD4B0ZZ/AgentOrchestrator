@@ -127,6 +127,11 @@ import {
 } from '../agent/agent-outcome.js';
 import type { AgentRunner } from '../agent/agent-command.js';
 import { recordAgentInterruption } from '../agent/record-interruption.js';
+import { writerOutcomeFrom } from '../agent/writer-outcome.js';
+import {
+  recordWriterOutcome,
+  type WriterOutcomeRecordCode,
+} from '../agent/writer-outcome-store.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import type { InterruptionCheckpoint } from '../core/interruption-checkpoint.js';
 import { mintInterruptionCheckpoint } from '../core/internal/interruption-checkpoint.js';
@@ -138,7 +143,13 @@ import type { ResumePhase, TaskStateName } from '../core/states.js';
 import { currentRound, reviewBudget } from '../core/review-budget.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
 import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js';
-import { leaseHolds, leasedAgent, leasedGit, leasedVerify } from './leased-spawns.js';
+import {
+  AGENT_LAUNCH_NOT_WITHDRAWN,
+  leaseHolds,
+  leasedAgent,
+  leasedGit,
+  leasedVerify,
+} from './leased-spawns.js';
 import { commitTaskWork, type CommitTaskWorkResult } from '../worktree/commit-task-work.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import { observeRuntime } from '../state/observe-runtime.js';
@@ -305,6 +316,29 @@ export interface LoopStepResult {
    * configured driver stopped it.
    */
   readonly commit: CommitTaskWorkResult | null;
+  /**
+   * What became of this step's attempt to keep the writer's failure code on
+   * disk (RM1-03A), or `null` when no writer failed in this step.
+   *
+   * Filled by `recordInterruption` alone, on every path out of it, after the
+   * state write was attempted. Evidence only: the outcome, the state and
+   * everything a later step does are the same whether this landed or not, and a
+   * store that refused is reported here rather than thrown.
+   */
+  readonly writerOutcomeEvidence: WriterOutcomeEvidence | null;
+}
+
+/** What the writer-outcome write did. Reported, never persisted in the task state. */
+export interface WriterOutcomeEvidence {
+  readonly recorded: boolean;
+  /**
+   * The store's own code; `RECORDER_THREW` when the store broke its promise not
+   * to throw; `LAUNCH_MARK_NOT_WITHDRAWN` when the store was not called, because
+   * the seam could not show the writer's establishment mark withdrawn (see
+   * {@link writerLaunch}).
+   */
+  readonly code: WriterOutcomeRecordCode | 'RECORDER_THREW' | 'LAUNCH_MARK_NOT_WITHDRAWN';
+  readonly path: string | null;
 }
 
 /** What the loop must be told about the world. */
@@ -496,6 +530,7 @@ function result(from: Partial<LoopStepResult> & { readonly outcome: LoopStepOutc
     scope: null,
     permissionDenials: null,
     commit: null,
+    writerOutcomeEvidence: null,
     ...from,
   });
 }
@@ -937,6 +972,7 @@ async function recordInterruption(
   current: StateLoadSuccess,
   writer: ClaudeWriterFailed,
   deps: LoopDependencies & { readonly phase: 'IMPLEMENT' | 'REMEDIATE'; readonly round: number },
+  launchMarkNotWithdrawn: boolean,
 ): Promise<LoopStepResult> {
   const { now, phase, round } = deps;
 
@@ -946,9 +982,13 @@ async function recordInterruption(
       : UNSETTLED;
 
   // The scope gate refused, and it has already made this step's one durable
-  // write. Returned unchanged: a second write here is the invariant this whole
-  // module rests on.
-  if (settlement.kind === 'BLOCKED') return settlement.result;
+  // write. Returned unchanged but for the writer-outcome evidence: a second
+  // state write here is the invariant this whole module rests on, and the
+  // evidence is not a state write.
+  if (settlement.kind === 'BLOCKED') {
+    const writerOutcomeEvidence = await recordWriterOutcomeEvidence(current, writer, deps, launchMarkNotWithdrawn);
+    return Object.freeze({ ...settlement.result, writerOutcomeEvidence });
+  }
 
   const fallback: AgentBlockEvidence = {
     blockedAgent: 'claude',
@@ -961,9 +1001,13 @@ async function recordInterruption(
     { now, fallback, checkpoint: settlement.checkpoint, ...leaseAdvanceOptions(deps) },
   );
 
+  // After the state write was attempted, on both of its endings. Its result
+  // decides nothing below: the outcome is chosen from `record` alone.
+  const writerOutcomeEvidence = await recordWriterOutcomeEvidence(current, writer, deps, launchMarkNotWithdrawn);
+
   // What Git said is true whether or not the write landed, so both endings
   // carry it — the same rule `saved()` applies to a refused scope write.
-  const measured = { scope: settlement.scope, commit: settlement.commit };
+  const measured = { scope: settlement.scope, commit: settlement.commit, writerOutcomeEvidence };
   if (record.outcome === 'STATE_NOT_RECORDED') {
     return result({ outcome: 'STATE_NOT_RECORDED', save: record.save, ...measured });
   }
@@ -971,14 +1015,99 @@ async function recordInterruption(
 }
 
 /**
- * The options both writer launches share: the leased runner, and the write guard when the caller
- * supplied one (AO-MEMGUARD-001; absent means the production guard inside `runClaudeWriter`).
- * One function for both launches, so the implement step and the fix round cannot drift apart.
+ * Keeps the failed writer's original code on disk, beside the task record, as
+ * evidence only (RM1-03A).
+ *
+ * `recordAgentInterruption` is given the disposition and the block, and eight
+ * codes share `AGENT_NEEDS_ATTENTION` — so without this the task record of a
+ * deterministic refusal and of a transient process failure are byte-identical.
+ *
+ * The lease and the Git runner are the ones this step already holds: the store
+ * re-proves the lease immediately before its write, and asks Git through the
+ * fenced seam whether the record's path is ignored. Never throws. A store that
+ * refuses, or one that breaks its own promise and throws, is reported and
+ * changes nothing else.
  */
-function writerLaunchOptions(deps: LoopDependencies): ClaudeWriterOptions {
-  return deps.writerGuard === undefined
-    ? { agent: leasedAgent(deps) }
-    : { agent: leasedAgent(deps), guard: deps.writerGuard };
+async function recordWriterOutcomeEvidence(
+  current: StateLoadSuccess,
+  writer: ClaudeWriterFailed,
+  deps: LoopDependencies & { readonly phase: 'IMPLEMENT' | 'REMEDIATE'; readonly round: number },
+  launchMarkNotWithdrawn: boolean,
+): Promise<WriterOutcomeEvidence> {
+  // The seam could not show that the writer's `ESTABLISHED` launch mark was
+  // withdrawn, so it may still stand, and this step must start nothing more
+  // (REQUIREMENT 7, `tests/v2-07l-execution-lease.test.ts`). The store asks Git
+  // whether its path is ignored, so it is not called at all: no Git question, no
+  // write. Decided by the launch state alone, never by the writer's code or
+  // process facts: every other failure is recorded.
+  if (launchMarkNotWithdrawn) {
+    return Object.freeze({ recorded: false, code: 'LAUNCH_MARK_NOT_WITHDRAWN' as const, path: null });
+  }
+  const state = current.state;
+  const git = leasedGit(deps);
+  try {
+    const written = await recordWriterOutcome({
+      repositoryRoot: state.repositoryRoot,
+      taskId: state.taskId,
+      entry: writerOutcomeFrom(writer, {
+        recordedAt: deps.now,
+        phase: deps.phase,
+        round: deps.round,
+      }),
+      leaseHolds: () => leaseHolds(deps),
+      checkIgnored: (relativePath) => askRuntimeIgnored(git, state.repositoryRoot, relativePath),
+    });
+    return Object.freeze({ recorded: written.recorded, code: written.code, path: written.path });
+  } catch {
+    return Object.freeze({ recorded: false, code: 'RECORDER_THREW' as const, path: null });
+  }
+}
+
+/** One writer launch: its options, and what the leased seam said about its establishment mark. */
+interface WriterLaunch {
+  readonly options: ClaudeWriterOptions;
+  /**
+   * `true` once the leased seam answered `AGENT_LAUNCH_NOT_WITHDRAWN`: the
+   * writer ran, and the seam could not show that its `ESTABLISHED` mark was
+   * withdrawn (`STALE_MARK_STANDS`, which also covers a ledger it could not
+   * read), so the mark may still stand. Read after `runClaudeWriter` returns.
+   */
+  readonly launchMarkNotWithdrawn: () => boolean;
+}
+
+/**
+ * The options both writer launches share — the leased runner, and the write guard when the caller
+ * supplied one (AO-MEMGUARD-001; absent means the production guard inside `runClaudeWriter`) — and
+ * the launch's mark state. One function for both launches, so the implement step and the fix
+ * round cannot drift apart.
+ *
+ * ── Why the mark state is read here (RM1-03A, D1) ─────────────────────────
+ *
+ * `leasedAgent` answers the distinct object `AGENT_LAUNCH_NOT_WITHDRAWN` exactly
+ * when it could not show the mark withdrawn (`STALE_MARK_STANDS`); that identity
+ * is what the seam gives its callers to name the refusal. `runClaudeWriter`
+ * copies the answer's fields into `process`, so the identity is gone one layer
+ * up, and the shape that is left is shared by results that are not this
+ * refusal. So the answer is observed here, at the seam's output, in memory: no
+ * process, no read of the ledger, nothing persisted. Only the production runner
+ * sits behind the seam, and it never returns that object; a test runner that
+ * does is read as this refusal, which is the fail-closed side.
+ *
+ * A throw out of the seam sets nothing, and needs nothing: it leaves the step
+ * without a result, so no evidence write follows it.
+ */
+function writerLaunch(deps: LoopDependencies): WriterLaunch {
+  const leased = leasedAgent(deps);
+  let launchMarkNotWithdrawn = false;
+  const agent: AgentRunner = async (id, args, cwd, payload, hooks) => {
+    const answer = await leased(id, args, cwd, payload, hooks);
+    if (answer === AGENT_LAUNCH_NOT_WITHDRAWN) launchMarkNotWithdrawn = true;
+    return answer;
+  };
+  return Object.freeze({
+    options: deps.writerGuard === undefined ? { agent } : { agent, guard: deps.writerGuard },
+    launchMarkNotWithdrawn: () => launchMarkNotWithdrawn,
+  });
 }
 
 /** The advance options, separated from the execution seams they travel with. */
@@ -2084,6 +2213,7 @@ export async function runRemediateStep(
   const before = await enforceScope(current, { ...scopeGuard, writerRan: false });
   if (before.blocked !== null) return before.blocked;
 
+  const launch = writerLaunch(deps);
   const writer = await runClaudeWriter(
     {
       worktreePath: authorisedWorktreePath,
@@ -2092,11 +2222,16 @@ export async function runRemediateStep(
       payload: cause.payload,
       mcp: deps.writerMcp,
     },
-    writerLaunchOptions(deps),
+    launch.options,
   );
 
   if (!writer.ok) {
-    return await recordInterruption(current, writer, { ...deps, phase: 'REMEDIATE', round });
+    return await recordInterruption(
+      current,
+      writer,
+      { ...deps, phase: 'REMEDIATE', round },
+      launch.launchMarkNotWithdrawn(),
+    );
   }
 
   // POST-SCOPE. Identical to the implement pass, and deliberately so: the two
@@ -2365,6 +2500,7 @@ export async function runImplementStep(
   // the readback a writer would have run `git status` for is already in hand.
   const briefing = await orchestratorBriefingFor(deps, state, before.assessment.approvedPaths);
 
+  const launch = writerLaunch(deps);
   const writer = await runClaudeWriter(
     {
       worktreePath: authorisedWorktreePath,
@@ -2373,11 +2509,16 @@ export async function runImplementStep(
       payload: buildImplementPayload(brief.brief, round, briefing),
       mcp: deps.writerMcp,
     },
-    writerLaunchOptions(deps),
+    launch.options,
   );
 
   if (!writer.ok) {
-    return await recordInterruption(current, writer, { ...deps, phase: 'IMPLEMENT', round });
+    return await recordInterruption(
+      current,
+      writer,
+      { ...deps, phase: 'IMPLEMENT', round },
+      launch.launchMarkNotWithdrawn(),
+    );
   }
 
   // POST-SCOPE. The guarantee: no mutating step is left successfully until the

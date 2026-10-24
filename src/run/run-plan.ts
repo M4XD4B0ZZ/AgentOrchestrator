@@ -43,6 +43,7 @@
  * one condition is a second opinion about what it means.
  */
 
+import { loadWriterOutcomes, type WriterOutcomeLoad } from '../agent/writer-outcome-store.js';
 import {
   loadVerificationAttempts,
   type VerificationAttemptLoad,
@@ -233,6 +234,16 @@ export interface RunPlan {
    * attempt measured, so a stale one cannot be read as a current verdict.
    */
   readonly verificationAttempts: VerificationAttemptLoad | null;
+  /**
+   * What the writer-outcome store holds for this task (RM1-03A), or `null` when
+   * no task was in hand to ask about.
+   *
+   * A display field and nothing else. It is read after the conclusion's inputs
+   * and nothing in this module consults it: the selection, the target, the
+   * state, the conclusion and the reasons are the same with the record present,
+   * absent or unreadable.
+   */
+  readonly writerOutcome: WriterOutcomeLoad | null;
 }
 
 function plan(
@@ -249,6 +260,7 @@ function plan(
     state: null,
     reasonCodes: Object.freeze([]),
     verificationAttempts: null,
+    writerOutcome: null,
     ...from,
   });
 }
@@ -361,6 +373,11 @@ export async function planRun(
     taskId: target.taskId,
   });
 
+  // The writer's last failure code, for display only (RM1-03A). A local file
+  // read, taken once the record has been reconciled and handed to every plan
+  // from here on; nothing below consults it.
+  const writerOutcome = loadWriterOutcomes(repository.root, target.taskId);
+
   // No durable state: the eligibility answer is the whole answer. A named task
   // that is `DONE` or dependency-blocked is reported as such rather than as
   // "not started", because "you could start this" would be the wrong reading.
@@ -376,6 +393,7 @@ export async function planRun(
         ineligible && target.eligibility !== null && target.eligibility.reason !== null
           ? Object.freeze([target.eligibility.reason])
           : Object.freeze([]),
+      writerOutcome,
     });
   }
 
@@ -391,6 +409,7 @@ export async function planRun(
       reconciliation,
       brief,
       state: reconciliation.load.state.state,
+      writerOutcome,
     });
   }
 
@@ -403,6 +422,7 @@ export async function planRun(
       brief,
       state: reconciliation.state?.state ?? null,
       reasonCodes: reconciliation.reasonCodes,
+      writerOutcome,
     });
   }
 
@@ -415,6 +435,7 @@ export async function planRun(
       selection,
       reconciliation,
       brief,
+      writerOutcome,
     });
   }
 
@@ -447,5 +468,6 @@ export async function planRun(
       repository.root,
       target.taskId,
     ),
+    writerOutcome,
   });
 }
