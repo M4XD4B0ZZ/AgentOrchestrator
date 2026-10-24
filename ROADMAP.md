@@ -193,6 +193,20 @@ it is a separate decision record (ADR in `docs/decisions/`) that the operator ta
     adopting a repair a person made) until an ADR adds one.
 12. **The unattended supervisor stays disabled** until the operator approves pilot P1 (Appendix A).
 
+**An amendment that waits for its activation (decision D8,
+`docs/decisions/2026-10-23-adr-risk-based-review-and-release.md`).** Boundaries 2 and 7 hold as
+written above until the operator activates the risk-based review and release in words (step M3 of
+that record), after its activation gate (T1 to T5) holds; today it is an open security gate. From
+then on, and only for the pull requests the activation names, they read:
+
+- 2\. **AO never decides that a merge is warranted** (`README.md:12-21`). A merge needs the
+  operator's explicit release, for every pull request, at its exact head, in the operator's own
+  words in the attended session. A GitHub comment or approval is not a release.
+- 7\. **Review independence.** The writer never reviews its own change. A task is not
+  delivery-ready without an independent review — by Codex, by a person, or by a fresh agent with
+  its own context. Every class of change needs one; the class sets its depth. A fork of the writer
+  is not independent, and an agent's review is never reported as a person's.
+
 **A contradiction to settle first (decision D1).** `CLAUDE.md:98-100` says opening pull requests,
 reading CI results and merging "remain outside v1" of the runtime. Since V4 (merged 2026-08-24) the
 code does all three behind attended grants (`src/deliver/`), and `README.md:12-21` says so.
@@ -730,6 +744,7 @@ Confirmed by the audit and the code; each would break a property in section 5.
 | D5 | Approve pilot P1 (Appendix A): window, tasks, review mode                                                        | RM1-09        | **open: the night pilot stays disabled**                    |
 | D6 | Where the supervisor's source lives                                                                              | RM1-10        | **decided 2026-10-19: A, in this repository (ADR first)**   |
 | D7 | Writer model and effort: may AO pass `--model` and `--effort`; which model keys (alias or pinned ID) and levels each repository may use; ultracode stays off | RM6-07        | open                                                        |
+| D8 | Risk-based review and release (ADR 2026-10-23): classes by real risk; a fresh agent can be the independent reviewer, never reported as a person; separate gates; release per exact head in the operator's words; no automatic merge | M3 | **open: E1 = 1 and E2 = 1 decided 2026-10-23 (basis; pilot #359, #360 and one more named later); B = 1 and G4 = A decided 2026-10-24; not active — OPEN SECURITY GATE: T1 to T4 of the ADR not met; T5 met today because auto-merge is off, a current configuration and not a fixed technical block** |
 
 **Operator release of 2026-10-19.** RM1-03a and RM1-10 are `APPROVED`: RM1-03a for its contract
 and implementation, RM1-10 for its ADR, migration plan and CI tests. The
